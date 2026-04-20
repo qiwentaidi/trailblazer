@@ -1,0 +1,70 @@
+# macOS / editor
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Logs and temp files
+*.log
+*.out
+*.pid
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+
+# Package manager caches
+.pnpm-store/
+
+# Frontend dependencies and build output
+frontend-admin/node_modules/
+frontend-admin/dist/
+frontend-admin/.swc/
+frontend-admin/.turbopack/
+frontend-admin/.env.local
+frontend-admin/.umirc.local.ts
+frontend-admin/config/config.local.ts
+frontend-admin/src/.umi/
+frontend-admin/src/.umi-production/
+frontend-admin/src/.umi-test/
+frontend-admin/coverage/
+
+# Go / backend local artifacts
+backend/config.yaml
+backend/*.db
+backend/*.db-*
+backend/*.sqlite
+backend/*.sqlite3
+backend/prfm-route-test
+backend/urls.txt
+backend/sourceMap/
+
+# Generated reports and example outputs
+backend/example/**/report.html
+backend/example/**/*_scan_result.json
+backend/example/**/*_summary.json
+backend/example/**/callback_result.json
+
+# Nested repository metadata
+backend/.git/
+backend/.git/**
+
+# Local product documents not needed for source control
+*.doc
+*.docx
+*.docm
+~$*.doc
+~$*.docx
+
+.vscode/
