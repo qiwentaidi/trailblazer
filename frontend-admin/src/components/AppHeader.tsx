@@ -8,16 +8,18 @@ import {
 import {
   Avatar,
   Button,
-  Dropdown,
+  Divider,
   Input,
+  Popover,
+  Space,
   Typography,
-  type MenuProps,
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { history } from 'umi';
 
-import { useAuthStore } from '@/stores/auth';
+import ChangePasswordPanel from '@/pages/settings/components/ChangePasswordPanel';
 import CreateTaskModal from '@/pages/tasks/components/CreateTaskModal';
+import { useAuthStore } from '@/stores/auth';
 
 type AppHeaderProps = {
   collapsed: boolean;
@@ -31,6 +33,7 @@ export default function AppHeader({
   const user = useAuthStore((state) => state.user);
   const logout = useAuthStore((state) => state.logout);
   const [createOpen, setCreateOpen] = useState(false);
+  const [userCardOpen, setUserCardOpen] = useState(false);
   const [locale, setLocale] = useState<'zh-CN' | 'en-US'>(() => {
     if (typeof window === 'undefined') {
       return 'zh-CN';
@@ -39,14 +42,6 @@ export default function AppHeader({
       ? 'en-US'
       : 'zh-CN';
   });
-
-  const userMenuItems: MenuProps['items'] = [
-    {
-      key: 'logout',
-      icon: <LogoutOutlined />,
-      label: '退出登录',
-    },
-  ];
 
   const changeLocale = (nextLocale: string) => {
     try {
@@ -102,6 +97,51 @@ export default function AppHeader({
 
     history.push(`/search?keyword=${encodeURIComponent(keyword)}`);
   };
+
+  const handleLogout = () => {
+    setUserCardOpen(false);
+    logout();
+    history.push('/login');
+  };
+
+  const userCardContent = (
+    <div className="app-header-user-card">
+      <div className="app-header-user-card-head">
+        <Avatar
+          size={40}
+          className="app-header-user-avatar"
+          icon={!user?.username ? <UserOutlined /> : undefined}
+        >
+          {user?.username?.slice(0, 1).toUpperCase()}
+        </Avatar>
+        <div className="app-header-user-card-meta">
+          <Typography.Text strong className="app-header-user-card-name">
+            {(user?.username || 'unknown').toUpperCase()}
+          </Typography.Text>
+          <Typography.Text type="secondary">已登录账号</Typography.Text>
+        </div>
+      </div>
+
+      <Divider style={{ margin: '16px 0' }} />
+
+      <Typography.Text strong style={{ display: 'block', marginBottom: 12 }}>
+        修改密码
+      </Typography.Text>
+      <ChangePasswordPanel
+        embedded
+        submitText="确认修改"
+        onSuccess={() => setUserCardOpen(false)}
+      />
+
+      <Divider style={{ margin: '16px 0 12px' }} />
+
+      <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+        <Button icon={<LogoutOutlined />} onClick={handleLogout}>
+          退出登录
+        </Button>
+      </Space>
+    </div>
+  );
 
   return (
     <>
@@ -162,18 +202,13 @@ export default function AppHeader({
             </span>
           </Button>
 
-          <Dropdown
-            menu={{
-              items: userMenuItems,
-              onClick: ({ key }) => {
-                if (key === 'logout') {
-                  logout();
-                  history.push('/login');
-                }
-              },
-            }}
+          <Popover
+            content={userCardContent}
             placement="bottomRight"
-            trigger={['click']}
+            trigger="click"
+            open={userCardOpen}
+            onOpenChange={setUserCardOpen}
+            overlayClassName="app-header-user-popover"
           >
             <button type="button" className="app-header-user">
               <Avatar
@@ -189,7 +224,7 @@ export default function AppHeader({
                 </Typography.Text>
               </div>
             </button>
-          </Dropdown>
+          </Popover>
         </div>
       </div>
       <CreateTaskModal

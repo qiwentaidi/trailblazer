@@ -9,8 +9,8 @@ export const meta = {
 };
 
 export const actions = {
-  async getDashboard() {
-    return dashSvc.getDashboard();
+  async getDashboardSnapshot() {
+    return dashSvc.getDashboardSnapshot();
   },
 };
 

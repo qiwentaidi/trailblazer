@@ -7,6 +7,7 @@ type BasicConfigPanelProps = {
     blackDomain: string[]
     highRiskRouter: string[]
     authentication: string[]
+    learnedAuthentication: string[]
     placeholder: Record<string, string>
   }
   onChange: (value: BasicConfigPanelProps['value']) => void
@@ -172,6 +173,25 @@ export default function BasicConfigPanel({ value, onChange }: BasicConfigPanelPr
             }}
             onRemove={(index) => removeListItem('authentication', index)}
           />
+        </Col>
+        <Col xs={24} xl={12}>
+          <Card size="small" title="自动学习的鉴权词组">
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Typography.Text type="secondary">
+                这里展示后端运行过程中自动学习到的鉴权拦截短语，实时生效，仅展示不参与当前页面保存。
+              </Typography.Text>
+              <Space wrap>
+                {value.learnedAuthentication.map((item, index) => (
+                  <Tag key={`learned-auth-${item}-${index}`} color="gold">
+                    {item}
+                  </Tag>
+                ))}
+                {value.learnedAuthentication.length === 0 ? (
+                  <Typography.Text type="secondary">暂无自动学习结果</Typography.Text>
+                ) : null}
+              </Space>
+            </Space>
+          </Card>
         </Col>
         <Col xs={24} xl={12}>
           <Card size="small" title="占位符">

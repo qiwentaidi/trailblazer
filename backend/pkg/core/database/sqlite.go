@@ -57,6 +57,17 @@ func InitSQLite(dbPath string) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_js_rules_created ON js_rules(created_at DESC);
 
+	CREATE TABLE IF NOT EXISTS learned_auth_patterns (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		pattern TEXT NOT NULL UNIQUE,
+		source TEXT DEFAULT '',
+		hit_count INTEGER DEFAULT 1,
+		enabled BOOLEAN DEFAULT 1,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_learned_auth_patterns_enabled ON learned_auth_patterns(enabled, updated_at DESC);
+
 	CREATE TABLE IF NOT EXISTS task_versions (
 		task_id TEXT NOT NULL,
 		version INTEGER NOT NULL,
@@ -75,6 +86,79 @@ func InitSQLite(dbPath string) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_task_versions_task_created ON task_versions(task_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_versions_task_latest ON task_versions(task_id, is_latest);
+
+	CREATE TABLE IF NOT EXISTS browser_sessions (
+		session_id TEXT PRIMARY KEY NOT NULL,
+		site_host TEXT NOT NULL,
+		entry_url TEXT NOT NULL,
+		status TEXT NOT NULL,
+		mode TEXT NOT NULL,
+		browser_mode TEXT DEFAULT '',
+		proxy_type TEXT DEFAULT '',
+		proxy_address TEXT DEFAULT '',
+		browser_visible BOOLEAN DEFAULT 1,
+		page_count INTEGER DEFAULT 0,
+		request_count INTEGER DEFAULT 0,
+		suspicious_crypto_count INTEGER DEFAULT 0,
+		started_at DATETIME NOT NULL,
+		ended_at DATETIME,
+		last_activity_at DATETIME NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_browser_sessions_started ON browser_sessions(started_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_browser_sessions_site_host ON browser_sessions(site_host, started_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_browser_sessions_status ON browser_sessions(status, started_at DESC);
+
+	CREATE TABLE IF NOT EXISTS browser_pages (
+		page_id TEXT PRIMARY KEY NOT NULL,
+		session_id TEXT NOT NULL,
+		url TEXT NOT NULL,
+		title TEXT DEFAULT '',
+		is_entry BOOLEAN DEFAULT 0,
+		created_at DATETIME NOT NULL,
+		last_seen_at DATETIME NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_browser_pages_session_created ON browser_pages(session_id, created_at ASC);
+
+	CREATE TABLE IF NOT EXISTS browser_session_requests (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL,
+		trace_id TEXT DEFAULT '',
+		url TEXT NOT NULL,
+		method TEXT NOT NULL,
+		resource_type TEXT DEFAULT '',
+		request_headers TEXT DEFAULT '{}',
+		request_body TEXT DEFAULT '',
+		response_headers TEXT DEFAULT '{}',
+		response_body TEXT DEFAULT '',
+		response_code INTEGER DEFAULT 0,
+		mime_type TEXT DEFAULT '',
+		has_protocol_trace BOOLEAN DEFAULT 0,
+		is_suspicious BOOLEAN DEFAULT 0,
+		suspicious_trace TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_browser_session_requests_session_created ON browser_session_requests(session_id, created_at DESC, id DESC);
+
+	CREATE TABLE IF NOT EXISTS browser_session_traces (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL,
+		trace_id TEXT NOT NULL,
+		request_url TEXT NOT NULL,
+		method TEXT NOT NULL,
+		algorithms TEXT NOT NULL,
+		request_before_transform TEXT DEFAULT '',
+		final_request_body TEXT DEFAULT '',
+		request_steps TEXT DEFAULT '[]',
+		response_steps TEXT DEFAULT '[]',
+		session_materials TEXT DEFAULT '{}',
+		response_plaintext TEXT DEFAULT '',
+		response_ciphertext TEXT DEFAULT '',
+		suspicious_reason TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_browser_session_traces_session_created ON browser_session_traces(session_id, created_at DESC);
 	`
 
 	if _, err := DB.Exec(schema); err != nil {
@@ -84,6 +168,12 @@ func InitSQLite(dbPath string) error {
 	// 数据库迁移：确保 tasks 表包含 highest_risk_level 列
 	if err := migrateTasksTable(); err != nil {
 		log.Printf("Warning: Failed to migrate tasks table: %v", err)
+	}
+	if err := migrateBrowserSessionTracesTable(); err != nil {
+		log.Printf("Warning: Failed to migrate browser_session_traces table: %v", err)
+	}
+	if err := migrateBrowserSessionRequestsTable(); err != nil {
+		log.Printf("Warning: Failed to migrate browser_session_requests table: %v", err)
 	}
 
 	// 预置 JS 示例规则（仅在表为空时）
@@ -144,6 +234,86 @@ func migrateTasksTable() error {
 	return nil
 }
 
+func migrateBrowserSessionTracesTable() error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	columns := []struct {
+		name string
+		sql  string
+	}{
+		{"request_steps", "ALTER TABLE browser_session_traces ADD COLUMN request_steps TEXT DEFAULT '[]'"},
+		{"response_steps", "ALTER TABLE browser_session_traces ADD COLUMN response_steps TEXT DEFAULT '[]'"},
+		{"session_materials", "ALTER TABLE browser_session_traces ADD COLUMN session_materials TEXT DEFAULT '{}'"},
+	}
+
+	for _, col := range columns {
+		var count int
+		err := DB.QueryRow(`
+			SELECT COUNT(*) FROM pragma_table_info('browser_session_traces') WHERE name=?
+		`, col.name).Scan(&count)
+		if err != nil {
+			log.Printf("Warning: Failed to check browser_session_traces column %s: %v\n", col.name, err)
+			continue
+		}
+
+		if count == 0 {
+			if _, err := DB.Exec(col.sql); err != nil {
+				log.Printf("Warning: Failed to add browser_session_traces column %s: %v\n", col.name, err)
+				continue
+			}
+			log.Printf("Added column %s to browser_session_traces table\n", col.name)
+		}
+	}
+
+	return nil
+}
+
+func migrateBrowserSessionRequestsTable() error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	columns := []struct {
+		name string
+		sql  string
+	}{
+		{"trace_id", "ALTER TABLE browser_session_requests ADD COLUMN trace_id TEXT DEFAULT ''"},
+		{"resource_type", "ALTER TABLE browser_session_requests ADD COLUMN resource_type TEXT DEFAULT ''"},
+		{"request_headers", "ALTER TABLE browser_session_requests ADD COLUMN request_headers TEXT DEFAULT '{}'"},
+		{"request_body", "ALTER TABLE browser_session_requests ADD COLUMN request_body TEXT DEFAULT ''"},
+		{"response_headers", "ALTER TABLE browser_session_requests ADD COLUMN response_headers TEXT DEFAULT '{}'"},
+		{"response_body", "ALTER TABLE browser_session_requests ADD COLUMN response_body TEXT DEFAULT ''"},
+		{"response_code", "ALTER TABLE browser_session_requests ADD COLUMN response_code INTEGER DEFAULT 0"},
+		{"mime_type", "ALTER TABLE browser_session_requests ADD COLUMN mime_type TEXT DEFAULT ''"},
+		{"has_protocol_trace", "ALTER TABLE browser_session_requests ADD COLUMN has_protocol_trace BOOLEAN DEFAULT 0"},
+		{"is_suspicious", "ALTER TABLE browser_session_requests ADD COLUMN is_suspicious BOOLEAN DEFAULT 0"},
+		{"suspicious_trace", "ALTER TABLE browser_session_requests ADD COLUMN suspicious_trace TEXT DEFAULT ''"},
+	}
+
+	for _, col := range columns {
+		var count int
+		err := DB.QueryRow(`
+			SELECT COUNT(*) FROM pragma_table_info('browser_session_requests') WHERE name=?
+		`, col.name).Scan(&count)
+		if err != nil {
+			log.Printf("Warning: Failed to check browser_session_requests column %s: %v\n", col.name, err)
+			continue
+		}
+
+		if count == 0 {
+			if _, err := DB.Exec(col.sql); err != nil {
+				log.Printf("Warning: Failed to add browser_session_requests column %s: %v\n", col.name, err)
+				continue
+			}
+			log.Printf("Added column %s to browser_session_requests table\n", col.name)
+		}
+	}
+
+	return nil
+}
+
 // JSRule 自定义JS搜索规则
 type JSRule struct {
 	ID        int64     `json:"id"`
@@ -190,6 +360,53 @@ func DeleteJSRule(id int64) error {
 		return fmt.Errorf("database not initialized")
 	}
 	_, err := DB.Exec(`DELETE FROM js_rules WHERE id = ?`, id)
+	return err
+}
+
+func ListEnabledLearnedAuthPatterns() ([]string, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+
+	rows, err := DB.Query(`SELECT pattern FROM learned_auth_patterns WHERE enabled = 1 ORDER BY hit_count DESC, updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var patterns []string
+	for rows.Next() {
+		var pattern string
+		if err := rows.Scan(&pattern); err == nil {
+			patterns = append(patterns, pattern)
+		}
+	}
+	return patterns, nil
+}
+
+func UpsertLearnedAuthPattern(pattern, source string) error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	pattern = strings.TrimSpace(pattern)
+	source = strings.TrimSpace(source)
+	if pattern == "" {
+		return nil
+	}
+
+	_, err := DB.Exec(`
+		INSERT INTO learned_auth_patterns(pattern, source, hit_count, enabled, created_at, updated_at)
+		VALUES (?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(pattern) DO UPDATE SET
+			source = CASE
+				WHEN excluded.source <> '' THEN excluded.source
+				ELSE learned_auth_patterns.source
+			END,
+			hit_count = learned_auth_patterns.hit_count + 1,
+			enabled = 1,
+			updated_at = CURRENT_TIMESTAMP
+	`, pattern, source)
 	return err
 }
 
@@ -722,6 +939,20 @@ func SaveUser(user User) (int64, error) {
 	return result.LastInsertId()
 }
 
+// CountUsers 统计用户总数
+func CountUsers() (int64, error) {
+	if DB == nil {
+		return 0, fmt.Errorf("database not initialized")
+	}
+
+	var count int64
+	if err := DB.QueryRow(`SELECT COUNT(1) FROM users`).Scan(&count); err != nil {
+		return 0, err
+	}
+
+	return count, nil
+}
+
 // GetUserByUsername 根据用户名获取用户
 func GetUserByUsername(username string) (*User, error) {
 	if DB == nil {
@@ -742,6 +973,21 @@ func GetUserByUsername(username string) (*User, error) {
 	}
 
 	return &user, nil
+}
+
+// UpdateUserPasswordByUsername 按用户名更新密码
+func UpdateUserPasswordByUsername(username, hashedPassword string) error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	_, err := DB.Exec(`
+		UPDATE users
+		SET password=?, updated_at=?
+		WHERE username=?
+	`, hashedPassword, time.Now(), username)
+
+	return err
 }
 
 // GetAllUsers 获取所有用户

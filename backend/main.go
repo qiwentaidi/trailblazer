@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 	"trailblazer/pkg/config"
-	"trailblazer/pkg/core/auth"
 	"trailblazer/pkg/core/database"
 	cliscan "trailblazer/pkg/lib"
 	"trailblazer/pkg/web"
+	"trailblazer/webassets"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -64,6 +64,11 @@ func main() {
 						Name:  "config",
 						Usage: "配置文件路径",
 						Value: "config.yaml",
+					},
+					&cli.StringFlag{
+						Name:  "frontend-dev-url",
+						Usage: "前端开发服务器地址；设置后会将非 /api 请求反代到该地址，例如 http://127.0.0.1:8000",
+						Value: "",
 					},
 				},
 				Action: runWebMode,
@@ -165,15 +170,11 @@ func removeDuplicateURLs(urls []string) []string {
 // runWebMode 运行Web模式
 func runWebMode(c *cli.Context) error {
 	configPath := c.String("config")
+	frontendDevURL := c.String("frontend-dev-url")
 
 	// 初始化SQLite
 	if err := database.InitSQLite("./tasks.db"); err != nil {
 		log.Printf("Warning: Failed to init SQLite: %v", err)
-	}
-
-	// 初始化默认用户
-	if err := auth.InitializeDefaultUser(); err != nil {
-		log.Printf("Warning: Failed to initialize default user: %v", err)
 	}
 
 	// 加载配置文件
@@ -204,10 +205,6 @@ func runWebMode(c *cli.Context) error {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	r.Static("/assets", "./dist/assets")         // 静态资源
-	r.StaticFile("/", "./dist/index.html")       // 首页
-	r.StaticFile("/icon.svg", "./dist/icon.svg") // 网站图标
-
 	// 配置 CORS
 	corsConfig := cors.DefaultConfig()
 	corsConfig.AllowOrigins = []string{"*"}
@@ -216,6 +213,9 @@ func runWebMode(c *cli.Context) error {
 	corsConfig.AllowCredentials = true
 	r.Use(cors.New(corsConfig))
 	web.RegisterRoutes(r)
+	if err := webassets.Register(r, frontendDevURL); err != nil {
+		return fmt.Errorf("failed to register frontend assets: %w", err)
+	}
 
 	// 设置Gin模式
 	if webConfig.Debug {

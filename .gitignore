@@ -42,6 +42,8 @@ frontend-admin/coverage/
 
 # Go / backend local artifacts
 backend/config.yaml
+backend/webassets/dist/*
+!backend/webassets/dist/.keep
 backend/*.db
 backend/*.db-*
 backend/*.sqlite
@@ -68,3 +70,4 @@ backend/.git/**
 ~$*.docx
 
 .vscode/
+release/

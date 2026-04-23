@@ -21,6 +21,8 @@ func RegisterRoutes(r *gin.Engine) {
 		// 认证相关路由（无需认证）
 		authGroup := api.Group("/auth")
 		{
+			authGroup.GET("/status", auth.GetAuthStatusHandler)
+			authGroup.POST("/initialize", auth.InitializeAccountHandler)
 			authGroup.POST("/login", auth.LoginHandler)
 			authGroup.POST("/logout", auth.LogoutHandler)
 		}
@@ -29,6 +31,7 @@ func RegisterRoutes(r *gin.Engine) {
 		protected := api.Group("")
 		protected.Use(auth.AuthMiddleware())
 		{
+			protected.POST("/auth/change-password", auth.ChangePasswordHandler)
 			// 用户信息
 			protected.GET("/user/info", auth.GetUserInfoHandler)
 
@@ -60,7 +63,14 @@ func RegisterRoutes(r *gin.Engine) {
 			protected.DELETE("/task/:taskId/tested-urls", clearTaskTestedURLs)
 			protected.GET("/task/:taskId/report", exportTaskReport)
 			protected.DELETE("/vuln/:vulnId", deleteVuln)
+			protected.PATCH("/vuln/:vulnId/status", updateVulnStatus)
 			protected.DELETE("/task/:taskId/vuln-clusters/:clusterId", deleteVulnCluster)
+
+			// 受控浏览器会话
+			protected.GET("/browser-sessions", getBrowserSessions)
+			protected.GET("/browser-sessions/:sessionId", getBrowserSessionDetail)
+			protected.POST("/browser-sessions/launch", launchBrowserSession)
+			protected.DELETE("/browser-sessions/:sessionId", deleteBrowserSession)
 
 			// 本地任务管理（SQLite）
 			protected.GET("/task/records", getTasks)
@@ -118,12 +128,13 @@ func generateSiteMap(c *gin.Context) {
 }
 
 type Config struct {
-	OpenAI         config.OpenAI        `yaml:"openai" json:"openai"`
-	BlackDomain    []string             `yaml:"black-domain" json:"blackDomain"`
-	HighRiskRouter []string             `yaml:"high-risk-router" json:"highRiskRouter"`
-	Authentication []string             `yaml:"authentication" json:"authentication"`
-	Placeholder    map[string]string    `yaml:"placeholder" json:"placeholder"`
-	VulnDetection  config.VulnDetection `yaml:"vuln-detection" json:"vulnDetection"`
+	OpenAI                config.OpenAI        `yaml:"openai" json:"openai"`
+	BlackDomain           []string             `yaml:"black-domain" json:"blackDomain"`
+	HighRiskRouter        []string             `yaml:"high-risk-router" json:"highRiskRouter"`
+	Authentication        []string             `yaml:"authentication" json:"authentication"`
+	LearnedAuthentication []string             `json:"learnedAuthentication"`
+	Placeholder           map[string]string    `yaml:"placeholder" json:"placeholder"`
+	VulnDetection         config.VulnDetection `yaml:"vuln-detection" json:"vulnDetection"`
 }
 
 const configPath = "config.yaml"
@@ -143,13 +154,19 @@ func getConfig(c *gin.Context) {
 	}
 
 	// 只返回前端需要的配置，排除数据库配置
+	learnedAuthentication, err := database.ListEnabledLearnedAuthPatterns()
+	if err != nil {
+		learnedAuthentication = []string{}
+	}
+
 	frontendConfig := Config{
-		OpenAI:         fullConfig.OpenAI,
-		BlackDomain:    fullConfig.BlackDomain,
-		HighRiskRouter: fullConfig.HighRiskRouter,
-		Authentication: fullConfig.Authentication,
-		Placeholder:    fullConfig.Placeholder,
-		VulnDetection:  fullConfig.VulnDetection,
+		OpenAI:                fullConfig.OpenAI,
+		BlackDomain:           fullConfig.BlackDomain,
+		HighRiskRouter:        fullConfig.HighRiskRouter,
+		Authentication:        fullConfig.Authentication,
+		LearnedAuthentication: learnedAuthentication,
+		Placeholder:           fullConfig.Placeholder,
+		VulnDetection:         fullConfig.VulnDetection,
 	}
 
 	// 若未配置 SQL 注入规则与 payloads，则返回内置默认规则用于展示（不再因 enabled=false 而强制覆盖）

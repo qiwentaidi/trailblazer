@@ -7,15 +7,9 @@
  * - `listSkills()`：返回所有 skill 的 meta 数组，便于展示或自动选择。
  * - `getSkillById(id)`：基于 meta.id 查找对应 skill 模块。
  */
-import admin from './admin.skill';
 import dashboard from './dashboard.skill';
-import menu from './menu.skill';
-import user from './user.skill';
 
 const skills: Record<string, any> = {
-  admin,
-  menu,
-  user,
   dashboard,
 };
 

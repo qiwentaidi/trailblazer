@@ -36,7 +36,7 @@ function LocaleWrapper({ children }: { children: React.ReactElement }) {
     };
 
     const onLocaleChange = (ev: Event) => {
-      // CustomEvent used by TopbarControls with detail = locale string
+      // CustomEvent detail carries the locale string when header controls switch language.
       const possible = ev as CustomEvent | Event;
       if (possible && typeof (possible as CustomEvent).detail !== 'undefined') {
         const d = (possible as CustomEvent).detail;

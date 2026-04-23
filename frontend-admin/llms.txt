@@ -28,9 +28,6 @@ API 与约定：
 
 Agent Skills：
 - 为方便自动化代理（Agent/LLM）调用，项目在 `llm/skills/` 下提供了若干能力描述与包装：
-	- `llm/skills/admin.skill.ts`：管理员管理相关操作（login、logout、list/create/update/delete）
-	- `llm/skills/menu.skill.ts`：菜单管理操作（list/create/update/delete/sort）
-	- `llm/skills/user.skill.ts`：用户管理操作（list/create/get/update/delete/batch）
-	- `llm/skills/dashboard.skill.ts`：获取仪表盘数据的读取操作
+	- `llm/skills/dashboard.skill.ts`：获取仪表盘汇总数据的读取操作
 
 这些 skill 文件导出 `meta`（能力描述）和 `actions`（可直接调用的异步函数），便于代理在运行时发现并调用对应后端逻辑。

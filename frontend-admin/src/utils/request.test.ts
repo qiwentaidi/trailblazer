@@ -14,7 +14,9 @@ describe('api', () => {
       status: 200,
       json: async () => ({ success: true, data: { id: 1 } }),
     });
-    const data = await api<{ id: number }>('/items', { params: { q: 'a' } });
+    const data = await api.get<{ id: number }>('/items', {
+      params: { q: 'a' },
+    });
     expect(data).toEqual({ id: 1 });
     expect(global.fetch).toBeCalledWith(
       '/api/v1/items?q=a',
@@ -33,7 +35,7 @@ describe('api', () => {
         json: async () => ({ success: true, data: null }),
       });
     });
-    await api('/me', {});
+    await api.get('/me', {});
     expect(capturedReq.headers.Authorization).toBe('Bearer tok');
   });
 
@@ -42,7 +44,7 @@ describe('api', () => {
     (global.fetch as jest.Mock).mockRejectedValue(err);
     const spy = jest.spyOn(message, 'error') as jest.SpyInstance<any, any>;
     spy.mockImplementation(() => ({}) as any);
-    await expect(api('/x')).rejects.toThrow('net fail');
+    await expect(api.get('/x')).rejects.toThrow('net fail');
     expect(spy).toBeCalledWith('net fail');
     spy.mockRestore();
   });
@@ -55,7 +57,7 @@ describe('api', () => {
     });
     const spy = jest.spyOn(message, 'error') as jest.SpyInstance<any, any>;
     spy.mockImplementation(() => ({}) as any);
-    await expect(api('/x')).rejects.toThrow('Invalid API response format');
+    await expect(api.get('/x')).rejects.toThrow('Invalid API response format');
     expect(spy).toBeCalledWith('Invalid API response format');
     spy.mockRestore();
   });

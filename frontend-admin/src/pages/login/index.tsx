@@ -1,22 +1,44 @@
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
-import { Button, Card, Form, Input, message, Typography } from 'antd';
-import { useEffect } from 'react';
+import { Button, Card, Form, Input, message, Spin, Typography } from 'antd';
+import { useEffect, useState } from 'react';
 import { history } from 'umi';
 
-import adminService from '@/services/admin';
-import { checkESHealth } from '@/services/auth';
-import useGlobalStore from '@/store/useGlobalStore';
+import {
+  checkESHealth,
+  getAuthStatus,
+  initializeAccount,
+} from '@/services/auth';
 import { useAuthStore } from '@/stores/auth';
-import type { LoginRequest } from '@/types/auth';
+import type { InitAccountRequest, LoginRequest } from '@/types/auth';
 import config from '@/utils/config';
-import { readStoredAuthToken } from '@/utils/session';
 import styles from './index.module.less';
 
 export default function Login() {
-  const [form] = Form.useForm<LoginRequest>();
+  const [loginForm] = Form.useForm<LoginRequest>();
+  const [initForm] = Form.useForm<
+    InitAccountRequest & { confirmPassword: string }
+  >();
   const login = useAuthStore((state) => state.login);
   const loading = useAuthStore((state) => state.loading);
   const token = useAuthStore((state) => state.token);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [initialized, setInitialized] = useState(true);
+
+  const loadAuthStatus = async () => {
+    setStatusLoading(true);
+    try {
+      const status = await getAuthStatus();
+      setInitialized(status.initialized);
+    } catch {
+      message.error('无法获取账号初始化状态');
+    } finally {
+      setStatusLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadAuthStatus();
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -42,21 +64,6 @@ export default function Login() {
       return;
     }
 
-    const storedToken = localStorage.getItem('auth_token');
-    if (storedToken) {
-      useGlobalStore.getState().login(storedToken);
-    }
-    const sessionToken = readStoredAuthToken();
-
-    try {
-      const currentAdmin = await adminService.currentAdmin();
-      if (currentAdmin && readStoredAuthToken() === sessionToken) {
-        useGlobalStore.getState().setCurrentUser(currentAdmin);
-      }
-    } catch {
-      // Login succeeded; legacy admin bootstrap is best-effort only.
-    }
-
     message.success('登录成功');
 
     try {
@@ -73,6 +80,36 @@ export default function Login() {
     history.push('/tasks');
   };
 
+  const handleInitialize = async (
+    values: InitAccountRequest & { confirmPassword: string },
+  ) => {
+    if (values.password !== values.confirmPassword) {
+      message.error('两次输入的密码不一致');
+      return;
+    }
+
+    try {
+      await initializeAccount({
+        username: values.username.trim(),
+        password: values.password,
+      });
+      message.success('管理员账号初始化成功，请使用新账号登录');
+      setInitialized(true);
+      initForm.resetFields();
+      loginForm.setFieldValue('username', values.username.trim());
+      await handleSubmit({
+        username: values.username.trim(),
+        password: values.password,
+      });
+    } catch (error) {
+      message.error(
+        (error as { data?: { error?: string } })?.data?.error ||
+          '初始化账号失败',
+      );
+      void loadAuthStatus();
+    }
+  };
+
   return (
     <div className={styles.page}>
       <div className={styles.form}>
@@ -87,38 +124,109 @@ export default function Login() {
           <Typography.Paragraph
             style={{ textAlign: 'center', marginBottom: 24 }}
           >
-            请使用您的账户登录
+            {initialized
+              ? '请使用您的账户登录'
+              : '首次使用请先初始化管理员账号'}
           </Typography.Paragraph>
 
-          <Form
-            form={form}
-            layout="vertical"
-            onFinish={handleSubmit}
-            requiredMark={false}
-          >
-            <Form.Item
-              name="username"
-              label="用户名"
-              rules={[{ required: true, message: '请输入用户名' }]}
-            >
-              <Input prefix={<UserOutlined />} autoComplete="username" />
-            </Form.Item>
+          <Spin spinning={statusLoading}>
+            {initialized ? (
+              <Form
+                form={loginForm}
+                layout="vertical"
+                onFinish={handleSubmit}
+                requiredMark={false}
+              >
+                <Form.Item
+                  name="username"
+                  label="用户名"
+                  rules={[{ required: true, message: '请输入用户名' }]}
+                >
+                  <Input prefix={<UserOutlined />} autoComplete="username" />
+                </Form.Item>
 
-            <Form.Item
-              name="password"
-              label="密码"
-              rules={[{ required: true, message: '请输入密码' }]}
-            >
-              <Input.Password
-                prefix={<LockOutlined />}
-                autoComplete="current-password"
-              />
-            </Form.Item>
+                <Form.Item
+                  name="password"
+                  label="密码"
+                  rules={[{ required: true, message: '请输入密码' }]}
+                >
+                  <Input.Password
+                    prefix={<LockOutlined />}
+                    autoComplete="current-password"
+                  />
+                </Form.Item>
 
-            <Button type="primary" htmlType="submit" block loading={loading}>
-              登录
-            </Button>
-          </Form>
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  block
+                  loading={loading}
+                >
+                  登录
+                </Button>
+              </Form>
+            ) : (
+              <Form
+                form={initForm}
+                layout="vertical"
+                onFinish={handleInitialize}
+                requiredMark={false}
+              >
+                <Form.Item
+                  name="username"
+                  label="管理员账号"
+                  rules={[
+                    { required: true, message: '请输入管理员账号' },
+                    { min: 3, message: '用户名至少需要 3 个字符' },
+                  ]}
+                >
+                  <Input prefix={<UserOutlined />} autoComplete="username" />
+                </Form.Item>
+
+                <Form.Item
+                  name="password"
+                  label="管理员密码"
+                  rules={[
+                    { required: true, message: '请输入管理员密码' },
+                    { min: 8, message: '密码至少需要 8 个字符' },
+                  ]}
+                >
+                  <Input.Password
+                    prefix={<LockOutlined />}
+                    autoComplete="new-password"
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  name="confirmPassword"
+                  label="确认密码"
+                  dependencies={['password']}
+                  rules={[
+                    { required: true, message: '请再次输入密码' },
+                    ({ getFieldValue }) => ({
+                      validator(_, value) {
+                        if (!value || getFieldValue('password') === value) {
+                          return Promise.resolve();
+                        }
+                        return Promise.reject(
+                          new Error('两次输入的密码不一致'),
+                        );
+                      },
+                    }),
+                  ]}
+                >
+                  <Input.Password
+                    prefix={<LockOutlined />}
+                    autoComplete="new-password"
+                  />
+                </Form.Item>
+
+                <Button type="primary" htmlType="submit" block>
+                  初始化并登录
+                </Button>
+              </Form>
+            )}
+          </Spin>
         </Card>
       </div>
     </div>

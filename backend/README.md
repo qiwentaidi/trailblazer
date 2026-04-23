@@ -68,6 +68,46 @@ cd backend
 go build -o trailblazer main.go
 ```
 
+#### 一体化打包前后端
+
+仓库根目录已提供一体化构建脚本，会先构建 `frontend-admin`，再将产物复制到 `backend/webassets/dist` 并嵌入 Go 二进制。
+
+快速构建当前平台：
+
+```bash
+./build.sh current
+```
+
+尝试多平台构建：
+
+```bash
+./build.sh all
+```
+
+构建产物默认输出到仓库根目录 `dist/`。当前平台快速构建也可继续使用兼容脚本：
+
+```bash
+bash scripts/build-standalone.sh
+```
+
+#### 本地联调前端热更新
+
+如果你希望继续用后端统一入口，同时让前端保持 `umi dev` 热更新，可以先启动前端开发服务器：
+
+```bash
+cd ../frontend-admin
+pnpm dev
+```
+
+然后启动后端，并把非 `/api` 请求反代到前端开发服务器：
+
+```bash
+cd ../backend
+go run main.go web -config config.yaml --frontend-dev-url http://127.0.0.1:8000
+```
+
+这样浏览器仍然访问后端端口，但页面资源和 HMR 请求会走前端 dev server。
+
 #### 子命令
 
 - `cli`：命令行扫描模式

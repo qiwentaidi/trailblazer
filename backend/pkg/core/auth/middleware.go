@@ -54,12 +54,29 @@ type LoginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+// InitAccountRequest 初始化账号请求结构
+type InitAccountRequest struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// ChangePasswordRequest 修改密码请求结构
+type ChangePasswordRequest struct {
+	OldPassword string `json:"oldPassword" binding:"required"`
+	NewPassword string `json:"newPassword" binding:"required"`
+}
+
 // LoginResponse 登录响应结构
 type LoginResponse struct {
 	Token    string `json:"token"`
 	Username string `json:"username"`
 	Role     string `json:"role"`
 	Message  string `json:"message"`
+}
+
+// AuthStatusResponse 认证初始化状态
+type AuthStatusResponse struct {
+	Initialized bool `json:"initialized"`
 }
 
 // UserInfo 用户信息结构

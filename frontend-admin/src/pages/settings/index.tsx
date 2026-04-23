@@ -1,76 +1,87 @@
-import { Button, Card, Collapse, Tag, message, Space, Spin, Typography } from 'antd'
-import { useEffect, useState } from 'react'
+import {
+  Button,
+  Card,
+  Collapse,
+  message,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+} from 'antd';
+import { useEffect, useState } from 'react';
 
-import AIConfigForm from './components/AIConfigForm'
-import BasicConfigPanel from './components/BasicConfigPanel'
-import SystemStatusPanel from './components/SystemStatusPanel'
-import VulnRulesPanel from './components/VulnRulesPanel'
 import {
   checkEsHealth,
   createDefaultSettings,
   getSettings,
   saveSettings,
-} from '@/services/settings'
-import type { SettingsConfig, SystemStatus } from '@/types/settings'
+} from '@/services/settings';
+import type { SettingsConfig, SystemStatus } from '@/types/settings';
+import AIConfigForm from './components/AIConfigForm';
+import BasicConfigPanel from './components/BasicConfigPanel';
+import SystemStatusPanel from './components/SystemStatusPanel';
+import VulnRulesPanel from './components/VulnRulesPanel';
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState<SettingsConfig>(createDefaultSettings())
-  const [loading, setLoading] = useState(false)
-  const [settingsInitialized, setSettingsInitialized] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [healthLoading, setHealthLoading] = useState(false)
+  const [settings, setSettings] = useState<SettingsConfig>(
+    createDefaultSettings(),
+  );
+  const [loading, setLoading] = useState(false);
+  const [settingsInitialized, setSettingsInitialized] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [healthLoading, setHealthLoading] = useState(false);
   const [systemStatus, setSystemStatus] = useState<SystemStatus>({
     connected: false,
     message: '未检查',
-  })
+  });
 
   const loadSettings = async () => {
-    setLoading(true)
+    setLoading(true);
     try {
-      const nextSettings = await getSettings()
-      setSettings(nextSettings)
-      setSettingsInitialized(true)
-    } catch (error) {
-      setSettingsInitialized(false)
-      message.error('加载配置失败')
+      const nextSettings = await getSettings();
+      setSettings(nextSettings);
+      setSettingsInitialized(true);
+    } catch {
+      setSettingsInitialized(false);
+      message.error('加载配置失败');
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   const loadSystemStatus = async () => {
-    setHealthLoading(true)
+    setHealthLoading(true);
     try {
-      const nextStatus = await checkEsHealth()
-      setSystemStatus(nextStatus)
-    } catch (error) {
+      const nextStatus = await checkEsHealth();
+      setSystemStatus(nextStatus);
+    } catch {
       setSystemStatus({
         connected: false,
         message: '检查失败',
         error: '网络请求失败',
-      })
-      message.error('检查连接失败')
+      });
+      message.error('检查连接失败');
     } finally {
-      setHealthLoading(false)
+      setHealthLoading(false);
     }
-  }
+  };
 
   const handleSave = async () => {
-    setSaving(true)
+    setSaving(true);
     try {
-      await saveSettings(settings)
-      message.success('配置已保存')
-    } catch (error) {
-      message.error('保存配置失败')
+      await saveSettings(settings);
+      message.success('配置已保存');
+    } catch {
+      message.error('保存配置失败');
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
-  }
+  };
 
   useEffect(() => {
-    void loadSettings()
-    void loadSystemStatus()
-  }, [])
+    void loadSettings();
+    void loadSystemStatus();
+  }, []);
 
   return (
     <Card
@@ -93,7 +104,8 @@ export default function SettingsPage() {
       }
     >
       <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
-        当前页已补齐旧版基础配置、AI 配置、漏洞规则和系统状态检查，保存行为保持不变。
+        当前页已补齐旧版基础配置、AI
+        配置、漏洞规则和系统状态检查，保存行为保持不变。
       </Typography.Paragraph>
 
       <Spin spinning={loading}>
@@ -107,7 +119,12 @@ export default function SettingsPage() {
                 <Space wrap>
                   <Typography.Text strong>基础配置</Typography.Text>
                   <Tag color="blue">
-                    {settings.blackDomain.length + settings.highRiskRouter.length + settings.authentication.length + Object.keys(settings.placeholder).length} 项
+                    {settings.blackDomain.length +
+                      settings.highRiskRouter.length +
+                      settings.authentication.length +
+                      settings.learnedAuthentication.length +
+                      Object.keys(settings.placeholder).length}{' '}
+                    项
                   </Tag>
                 </Space>
               ),
@@ -117,6 +134,7 @@ export default function SettingsPage() {
                     blackDomain: settings.blackDomain,
                     highRiskRouter: settings.highRiskRouter,
                     authentication: settings.authentication,
+                    learnedAuthentication: settings.learnedAuthentication,
                     placeholder: settings.placeholder,
                   }}
                   onChange={(basicSettings) =>
@@ -125,6 +143,8 @@ export default function SettingsPage() {
                       blackDomain: basicSettings.blackDomain,
                       highRiskRouter: basicSettings.highRiskRouter,
                       authentication: basicSettings.authentication,
+                      learnedAuthentication:
+                        basicSettings.learnedAuthentication,
                       placeholder: basicSettings.placeholder,
                     }))
                   }
@@ -158,7 +178,11 @@ export default function SettingsPage() {
               label: (
                 <Space wrap>
                   <Typography.Text strong>漏洞规则</Typography.Text>
-                  <Tag color={settings.vulnDetection.enabled ? 'processing' : 'default'}>
+                  <Tag
+                    color={
+                      settings.vulnDetection.enabled ? 'processing' : 'default'
+                    }
+                  >
                     {settings.vulnDetection.enabled ? '检测开启' : '检测关闭'}
                   </Tag>
                 </Space>
@@ -197,5 +221,5 @@ export default function SettingsPage() {
         />
       </Spin>
     </Card>
-  )
+  );
 }
