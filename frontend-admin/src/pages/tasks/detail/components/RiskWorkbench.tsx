@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import { CaretRightOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import {
   Button,
   Card,
@@ -15,14 +16,14 @@ import {
   Typography,
   message,
 } from 'antd';
-import { CaretRightOutlined } from '@ant-design/icons';
 
 import { useCodecWorkbench } from '@/components/codec';
 import {
   decryptRiskResponse,
-  deleteTaskRiskCluster,
   deleteTaskRisk,
+  deleteTaskRiskCluster,
   runtimeDecryptRiskResponse,
+  updateTaskRiskStatus,
 } from '@/services/tasks';
 import type { ProtocolDecryptResult, ProtocolTrace, Risk } from '@/types/task';
 import { formatDateTime } from '@/utils/datetime';
@@ -37,6 +38,7 @@ interface Props {
   initialSortMode?: RiskSortMode;
   onRefresh?: () => void;
   onDeleted?: (riskId: string) => void;
+  onUpdated?: (riskId: string) => void;
 }
 
 type RiskListEntry =
@@ -90,6 +92,24 @@ const confidenceLabelMap: Record<string, string> = {
   low: '低置信',
 };
 
+const riskStatusColorMap: Record<string, string> = {
+  open: 'gold',
+  resolved: 'success',
+  ignored: 'default',
+};
+
+const riskStatusLabelMap: Record<string, string> = {
+  open: '待处理',
+  resolved: '已修复',
+  ignored: '已忽略',
+};
+
+const riskStatusOptions = [
+  { label: '待处理', value: 'open' },
+  { label: '已修复', value: 'resolved' },
+  { label: '已忽略', value: 'ignored' },
+];
+
 const PAGE_SIZE_OPTIONS = ['10', '20', '50'];
 const DEFAULT_PAGE_SIZE = 10;
 const MIN_CLUSTER_SIZE = 3;
@@ -118,6 +138,31 @@ const sanitizeSummaryText = (value?: string) => {
     .trim();
 };
 
+const hasDisplayText = (value?: string) => Boolean((value || '').trim());
+
+const buildRiskMetaLine = (risk: Pick<Risk, 'type' | 'method'>) => {
+  const parts = [risk.type?.trim(), risk.method?.trim()].filter(Boolean);
+  return parts.length ? parts.join(' | ') : '-';
+};
+
+const normalizeRiskStatus = (status?: string) => {
+  const normalized = (status || '').trim().toLowerCase();
+  return normalized || 'open';
+};
+
+const renderRiskStatusTag = (status?: string) => {
+  const normalized = normalizeRiskStatus(status);
+  return (
+    <Tag
+      icon={normalized === 'open' ? <ClockCircleOutlined /> : undefined}
+      color={riskStatusColorMap[normalized] || 'default'}
+      style={{ marginInlineEnd: 0 }}
+    >
+      {riskStatusLabelMap[normalized] || normalized}
+    </Tag>
+  );
+};
+
 const buildRiskSummary = (risk: Risk) => {
   const parts: string[] = [];
 
@@ -130,14 +175,20 @@ const buildRiskSummary = (risk: Risk) => {
     }
   }
 
-  if (typeof risk.responseLength === 'number') {
+  if (
+    typeof risk.responseLength === 'number' &&
+    Number.isFinite(risk.responseLength) &&
+    risk.responseLength > 0
+  ) {
     parts.push(`响应长度: ${risk.responseLength}`);
   }
 
   return parts.join('；') || '-';
 };
 
-const buildClusterSummary = (entry: Extract<RiskListEntry, { kind: 'cluster' }>) => {
+const buildClusterSummary = (
+  entry: Extract<RiskListEntry, { kind: 'cluster' }>,
+) => {
   const parts = [
     `当前模板命中 ${entry.count} 个接口，默认折叠展示以降低重复噪音。`,
   ];
@@ -145,10 +196,72 @@ const buildClusterSummary = (entry: Extract<RiskListEntry, { kind: 'cluster' }>)
   if (representativeReason) {
     parts.push(`代表特征: ${representativeReason}`);
   }
-  if (typeof entry.risks[0]?.responseLength === 'number') {
+  if (
+    typeof entry.risks[0]?.responseLength === 'number' &&
+    Number.isFinite(entry.risks[0]?.responseLength) &&
+    (entry.risks[0]?.responseLength || 0) > 0
+  ) {
     parts.push(`代表响应长度: ${entry.risks[0]?.responseLength}`);
   }
   return parts;
+};
+
+const buildRiskHitFeatures = (risk: Risk) => {
+  const features: Array<{ key: string; label: string; color?: string }> = [];
+
+  if (risk.staticContexts?.length) {
+    features.push({
+      key: 'static-context',
+      label: `上下文命中 ${risk.staticContexts.length}`,
+      color: 'purple',
+    });
+  }
+  if (risk.hasProtocolTrace || (risk.traceId || '').trim()) {
+    features.push({
+      key: 'protocol-trace',
+      label: '协议轨迹',
+      color: 'geekblue',
+    });
+  }
+  if ((risk.responseCiphertext || '').trim()) {
+    features.push({
+      key: 'ciphertext',
+      label: '响应密文',
+      color: 'gold',
+    });
+  }
+
+  return features;
+};
+
+const buildClusterHitFeatures = (
+  entry: Extract<RiskListEntry, { kind: 'cluster' }>,
+) => {
+  const featureMap = new Map<
+    string,
+    { label: string; color?: string; count: number }
+  >();
+
+  entry.risks.forEach((risk) => {
+    buildRiskHitFeatures(risk).forEach((feature) => {
+      const current = featureMap.get(feature.key);
+      if (current) {
+        current.count += 1;
+        return;
+      }
+      featureMap.set(feature.key, {
+        label: feature.label,
+        color: feature.color,
+        count: 1,
+      });
+    });
+  });
+
+  return Array.from(featureMap.entries()).map(([key, value]) => ({
+    key,
+    label: `${value.label} ${value.count}/${entry.count}`,
+    color: value.color,
+  }));
 };
 
 const parseRawRequestHeaders = (request?: string) => {
@@ -243,7 +356,8 @@ const parseSourceMapLocation = (value?: string) => {
   const segments = normalized.split('/').filter(Boolean);
   const root = segments[1] || '';
   const relativePath = segments.slice(2).join('/');
-  const fileName = relativePath.split('/').filter(Boolean).pop() || root || normalized;
+  const fileName =
+    relativePath.split('/').filter(Boolean).pop() || root || normalized;
 
   return {
     normalized,
@@ -277,7 +391,11 @@ const renderRiskLocation = (value?: string, compact = false) => {
   }
 
   return (
-    <Space direction="vertical" size={compact ? 2 : 6} style={{ width: '100%' }}>
+    <Space
+      direction="vertical"
+      size={compact ? 2 : 6}
+      style={{ width: '100%' }}
+    >
       <Space wrap size={[8, 4]}>
         <Tag color="geekblue">SourceMap</Tag>
         <Typography.Text strong>{sourceMapMeta.fileName}</Typography.Text>
@@ -299,7 +417,10 @@ const renderRiskLocation = (value?: string, compact = false) => {
         </Typography.Text>
       ) : null}
       <Typography.Text type="secondary">
-        根目录: {compact ? shortenMiddle(sourceMapMeta.root || '-', 20, 10) : sourceMapMeta.root || '-'}
+        根目录:{' '}
+        {compact
+          ? shortenMiddle(sourceMapMeta.root || '-', 20, 10)
+          : sourceMapMeta.root || '-'}
       </Typography.Text>
       {!compact ? (
         <Typography.Paragraph
@@ -322,11 +443,13 @@ export const filterRisks = ({
   risks,
   keyword,
   level,
+  status,
   clusterFilter,
 }: {
   risks: Risk[];
   keyword: string;
   level?: Risk['level'];
+  status?: string;
   clusterFilter?: string;
 }) => {
   const term = keyword.trim().toLowerCase();
@@ -338,13 +461,16 @@ export const filterRisks = ({
       risk.url.toLowerCase().includes(term) ||
       risk.type.toLowerCase().includes(term);
     const matchesLevel = !level || risk.level === level;
+    const matchesStatus =
+      !status ||
+      normalizeRiskStatus(risk.status) === normalizeRiskStatus(status);
     const clusterLabel = (risk.denyTemplateLabel || '').trim();
     const matchesCluster =
       !clusterFilter ||
       (clusterFilter === '__none__'
         ? !clusterLabel
         : clusterLabel === clusterFilter);
-    return matchesKeyword && matchesLevel && matchesCluster;
+    return matchesKeyword && matchesLevel && matchesStatus && matchesCluster;
   });
 };
 
@@ -358,13 +484,16 @@ export default function RiskWorkbench({
   initialSortMode = 'level_desc',
   onRefresh,
   onDeleted,
+  onUpdated,
 }: Props) {
   const { openCodecWorkbench } = useCodecWorkbench();
   const [keyword, setKeyword] = useState('');
   const [level, setLevel] = useState<Risk['level'] | undefined>();
+  const [status, setStatus] = useState<string | undefined>();
   const [clusterFilter, setClusterFilter] = useState<string | undefined>();
   const [selected, setSelected] = useState<Risk | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [updatingRiskId, setUpdatingRiskId] = useState('');
   const [decrypting, setDecrypting] = useState(false);
   const [runtimeDecrypting, setRuntimeDecrypting] = useState(false);
   const [decryptResult, setDecryptResult] =
@@ -377,6 +506,9 @@ export default function RiskWorkbench({
     {},
   );
   const [clusterPages, setClusterPages] = useState<Record<string, number>>({});
+  const [statusOverrides, setStatusOverrides] = useState<
+    Record<string, string>
+  >({});
   const activeTaskIdRef = useRef(taskId);
   const deleteTaskIdRef = useRef('');
   const deleteInFlightRef = useRef(false);
@@ -387,9 +519,11 @@ export default function RiskWorkbench({
     deleteInFlightRef.current = false;
     setKeyword('');
     setLevel(undefined);
+    setStatus(undefined);
     setClusterFilter(undefined);
     setSelected(null);
     setDeleting(false);
+    setUpdatingRiskId('');
     setDecrypting(false);
     setRuntimeDecrypting(false);
     setDecryptResult(null);
@@ -399,6 +533,7 @@ export default function RiskWorkbench({
     setSortMode(initialSortMode);
     setExpandedGroups({});
     setClusterPages({});
+    setStatusOverrides({});
   }, [initialSortMode, taskId]);
 
   useEffect(() => {
@@ -426,14 +561,30 @@ export default function RiskWorkbench({
     ];
   }, [risks]);
 
+  const effectiveRisks = useMemo(
+    () =>
+      risks.map((risk) => {
+        const nextStatus = statusOverrides[risk.id];
+        if (!nextStatus) {
+          return risk;
+        }
+        return {
+          ...risk,
+          status: nextStatus,
+        };
+      }),
+    [risks, statusOverrides],
+  );
+
   const filteredRisks = useMemo(() => {
     return filterRisks({
-      risks,
+      risks: effectiveRisks,
       keyword,
       level,
+      status,
       clusterFilter,
     });
-  }, [clusterFilter, keyword, level, risks]);
+  }, [clusterFilter, effectiveRisks, keyword, level, status]);
 
   const sortedRisks = useMemo(() => {
     const next = [...filteredRisks];
@@ -443,8 +594,7 @@ export default function RiskWorkbench({
 
     next.sort((left, right) => {
       if (sortMode === 'level_desc' || sortMode === 'level_asc') {
-        const delta =
-          levelOrderMap[right.level] - levelOrderMap[left.level];
+        const delta = levelOrderMap[right.level] - levelOrderMap[left.level];
         if (delta !== 0) {
           return sortMode === 'level_desc' ? delta : -delta;
         }
@@ -520,7 +670,7 @@ export default function RiskWorkbench({
 
   useEffect(() => {
     setPage(1);
-  }, [clusterFilter, keyword, level, sortMode]);
+  }, [clusterFilter, keyword, level, sortMode, status]);
 
   useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(pagedEntries.total / pageSize));
@@ -598,7 +748,38 @@ export default function RiskWorkbench({
     }
   };
 
-  const handleDeleteCluster = async (entry: Extract<RiskListEntry, { kind: 'cluster' }>) => {
+  const handleUpdateStatus = async (risk: Risk, nextStatus: string) => {
+    const normalizedNext = normalizeRiskStatus(nextStatus);
+    const currentStatus = normalizeRiskStatus(risk.status);
+    if (!risk.id || normalizedNext === currentStatus) {
+      return;
+    }
+
+    setUpdatingRiskId(risk.id);
+    try {
+      await updateTaskRiskStatus(risk.id, { status: normalizedNext });
+      setStatusOverrides((current) => ({
+        ...current,
+        [risk.id]: normalizedNext,
+      }));
+      if (selected?.id === risk.id) {
+        setSelected((current) =>
+          current ? { ...current, status: normalizedNext } : current,
+        );
+      }
+      message.success('漏洞状态已更新');
+      onUpdated?.(risk.id);
+    } catch (error) {
+      console.error(error);
+      message.error('更新漏洞状态失败');
+    } finally {
+      setUpdatingRiskId('');
+    }
+  };
+
+  const handleDeleteCluster = async (
+    entry: Extract<RiskListEntry, { kind: 'cluster' }>,
+  ) => {
     if (deleteInFlightRef.current) {
       return;
     }
@@ -798,6 +979,14 @@ export default function RiskWorkbench({
             />
             <Select
               allowClear
+              placeholder="处置状态"
+              value={status}
+              onChange={(value) => setStatus(value)}
+              options={riskStatusOptions}
+              style={{ width: 160 }}
+            />
+            <Select
+              allowClear
               data-testid="risk-cluster-select"
               placeholder="模板簇"
               value={clusterFilter}
@@ -838,10 +1027,7 @@ export default function RiskWorkbench({
                 clusterPageStart + CLUSTER_PAGE_SIZE,
               );
               return (
-                <List.Item
-                  key={entry.id}
-                  actions={[]}
-                >
+                <List.Item key={entry.id} actions={[]}>
                   <List.Item.Meta
                     title={
                       <div
@@ -868,7 +1054,9 @@ export default function RiskWorkbench({
                               <CaretRightOutlined
                                 style={{
                                   transition: 'transform 0.2s ease',
-                                  transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                                  transform: expanded
+                                    ? 'rotate(90deg)'
+                                    : 'rotate(0deg)',
                                 }}
                               />
                             }
@@ -876,12 +1064,18 @@ export default function RiskWorkbench({
                           <Tag color={levelColorMap[entry.level]}>
                             {levelLabelMap[entry.level]}
                           </Tag>
-                          <Tag color={confidenceColorMap[entry.confidence] || 'default'}>
+                          <Tag
+                            color={
+                              confidenceColorMap[entry.confidence] || 'default'
+                            }
+                          >
                             {confidenceLabelMap[entry.confidence] ||
                               `${entry.confidence} 置信`}
                           </Tag>
                           <Tag>{entry.kindLabel}</Tag>
-                          <Typography.Text strong>{entry.label}</Typography.Text>
+                          <Typography.Text strong>
+                            {entry.label}
+                          </Typography.Text>
                         </Space>
                         <Popconfirm
                           key="delete-cluster"
@@ -907,12 +1101,25 @@ export default function RiskWorkbench({
                       </div>
                     }
                     description={
-                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <Space
+                        direction="vertical"
+                        size={8}
+                        style={{ width: '100%' }}
+                      >
                         {buildClusterSummary(entry).map((line) => (
                           <Typography.Text key={line} type="secondary">
                             {line}
                           </Typography.Text>
                         ))}
+                        {buildClusterHitFeatures(entry).length ? (
+                          <Space wrap size={[4, 4]}>
+                            {buildClusterHitFeatures(entry).map((feature) => (
+                              <Tag key={feature.key} color={feature.color}>
+                                {feature.label}
+                              </Tag>
+                            ))}
+                          </Space>
+                        ) : null}
                         {expanded ? (
                           <div
                             style={{
@@ -922,7 +1129,8 @@ export default function RiskWorkbench({
                             }}
                           >
                             <Typography.Text type="secondary">
-                              当前显示第 {clusterPage} 页，每页 {CLUSTER_PAGE_SIZE} 条。
+                              当前显示第 {clusterPage} 页，每页{' '}
+                              {CLUSTER_PAGE_SIZE} 条。
                             </Typography.Text>
                             {visibleClusterRisks.map((risk) => (
                               <div
@@ -934,9 +1142,33 @@ export default function RiskWorkbench({
                                   alignItems: 'flex-start',
                                 }}
                               >
-                                <Space direction="vertical" size={2}>
+                                <Space
+                                  direction="vertical"
+                                  size={2}
+                                  style={{ flex: 1 }}
+                                >
+                                  <Space wrap size={[4, 4]}>
+                                    <Tag color={levelColorMap[risk.level]}>
+                                      {levelLabelMap[risk.level]}
+                                    </Tag>
+                                    {risk.confidence ? (
+                                      <Tag
+                                        color={
+                                          confidenceColorMap[risk.confidence] ||
+                                          'default'
+                                        }
+                                      >
+                                        {confidenceLabelMap[risk.confidence] ||
+                                          `${risk.confidence} 置信`}
+                                      </Tag>
+                                    ) : null}
+                                    {renderRiskStatusTag(risk.status)}
+                                  </Space>
+                                  <Typography.Text strong>
+                                    {risk.title}
+                                  </Typography.Text>
                                   <Typography.Text type="secondary">
-                                    {risk.method || '-'}
+                                    {buildRiskMetaLine(risk)}
                                   </Typography.Text>
                                   {renderRiskLocation(risk.url, true)}
                                   <Typography.Paragraph
@@ -952,8 +1184,33 @@ export default function RiskWorkbench({
                                   >
                                     {buildRiskSummary(risk)}
                                   </Typography.Paragraph>
+                                  {buildRiskHitFeatures(risk).length ? (
+                                    <Space wrap size={[4, 4]}>
+                                      {buildRiskHitFeatures(risk).map(
+                                        (feature) => (
+                                          <Tag
+                                            key={feature.key}
+                                            color={feature.color}
+                                          >
+                                            {feature.label}
+                                          </Tag>
+                                        ),
+                                      )}
+                                    </Space>
+                                  ) : null}
                                 </Space>
                                 <Space>
+                                  <Select
+                                    data-testid={`risk-status-select-${risk.id}`}
+                                    size="small"
+                                    value={normalizeRiskStatus(risk.status)}
+                                    options={riskStatusOptions}
+                                    style={{ width: 110 }}
+                                    loading={updatingRiskId === risk.id}
+                                    onChange={(value) =>
+                                      void handleUpdateStatus(risk, value)
+                                    }
+                                  />
                                   <Button
                                     type="link"
                                     onClick={() => setSelected(risk)}
@@ -970,7 +1227,11 @@ export default function RiskWorkbench({
                                       loading: deleting,
                                     }}
                                   >
-                                    <Button danger type="link" disabled={deleting}>
+                                    <Button
+                                      danger
+                                      type="link"
+                                      disabled={deleting}
+                                    >
                                       删除
                                     </Button>
                                   </Popconfirm>
@@ -991,7 +1252,10 @@ export default function RiskWorkbench({
                                   pageSize={CLUSTER_PAGE_SIZE}
                                   total={entry.count}
                                   onChange={(nextPage) =>
-                                    handleClusterPageChange(entry.clusterId, nextPage)
+                                    handleClusterPageChange(
+                                      entry.clusterId,
+                                      nextPage,
+                                    )
                                   }
                                 />
                               </div>
@@ -1012,6 +1276,17 @@ export default function RiskWorkbench({
                 onClick={() => setSelected(risk)}
                 style={{ cursor: 'pointer' }}
                 actions={[
+                  <Select
+                    key="status"
+                    data-testid={`risk-status-select-${risk.id}`}
+                    size="small"
+                    value={normalizeRiskStatus(risk.status)}
+                    options={riskStatusOptions}
+                    style={{ width: 110 }}
+                    loading={updatingRiskId === risk.id}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(value) => void handleUpdateStatus(risk, value)}
+                  />,
                   <Button
                     key="detail"
                     type="link"
@@ -1048,22 +1323,30 @@ export default function RiskWorkbench({
                 <List.Item.Meta
                   title={
                     <Space wrap>
+                      <Typography.Text strong>{risk.title}</Typography.Text>
                       <Tag color={levelColorMap[risk.level]}>
                         {levelLabelMap[risk.level]}
                       </Tag>
                       {risk.confidence ? (
-                        <Tag color={confidenceColorMap[risk.confidence] || 'default'}>
-                          {confidenceLabelMap[risk.confidence] || `${risk.confidence} 置信`}
+                        <Tag
+                          color={
+                            confidenceColorMap[risk.confidence] || 'default'
+                          }
+                        >
+                          {confidenceLabelMap[risk.confidence] ||
+                            `${risk.confidence} 置信`}
                         </Tag>
                       ) : null}
-                      <Typography.Text strong>{risk.title}</Typography.Text>
-                      {risk.aiVerified ? <Tag color="processing">AI</Tag> : null}
+                      {renderRiskStatusTag(risk.status)}
+                      {risk.aiVerified ? (
+                        <Tag color="processing">AI</Tag>
+                      ) : null}
                     </Space>
                   }
                   description={
                     <Space direction="vertical" size={4}>
                       <Typography.Text type="secondary">
-                        {risk.type || '-'} | {risk.method || '-'}
+                        {buildRiskMetaLine(risk)}
                       </Typography.Text>
                       {renderRiskLocation(risk.url, true)}
                       <Typography.Paragraph
@@ -1079,6 +1362,15 @@ export default function RiskWorkbench({
                       >
                         {buildRiskSummary(risk)}
                       </Typography.Paragraph>
+                      {buildRiskHitFeatures(risk).length ? (
+                        <Space wrap size={[4, 4]}>
+                          {buildRiskHitFeatures(risk).map((feature) => (
+                            <Tag key={feature.key} color={feature.color}>
+                              {feature.label}
+                            </Tag>
+                          ))}
+                        </Space>
+                      ) : null}
                     </Space>
                   }
                 />
@@ -1125,8 +1417,11 @@ export default function RiskWorkbench({
               <Tag color={levelColorMap[selected.level]}>
                 {levelLabelMap[selected.level]}
               </Tag>
+              {renderRiskStatusTag(selected.status)}
               {selected.confidence ? (
-                <Tag color={confidenceColorMap[selected.confidence] || 'default'}>
+                <Tag
+                  color={confidenceColorMap[selected.confidence] || 'default'}
+                >
                   {confidenceLabelMap[selected.confidence] ||
                     `${selected.confidence} 置信`}
                 </Tag>
@@ -1137,17 +1432,28 @@ export default function RiskWorkbench({
             <Card size="small">
               <Space direction="vertical" size={8}>
                 <Typography.Text>类型: {selected.type || '-'}</Typography.Text>
-                <Typography.Text>
-                  方法: {selected.method || '-'}
-                </Typography.Text>
+                {hasDisplayText(selected.method) ? (
+                  <Typography.Text>方法: {selected.method}</Typography.Text>
+                ) : null}
                 <div>
-                  <Typography.Text style={{ display: 'block', marginBottom: 4 }}>
+                  <Typography.Text
+                    style={{ display: 'block', marginBottom: 4 }}
+                  >
                     {isSourceMapLocation(selected.url) ? '来源定位:' : 'URL:'}
                   </Typography.Text>
                   {renderRiskLocation(selected.url)}
                 </div>
                 <Typography.Text>
-                  置信度: {selected.confidence ? (confidenceLabelMap[selected.confidence] || selected.confidence) : '-'}
+                  置信度:{' '}
+                  {selected.confidence
+                    ? confidenceLabelMap[selected.confidence] ||
+                      selected.confidence
+                    : '-'}
+                </Typography.Text>
+                <Typography.Text>
+                  漏洞状态:{' '}
+                  {riskStatusLabelMap[normalizeRiskStatus(selected.status)] ||
+                    normalizeRiskStatus(selected.status)}
                 </Typography.Text>
                 <Typography.Text>
                   置信度说明: {selected.confidenceReason || '-'}
@@ -1252,6 +1558,42 @@ export default function RiskWorkbench({
                 {selected.response || '暂无响应内容'}
               </pre>
             </Card>
+
+            {selected.staticContexts?.length ? (
+              <Card
+                size="small"
+                title="静态命中上下文"
+                extra={
+                  <Typography.Text type="secondary">
+                    {selected.staticContexts.length} 条
+                  </Typography.Text>
+                }
+              >
+                <List
+                  dataSource={selected.staticContexts}
+                  renderItem={(item) => (
+                    <List.Item>
+                      <div style={{ display: 'grid', gap: 8, width: '100%' }}>
+                        <Typography.Text strong>
+                          {item.sourceUrl || '-'}
+                        </Typography.Text>
+                        <pre
+                          style={{
+                            margin: 0,
+                            maxHeight: 220,
+                            overflow: 'auto',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                          }}
+                        >
+                          {item.snippet || '暂无上下文片段'}
+                        </pre>
+                      </div>
+                    </List.Item>
+                  )}
+                />
+              </Card>
+            ) : null}
 
             {decryptResult?.plaintext || decryptError ? (
               <Card size="small" title="二次解密结果">

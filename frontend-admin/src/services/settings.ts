@@ -73,6 +73,7 @@ const DEFAULT_SETTINGS: SettingsConfig = {
   blackDomain: [],
   highRiskRouter: [],
   authentication: [],
+  learnedAuthentication: [],
   placeholder: {},
   vulnDetection: DEFAULT_VULN_DETECTION,
 }
@@ -219,6 +220,7 @@ export const createDefaultSettings = (): SettingsConfig => ({
   blackDomain: [...DEFAULT_SETTINGS.blackDomain],
   highRiskRouter: [...DEFAULT_SETTINGS.highRiskRouter],
   authentication: [...DEFAULT_SETTINGS.authentication],
+  learnedAuthentication: [...DEFAULT_SETTINGS.learnedAuthentication],
   placeholder: { ...DEFAULT_SETTINGS.placeholder },
   vulnDetection: normalizeVulnDetection(DEFAULT_SETTINGS.vulnDetection),
 })
@@ -235,6 +237,10 @@ export const normalizeSettings = (
   authentication: normalizeStringArray(
     value?.authentication,
     DEFAULT_SETTINGS.authentication,
+  ),
+  learnedAuthentication: normalizeStringArray(
+    value?.learnedAuthentication,
+    DEFAULT_SETTINGS.learnedAuthentication,
   ),
   placeholder: normalizeStringRecord(value?.placeholder, DEFAULT_SETTINGS.placeholder),
   vulnDetection: normalizeVulnDetection(value?.vulnDetection),

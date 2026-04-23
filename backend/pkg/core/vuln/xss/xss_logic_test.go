@@ -71,6 +71,36 @@ func TestXSSRequiresBrowserExecutionConfirmation(t *testing.T) {
 	})
 }
 
+func TestXSSSkipsEscapedHiddenInputAttributeReflection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(
+			w,
+			`<html><body><form><input type="hidden" id="url" value=%q /></form></body></html>`,
+			r.URL.Query().Get("input"),
+		)
+	}))
+	defer server.Close()
+
+	withBrowserVerifier(func(apiReq structs.APIRequest, payload, responseBody string) bool {
+		t.Fatal("browser verifier should not run for escaped hidden input reflection")
+		return false
+	}, func() {
+		result, err := TestXSS(structs.APIRequest{
+			URL:     server.URL,
+			Method:  http.MethodGet,
+			Headers: map[string]string{},
+			Params:  url.Values{"input": []string{"test"}},
+		}, config.XSSConfig{Enabled: true})
+		if err != nil {
+			t.Fatalf("TestXSS error: %v", err)
+		}
+		if result == nil || result.Vulnerable {
+			t.Fatalf("expected escaped hidden input reflection not to be reported as xss, got %#v", result)
+		}
+	})
+}
+
 func TestXSSReportsOnlyAfterBrowserExecutionConfirmation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -9,6 +9,7 @@ jest.mock('@/services/tasks', () => ({
   deleteTaskRiskCluster: jest.fn(),
   decryptRiskResponse: jest.fn(),
   runtimeDecryptRiskResponse: jest.fn(),
+  updateTaskRiskStatus: jest.fn(),
 }));
 
 jest.mock('@/components/codec', () => {
@@ -22,11 +23,11 @@ jest.mock('@/components/codec', () => {
 const {
   decryptRiskResponse,
   runtimeDecryptRiskResponse,
-} = jest.requireMock(
-  '@/services/tasks',
-) as {
+  updateTaskRiskStatus,
+} = jest.requireMock('@/services/tasks') as {
   decryptRiskResponse: jest.Mock;
   runtimeDecryptRiskResponse: jest.Mock;
+  updateTaskRiskStatus: jest.Mock;
 };
 const mockedUseCodecWorkbench = useCodecWorkbench as jest.Mock;
 const openCodecWorkbench = jest.fn();
@@ -34,8 +35,8 @@ const openCodecWorkbench = jest.fn();
 const buildRisk = (index: number) => ({
   id: `risk-${index}`,
   title: `风险 ${index}`,
-  level: index % 2 === 0 ? 'high' : 'medium',
-  confidence: 'medium',
+  level: (index % 2 === 0 ? 'high' : 'medium') as 'high' | 'medium',
+  confidence: 'medium' as const,
   type: 'sqli',
   url: `https://example.com/api/${index}`,
   description: `描述 ${index}`,
@@ -143,14 +144,16 @@ describe('RiskWorkbench', () => {
 
     await waitFor(() => {
       const titles = Array.from(
-        container.querySelectorAll('.ant-list-item .ant-list-item-meta-title strong'),
+        container.querySelectorAll(
+          '.ant-list-item .ant-list-item-meta-title strong',
+        ),
       ).map((node) => node.textContent?.trim());
       expect(titles.slice(0, 3)).toEqual(['高危风险', '低危风险', '信息风险']);
     });
   });
 
   test('shows confidence in the risk drawer', async () => {
-    const { container } = render(
+    render(
       <CodecWorkbenchProvider>
         <RiskWorkbench
           taskId="task-1"
@@ -173,6 +176,25 @@ describe('RiskWorkbench', () => {
     expect(
       screen.getByText(/置信度说明: 相同响应特征已重复出现 8 次/),
     ).toBeInTheDocument();
+  });
+
+  test('renders risk status inline', () => {
+    render(
+      <CodecWorkbenchProvider>
+        <RiskWorkbench
+          taskId="task-1"
+          risks={[
+            {
+              ...buildRisk(1),
+              status: 'open',
+            },
+          ]}
+        />
+      </CodecWorkbenchProvider>,
+    );
+
+    expect(screen.getAllByText('待处理').length).toBeGreaterThan(0);
+    expect(updateTaskRiskStatus).not.toHaveBeenCalled();
   });
 
   test('renders sourceMap locations with structured file metadata', async () => {
@@ -209,7 +231,7 @@ describe('RiskWorkbench', () => {
   });
 
   test('collapses deny-template risks into a cluster row', async () => {
-    const { container } = render(
+    render(
       <CodecWorkbenchProvider>
         <RiskWorkbench
           taskId="task-1"
@@ -254,9 +276,9 @@ describe('RiskWorkbench', () => {
     );
 
     expect(screen.getByText('认证拒绝簇')).toBeInTheDocument();
-    expect(
-      screen.getAllByText(/当前模板命中 3 个接口/).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/当前模板命中 3 个接口/).length).toBeGreaterThan(
+      0,
+    );
     expect(
       screen.queryByText('https://example.com/api/b'),
     ).not.toBeInTheDocument();
@@ -264,7 +286,9 @@ describe('RiskWorkbench', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开接口' }));
 
     await waitFor(() => {
-      expect(screen.getByText(/https:\/\/example\.com\/api\/b/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/https:\/\/example\.com\/api\/b/),
+      ).toBeInTheDocument();
     });
     expect(screen.getAllByText('查看详情').length).toBeGreaterThan(0);
   });
@@ -290,8 +314,12 @@ describe('RiskWorkbench', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '展开接口' }));
 
-    expect(await screen.findByText(/当前显示第 1 页，每页 20 条/)).toBeInTheDocument();
-    expect(screen.getByText(/https:\/\/example\.com\/api\/page-20/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/当前显示第 1 页，每页 20 条/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/https:\/\/example\.com\/api\/page-20/),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText(/https:\/\/example\.com\/api\/page-21/),
     ).not.toBeInTheDocument();
@@ -381,7 +409,9 @@ describe('RiskWorkbench', () => {
 
     await waitFor(() => {
       const titles = Array.from(
-        container.querySelectorAll('.ant-list-item .ant-list-item-meta-title strong'),
+        container.querySelectorAll(
+          '.ant-list-item .ant-list-item-meta-title strong',
+        ),
       ).map((node) => node.textContent?.trim());
       expect(titles.slice(0, 3)).toEqual(['高危风险', '低危风险', '信息风险']);
     });
@@ -416,7 +446,9 @@ describe('RiskWorkbench', () => {
 
     await waitFor(() => {
       const titles = Array.from(
-        container.querySelectorAll('.ant-list-item .ant-list-item-meta-title strong'),
+        container.querySelectorAll(
+          '.ant-list-item .ant-list-item-meta-title strong',
+        ),
       ).map((node) => node.textContent?.trim());
       expect(titles.slice(0, 3)).toEqual(['长响应', '中响应', '短响应']);
     });
@@ -443,8 +475,36 @@ describe('RiskWorkbench', () => {
       </CodecWorkbenchProvider>,
     );
 
-    expect(screen.getByText('响应体很短，可利用信息有限；响应长度: 69')).toBeInTheDocument();
+    expect(
+      screen.getByText('响应体很短，可利用信息有限；响应长度: 69'),
+    ).toBeInTheDocument();
     expect(screen.getAllByText(/响应长度: 69/)).toHaveLength(1);
+  });
+
+  test('hides empty method and zero response length in the risk list and drawer', () => {
+    render(
+      <CodecWorkbenchProvider>
+        <RiskWorkbench
+          taskId="task-1"
+          risks={[
+            {
+              ...buildRisk(1),
+              type: '敏感信息泄露',
+              method: '',
+              responseLength: 0,
+              confidenceReason: '发现敏感关键词泄露: password:"adminTest"',
+            },
+          ]}
+        />
+      </CodecWorkbenchProvider>,
+    );
+
+    expect(screen.getByText('敏感信息泄露')).toBeInTheDocument();
+    expect(screen.queryByText(/响应长度:/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
+
+    expect(screen.queryByText('方法:')).not.toBeInTheDocument();
   });
 
   test('decrypts ciphertext from a linked protocol trace in the risk drawer', async () => {
@@ -553,6 +613,65 @@ describe('RiskWorkbench', () => {
     expect(await screen.findByText('{"code":201}')).toBeInTheDocument();
     expect(screen.getByText(/解密模式: runtime/)).toBeInTheDocument();
     expect(screen.getByText(/结果来源: browser-context/)).toBeInTheDocument();
+  });
+
+  test('renders static contexts in the risk drawer', () => {
+    render(
+      <CodecWorkbenchProvider>
+        <RiskWorkbench
+          taskId="task-1"
+          risks={[
+            {
+              ...buildRisk(1),
+              staticContexts: [
+                {
+                  sourceUrl: 'https://example.com/app.js',
+                  snippet: 'axios.get("/api/1").then(render)',
+                },
+              ],
+            },
+          ]}
+        />
+      </CodecWorkbenchProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
+
+    expect(screen.getByText('静态命中上下文')).toBeInTheDocument();
+    expect(screen.getByText('https://example.com/app.js')).toBeInTheDocument();
+    expect(
+      screen.getByText(/axios\.get\("\/api\/1"\)\.then\(render\)/),
+    ).toBeInTheDocument();
+  });
+
+  test('renders hit feature tags in the risk list', () => {
+    render(
+      <CodecWorkbenchProvider>
+        <RiskWorkbench
+          taskId="task-1"
+          risks={[
+            {
+              ...buildRisk(1),
+              request: 'POST /api/1 HTTP/1.1',
+              response: '{"code":200}',
+              traceId: 'trace-1',
+              hasProtocolTrace: true,
+              responseCiphertext: 'abcd1234',
+              staticContexts: [
+                {
+                  sourceUrl: 'https://example.com/app.js',
+                  snippet: 'axios.post("/api/1")',
+                },
+              ],
+            },
+          ]}
+        />
+      </CodecWorkbenchProvider>,
+    );
+
+    expect(screen.getByText('上下文命中 1')).toBeInTheDocument();
+    expect(screen.getByText('协议轨迹')).toBeInTheDocument();
+    expect(screen.getByText('响应密文')).toBeInTheDocument();
   });
 
   test('opens codec workbench with inferred sm4 materials from the selected risk', () => {

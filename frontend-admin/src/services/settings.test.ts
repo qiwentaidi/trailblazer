@@ -45,6 +45,7 @@ describe('settings service', () => {
       testContent: '<h1>uploadtest</h1>',
       testFileName: 'test.html',
     })
+    expect(settings.learnedAuthentication).toEqual([])
   })
 
   test('loads settings from the config endpoint', async () => {
@@ -61,6 +62,7 @@ describe('settings service', () => {
           enabled: true,
         },
         blackDomain: ['a', 1, 'b'],
+        learnedAuthentication: ['请先完成统一身份认证后再访问', 1],
         vulnDetection: {
           enabled: false,
         },
@@ -76,6 +78,7 @@ describe('settings service', () => {
       enabled: true,
     })
     expect(settings.blackDomain).toEqual(['a', 'b'])
+    expect(settings.learnedAuthentication).toEqual(['请先完成统一身份认证后再访问'])
     expect(settings.vulnDetection.enabled).toBe(false)
   })
 

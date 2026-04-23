@@ -148,8 +148,6 @@ func getTaskVulns(c *gin.Context) {
 		return
 	}
 
-	vulns = annotateUnauthorizedNoise(vulns)
-
 	c.JSON(200, gin.H{"data": vulns})
 }
 
@@ -1105,6 +1103,39 @@ func deleteVuln(c *gin.Context) {
 	c.JSON(200, gin.H{"message": "vulnerability deleted successfully"})
 }
 
+func updateVulnStatus(c *gin.Context) {
+	vulnID := strings.TrimSpace(c.Param("vulnId"))
+	if vulnID == "" {
+		c.JSON(400, gin.H{"error": "vuln_id is required"})
+		return
+	}
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid json", "detail": err.Error()})
+		return
+	}
+
+	status, err := database.NormalizeVulnStatus(body.Status)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid status", "detail": err.Error()})
+		return
+	}
+
+	if err := database.UpdateVulnStatusByID(vulnID, status); err != nil {
+		c.JSON(500, gin.H{"error": "failed to update vulnerability status", "detail": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"message": "vulnerability status updated successfully",
+		"vuln_id": vulnID,
+		"status":  status,
+	})
+}
+
 func deleteVulnCluster(c *gin.Context) {
 	taskID := c.Param("taskId")
 	clusterID := strings.TrimSpace(c.Param("clusterId"))
@@ -1123,8 +1154,6 @@ func deleteVulnCluster(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "failed to query vulns", "detail": err.Error()})
 		return
 	}
-
-	vulns = annotateUnauthorizedNoise(vulns)
 
 	vulnIDs := make([]string, 0)
 	for _, vuln := range vulns {

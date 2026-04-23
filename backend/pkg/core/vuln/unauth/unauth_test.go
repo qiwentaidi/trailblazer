@@ -1,8 +1,18 @@
 package unauth
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
 
-func TestAssessConfidenceLowersRepeatedGenericErrors(t *testing.T) {
+	"trailblazer/pkg/core/database"
+	"trailblazer/pkg/core/structs"
+)
+
+func resetUnauthorizedTestState(t *testing.T) {
+	t.Helper()
+
 	seenHTMLHashes.Lock()
 	seenHTMLHashes.items = make(map[string]struct{})
 	seenHTMLHashes.Unlock()
@@ -10,6 +20,35 @@ func TestAssessConfidenceLowersRepeatedGenericErrors(t *testing.T) {
 	responseSignatureTracker.Lock()
 	responseSignatureTracker.counts = make(map[string]int)
 	responseSignatureTracker.Unlock()
+
+	learnedAuthPatternRegistry.Lock()
+	learnedAuthPatternRegistry.loaded = false
+	learnedAuthPatternRegistry.patterns = nil
+	learnedAuthPatternRegistry.index = make(map[string]struct{})
+	learnedAuthPatternRegistry.Unlock()
+}
+
+func initTempSQLiteForUnauthTest(t *testing.T) {
+	t.Helper()
+
+	dbPath := filepath.Join(t.TempDir(), "unauth-test.db")
+	if database.DB != nil {
+		_ = database.DB.Close()
+		database.DB = nil
+	}
+	if err := database.InitSQLite(dbPath); err != nil {
+		t.Fatalf("failed to init sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		if database.DB != nil {
+			_ = database.DB.Close()
+			database.DB = nil
+		}
+	})
+}
+
+func TestAssessConfidenceLowersRepeatedGenericErrors(t *testing.T) {
+	resetUnauthorizedTestState(t)
 
 	body := `{"code":"err.common.system.error","msg":"系统错误","success":false}`
 	for i := 0; i < 5; i++ {
@@ -26,13 +65,7 @@ func TestAssessConfidenceLowersRepeatedGenericErrors(t *testing.T) {
 }
 
 func TestAssessConfidenceKeepsStructuredDataHigher(t *testing.T) {
-	seenHTMLHashes.Lock()
-	seenHTMLHashes.items = make(map[string]struct{})
-	seenHTMLHashes.Unlock()
-
-	responseSignatureTracker.Lock()
-	responseSignatureTracker.counts = make(map[string]int)
-	responseSignatureTracker.Unlock()
+	resetUnauthorizedTestState(t)
 
 	body := `{"code":200,"data":{"list":[{"id":1,"name":"alice"},{"id":2,"name":"bob"}],"total":2},"success":true}`
 	confidence, reason := assessConfidence(200, body, "https://example.com/api/orders/query")
@@ -66,5 +99,133 @@ func TestShouldTreatHTMLAsUnauthorizedAcceptsBusinessTablePage(t *testing.T) {
 	body := `<!doctype html><html><body><h1>用户管理后台</h1><table><tr><th>姓名</th><th>邮箱</th><th>手机号</th></tr><tr><td>Alice</td><td>alice@example.com</td><td>13800138000</td></tr></table></body></html>`
 	if !shouldTreatHTMLAsUnauthorized(body, "https://example.com/admin/users") {
 		t.Fatal("expected business html with sensitive data to be accepted")
+	}
+}
+
+func TestTestUnauthorizedAccessRejectsGenericJSONTemplate(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"err.common.system.error","msg":"系统错误","success":false}`))
+	}))
+	defer server.Close()
+
+	vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     server.URL + "/api/cities",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+
+	if err == nil {
+		t.Fatal("expected generic template response to be rejected")
+	}
+	if vulnerable {
+		t.Fatal("expected generic template response not to be marked vulnerable")
+	}
+}
+
+func TestTestUnauthorizedAccessRejectsRepeatedNonBusinessTemplate(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"request rejected","hint":"visit denied"}`))
+	}))
+	defer server.Close()
+
+	for i := 0; i < 2; i++ {
+		vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+			URL:     server.URL + "/api/repeated",
+			Method:  http.MethodGet,
+			Headers: map[string]string{},
+		}, nil)
+		if err != nil {
+			t.Fatalf("unexpected early rejection on iteration %d: %v", i, err)
+		}
+		if !vulnerable {
+			t.Fatalf("expected first repeated template probes to remain observable on iteration %d", i)
+		}
+	}
+
+	vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     server.URL + "/api/repeated",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected repeated template response to be rejected")
+	}
+	if vulnerable {
+		t.Fatal("expected repeated template response not to be marked vulnerable")
+	}
+}
+
+func TestTestUnauthorizedAccessLearnsAuthPhraseIntoSQLite(t *testing.T) {
+	resetUnauthorizedTestState(t)
+	initTempSQLiteForUnauthTest(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"请先完成统一身份认证后再访问"}`))
+	}))
+	defer server.Close()
+
+	vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     server.URL + "/api/cities",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected auth-required response to be rejected")
+	}
+	if vulnerable {
+		t.Fatal("expected auth-required response not to be marked vulnerable")
+	}
+
+	patterns, err := database.ListEnabledLearnedAuthPatterns()
+	if err != nil {
+		t.Fatalf("failed to list learned auth patterns: %v", err)
+	}
+	if len(patterns) == 0 {
+		t.Fatal("expected learned auth patterns to be stored")
+	}
+
+	found := false
+	for _, pattern := range patterns {
+		if pattern == `请先完成统一身份认证后再访问` {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected exact learned pattern to be stored, got %#v", patterns)
+	}
+}
+
+func TestTestUnauthorizedAccessUsesLearnedAuthPhraseWithoutManualConfig(t *testing.T) {
+	resetUnauthorizedTestState(t)
+	initTempSQLiteForUnauthTest(t)
+
+	if err := database.UpsertLearnedAuthPattern(`请先完成统一身份认证后再访问`, "seed"); err != nil {
+		t.Fatalf("failed to seed learned auth pattern: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"请先完成统一身份认证后再访问"}`))
+	}))
+	defer server.Close()
+
+	vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     server.URL + "/api/cities",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected learned auth phrase to reject response")
+	}
+	if vulnerable {
+		t.Fatal("expected learned auth phrase not to be marked vulnerable")
 	}
 }

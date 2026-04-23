@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"trailblazer/pkg/core/database"
 	"trailblazer/pkg/core/structs"
 	"trailblazer/pkg/core/vuln"
 	"unicode"
@@ -23,6 +24,22 @@ var responseSignatureTracker = struct {
 	counts map[string]int
 }{
 	counts: make(map[string]int),
+}
+var learnedAuthPatternRegistry = struct {
+	sync.RWMutex
+	loaded   bool
+	patterns []string
+	index    map[string]struct{}
+}{
+	index: make(map[string]struct{}),
+}
+
+var learnableAuthPhrasePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`请先[^，。；,;\n\r"'\}\]\{]{0,32}(?:登录|认证|鉴权|授权)[^，。；,;\n\r"'\}\]\{]{0,32}`),
+	regexp.MustCompile(`未登录[^，。；,;\n\r"'\}\]\{]{0,24}`),
+	regexp.MustCompile(`(?:登录|认证|鉴权|授权)(?:已)?(?:失效|过期|失败)[^，。；,;\n\r"'\}\]\{]{0,24}`),
+	regexp.MustCompile(`(?:token|session|jwt)[^,\.;\n\r]{0,24}(?:invalid|expired|missing|fail(?:ed)?|error)`),
+	regexp.MustCompile(`(?:unauthorized|forbidden|access denied|permission denied)[^,\.;\n\r]{0,24}`),
 }
 
 // 风险等级评估相关常量
@@ -81,21 +98,281 @@ func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 		return false, "", UnauthorizedAssessment{}, errors.New("页面内容相似度超过90%")
 	}
 
-	// 4. 关键词判断
-	for _, auth := range authentication {
-		if matched, err := regexp.MatchString(auth, body); matched && err == nil {
-			return false, "", UnauthorizedAssessment{}, errors.New("检测到鉴权字段: " + auth)
-		}
+	// 4. 鉴权拦截识别与自学习
+	effectiveAuthPatterns := mergeAuthPatterns(authentication, currentLearnedAuthPatterns())
+	if reject, reason := shouldRejectAsAuthResponse(resp.StatusCode(), body, apiReq.URL, effectiveAuthPatterns); reject {
+		return false, "", UnauthorizedAssessment{}, errors.New(reason)
+	}
+
+	if reject, reason := shouldRejectUnauthorizedResponse(resp.StatusCode(), body, apiReq.URL); reject {
+		return false, "", UnauthorizedAssessment{}, errors.New(reason)
 	}
 
 	// 5. 评估风险等级
 	riskLevel := assessRiskLevel(body, apiReq.URL)
-	confidence, confidenceReason := assessConfidence(resp.StatusCode(), body, apiReq.URL)
+	confidence, confidenceReason := evaluateUnauthorizedConfidence(resp.StatusCode(), body, apiReq.URL)
 	return true, body, UnauthorizedAssessment{
 		RiskLevel:        riskLevel,
 		Confidence:       confidence,
 		ConfidenceReason: confidenceReason,
 	}, nil
+}
+
+func mergeAuthPatterns(groups ...[]string) []string {
+	merged := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, group := range groups {
+		for _, pattern := range group {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			if _, exists := seen[pattern]; exists {
+				continue
+			}
+			seen[pattern] = struct{}{}
+			merged = append(merged, pattern)
+		}
+	}
+	return merged
+}
+
+func currentLearnedAuthPatterns() []string {
+	ensureLearnedAuthPatternsLoaded()
+
+	learnedAuthPatternRegistry.RLock()
+	defer learnedAuthPatternRegistry.RUnlock()
+	if len(learnedAuthPatternRegistry.patterns) == 0 {
+		return nil
+	}
+
+	patterns := make([]string, len(learnedAuthPatternRegistry.patterns))
+	copy(patterns, learnedAuthPatternRegistry.patterns)
+	return patterns
+}
+
+func ensureLearnedAuthPatternsLoaded() {
+	learnedAuthPatternRegistry.RLock()
+	loaded := learnedAuthPatternRegistry.loaded
+	learnedAuthPatternRegistry.RUnlock()
+	if loaded {
+		return
+	}
+
+	patterns, err := database.ListEnabledLearnedAuthPatterns()
+	if err != nil {
+		return
+	}
+
+	learnedAuthPatternRegistry.Lock()
+	defer learnedAuthPatternRegistry.Unlock()
+	if learnedAuthPatternRegistry.loaded {
+		return
+	}
+
+	learnedAuthPatternRegistry.patterns = normalizeUniquePatterns(patterns)
+	learnedAuthPatternRegistry.index = make(map[string]struct{}, len(learnedAuthPatternRegistry.patterns))
+	for _, pattern := range learnedAuthPatternRegistry.patterns {
+		learnedAuthPatternRegistry.index[pattern] = struct{}{}
+	}
+	learnedAuthPatternRegistry.loaded = true
+}
+
+func normalizeUniquePatterns(patterns []string) []string {
+	normalized := make([]string, 0, len(patterns))
+	seen := make(map[string]struct{}, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if _, exists := seen[pattern]; exists {
+			continue
+		}
+		seen[pattern] = struct{}{}
+		normalized = append(normalized, pattern)
+	}
+	return normalized
+}
+
+func shouldRejectAsAuthResponse(statusCode int, responseBody, url string, authPatterns []string) (bool, string) {
+	for _, auth := range authPatterns {
+		if matched, err := regexp.MatchString(auth, responseBody); matched && err == nil {
+			learnAuthPatternsFromResponse(statusCode, responseBody, url)
+			return true, "检测到鉴权字段: " + auth
+		}
+	}
+
+	if !isLikelyAuthenticationRequiredResponse(statusCode, responseBody, url) {
+		return false, ""
+	}
+
+	learned := learnAuthPatternsFromResponse(statusCode, responseBody, url)
+	if len(learned) == 0 {
+		return true, "响应疑似鉴权拦截内容，判定为未授权误报"
+	}
+	return true, fmt.Sprintf("响应疑似鉴权拦截内容，已自动学习 %d 条鉴权特征", len(learned))
+}
+
+func isLikelyAuthenticationRequiredResponse(statusCode int, responseBody, url string) bool {
+	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
+	if bodyLower == "" {
+		return false
+	}
+
+	if isLikelyAuthHTML(responseBody, url) {
+		return true
+	}
+
+	if len(extractLearnableAuthPatterns(responseBody)) > 0 && !containsMeaningfulDataSignals(bodyLower, url) {
+		return true
+	}
+
+	authSignalCount := countAuthenticationSignals(bodyLower, url)
+	switch {
+	case statusCode == 401 || statusCode == 403:
+		return authSignalCount >= 1
+	case authSignalCount >= 2 && !containsMeaningfulDataSignals(bodyLower, url):
+		return true
+	default:
+		return false
+	}
+}
+
+func countAuthenticationSignals(bodyLower, url string) int {
+	urlLower := strings.ToLower(url)
+	signals := []string{
+		"unauthorized",
+		"forbidden",
+		"access denied",
+		"permission denied",
+		"login required",
+		"sign in",
+		"signin",
+		"token expired",
+		"token invalid",
+		"session expired",
+		"session invalid",
+		"未登录",
+		"请先登录",
+		"登录后",
+		"重新登录",
+		"认证失败",
+		"身份认证",
+		"鉴权失败",
+		"未授权",
+		"权限不足",
+		"拒绝访问",
+		"访问受限",
+		"令牌无效",
+		"令牌过期",
+		"会话失效",
+	}
+
+	count := 0
+	seen := make(map[string]struct{}, len(signals))
+	for _, signal := range signals {
+		if _, exists := seen[signal]; exists {
+			continue
+		}
+		if strings.Contains(bodyLower, signal) || strings.Contains(urlLower, signal) {
+			seen[signal] = struct{}{}
+			count++
+		}
+	}
+	return count
+}
+
+func learnAuthPatternsFromResponse(statusCode int, responseBody, url string) []string {
+	if !isLikelyAuthenticationRequiredResponse(statusCode, responseBody, url) {
+		return nil
+	}
+
+	candidates := extractLearnableAuthPatterns(responseBody)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	source := strings.TrimSpace(url)
+	learned := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if rememberLearnedAuthPattern(candidate, source) {
+			learned = append(learned, candidate)
+		}
+	}
+	return learned
+}
+
+func extractLearnableAuthPatterns(responseBody string) []string {
+	text := responseBody
+	if isHTMLResponse(responseBody) {
+		text = normalizeHTMLText(responseBody)
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return nil
+	}
+
+	var patterns []string
+	seen := make(map[string]struct{})
+	for _, matcher := range learnableAuthPhrasePatterns {
+		matches := matcher.FindAllString(text, 8)
+		for _, match := range matches {
+			match = strings.TrimSpace(strings.Trim(match, `"'`))
+			if !isGoodLearnableAuthPhrase(match) {
+				continue
+			}
+			pattern := regexp.QuoteMeta(match)
+			if _, exists := seen[pattern]; exists {
+				continue
+			}
+			seen[pattern] = struct{}{}
+			patterns = append(patterns, pattern)
+		}
+	}
+	return patterns
+}
+
+func isGoodLearnableAuthPhrase(phrase string) bool {
+	phrase = strings.TrimSpace(phrase)
+	if phrase == "" {
+		return false
+	}
+	length := len([]rune(phrase))
+	if length < 4 || length > 48 {
+		return false
+	}
+
+	bodyLower := strings.ToLower(phrase)
+	if isLikelyGenericErrorResponse(bodyLower) && countAuthenticationSignals(bodyLower, "") < 2 {
+		return false
+	}
+
+	return countAuthenticationSignals(bodyLower, "") >= 1
+}
+
+func rememberLearnedAuthPattern(pattern, source string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+
+	learnedAuthPatternRegistry.Lock()
+	if learnedAuthPatternRegistry.index == nil {
+		learnedAuthPatternRegistry.index = make(map[string]struct{})
+	}
+	_, exists := learnedAuthPatternRegistry.index[pattern]
+	if !exists {
+		learnedAuthPatternRegistry.index[pattern] = struct{}{}
+		learnedAuthPatternRegistry.patterns = append(learnedAuthPatternRegistry.patterns, pattern)
+	}
+	learnedAuthPatternRegistry.loaded = true
+	learnedAuthPatternRegistry.Unlock()
+
+	if err := database.UpsertLearnedAuthPattern(pattern, source); err != nil {
+		return !exists
+	}
+	return !exists
 }
 
 // 将文本分割成 shingle（n-gram 片段），用于计算相似度
@@ -573,6 +850,44 @@ func assessRiskLevel(responseBody, url string) string {
 }
 
 func assessConfidence(statusCode int, responseBody, url string) (string, string) {
+	return assessConfidenceWithRepeatCount(statusCode, responseBody, url, recordResponseSignature(statusCode, responseBody))
+}
+
+func evaluateUnauthorizedConfidence(statusCode int, responseBody, url string) (string, string) {
+	repeatCount := responseSignatureTrackerCurrentCount(statusCode, responseBody)
+	if repeatCount == 0 {
+		repeatCount = recordResponseSignature(statusCode, responseBody)
+	}
+	return assessConfidenceWithRepeatCount(statusCode, responseBody, url, repeatCount)
+}
+
+func shouldRejectUnauthorizedResponse(statusCode int, responseBody, url string) (bool, string) {
+	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
+	repeatCount := recordResponseSignature(statusCode, responseBody)
+
+	if isLikelyGenericErrorResponse(bodyLower) {
+		return true, "响应内容命中通用错误模板，判定为未授权误报"
+	}
+
+	if statusCode == 500 && !containsMeaningfulDataSignals(bodyLower, url) {
+		return true, "响应状态为 500 且缺少有效业务数据，判定为未授权误报"
+	}
+
+	if repeatCount >= 3 && !containsMeaningfulDataSignals(bodyLower, url) {
+		return true, fmt.Sprintf("相同响应模板已重复出现 %d 次且缺少有效业务数据，判定为未授权误报", repeatCount)
+	}
+
+	return false, ""
+}
+
+func responseSignatureTrackerCurrentCount(statusCode int, responseBody string) int {
+	signature := buildResponseSignature(statusCode, responseBody)
+	responseSignatureTracker.Lock()
+	defer responseSignatureTracker.Unlock()
+	return responseSignatureTracker.counts[signature]
+}
+
+func assessConfidenceWithRepeatCount(statusCode int, responseBody, url string, repeatCount int) (string, string) {
 	score := 100
 	reasons := []string{}
 	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
@@ -600,7 +915,6 @@ func assessConfidence(statusCode int, responseBody, url string) (string, string)
 		reasons = append(reasons, "响应内容命中通用错误特征，疑似统一报错或访问限制提示")
 	}
 
-	repeatCount := recordResponseSignature(statusCode, responseBody)
 	switch {
 	case repeatCount >= 10:
 		score -= 45

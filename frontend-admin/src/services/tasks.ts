@@ -19,7 +19,9 @@ import { readStoredAuthToken } from '@/utils/session';
 
 type TaskTreeResponse = { data: TreeNode[] };
 type TaskRiskResponse = { data: unknown[] };
-type BackendAssetItem = AssetValue | { value?: string; source?: string | string[] };
+type BackendAssetItem =
+  | AssetValue
+  | { value?: string; source?: string | string[] };
 type BackendAssetData = Omit<Partial<AssetData>, 'apiRoot' | 'apiRouter'> & {
   apiRoots?: BackendAssetItem[];
   apiRoutes?: BackendAssetItem[];
@@ -94,6 +96,7 @@ type BackendRisk = {
   vuln_id?: string;
   title?: string;
   level?: Risk['level'];
+  status?: Risk['status'];
   confidence?: Risk['confidence'];
   type?: string;
   url?: string;
@@ -106,6 +109,10 @@ type BackendRisk = {
   decryption_status?: string;
   decryption_detail?: string;
   response_length?: number;
+  static_contexts?: Array<{
+    source_url?: string;
+    snippet?: string;
+  }>;
   confidence_reason?: string;
   deny_template_id?: string;
   deny_template_kind?: string;
@@ -165,6 +172,10 @@ export interface ProtocolExplainPayload {
 
 interface TaskVersionOptions {
   version?: number;
+}
+
+interface UpdateRiskStatusPayload {
+  status: NonNullable<Risk['status']>;
 }
 
 interface ProtocolExplainStreamOptions extends TaskVersionOptions {
@@ -335,12 +346,14 @@ export const fetchTaskRisks = (id: string, options: TaskVersionOptions = {}) =>
   });
 
 export const fetchTaskAssets = (id: string, options: TaskVersionOptions = {}) =>
-  request.get<TaskAssetResponse>(`/api/task/${id}/assets`, {
-    params: buildVersionParams(options.version),
-  }).then((response) => ({
-    ...response,
-    data: normalizeAssetData(response?.data),
-  }));
+  request
+    .get<TaskAssetResponse>(`/api/task/${id}/assets`, {
+      params: buildVersionParams(options.version),
+    })
+    .then((response) => ({
+      ...response,
+      data: normalizeAssetData(response?.data),
+    }));
 
 export const fetchTaskProtocolTraces = (
   id: string,
@@ -655,6 +668,11 @@ export const explainProtocolTraceStream = async (
 export const deleteTaskRisk = (riskId: string) =>
   request.delete(`/api/vuln/${riskId}`);
 
+export const updateTaskRiskStatus = (
+  riskId: string,
+  payload: UpdateRiskStatusPayload,
+) => request.patch(`/api/vuln/${riskId}/status`, payload);
+
 export const deleteTaskRiskCluster = (
   taskId: string,
   clusterId: string,
@@ -723,7 +741,9 @@ const normalizeAssetItemList = (items?: BackendAssetItem[]): AssetValue[] =>
     return result;
   }, []);
 
-const normalizeAssetData = (data?: BackendAssetData | null): AssetData | null => {
+const normalizeAssetData = (
+  data?: BackendAssetData | null,
+): AssetData | null => {
   if (!data) {
     return null;
   }
@@ -840,10 +860,14 @@ export const deriveAssetData = (
     const sources = Array.from(ipUrlSources.get(absoluteUrl) || []);
     const apiRoute = normalizeApiRoute(absoluteUrl);
     if (apiRoute) {
-      sources.forEach((source) => appendSource(apiRouterSources, apiRoute, source));
+      sources.forEach((source) =>
+        appendSource(apiRouterSources, apiRoute, source),
+      );
       const apiRoot = normalizeApiRoot(apiRoute);
       if (apiRoot) {
-        sources.forEach((source) => appendSource(apiRootSources, apiRoot, source));
+        sources.forEach((source) =>
+          appendSource(apiRootSources, apiRoot, source),
+        );
       }
     }
   });
@@ -875,6 +899,7 @@ export const normalizeRisks = (items: unknown[]): Risk[] =>
       id: risk.vuln_id || '',
       title: risk.title || '',
       level: normalizeRiskLevel(risk.level),
+      status: risk.status || 'open',
       confidence: risk.confidence || 'medium',
       type: risk.type || '',
       url: risk.url || '',
@@ -887,6 +912,12 @@ export const normalizeRisks = (items: unknown[]): Risk[] =>
       decryptionStatus: risk.decryption_status,
       decryptionDetail: risk.decryption_detail,
       responseLength: risk.response_length || 0,
+      staticContexts: (risk.static_contexts || [])
+        .map((item) => ({
+          sourceUrl: item?.source_url || '',
+          snippet: item?.snippet || '',
+        }))
+        .filter((item) => item.sourceUrl || item.snippet),
       confidenceReason: risk.confidence_reason || '',
       denyTemplateId: risk.deny_template_id || '',
       denyTemplateKind: risk.deny_template_kind || '',

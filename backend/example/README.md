@@ -11,6 +11,8 @@ example/
 │   └── main.go
 ├── callback/          # 回调函数示例（类似nuclei）
 │   └── main.go
+├── local-import/      # 本地引入 + 最小入侵桥接示例
+│   └── main.go
 └── config/            # 从配置文件加载示例
     └── main.go
 ```
@@ -32,6 +34,7 @@ go run main.go
 这个示例展示了：
 - 如何创建扫描选项
 - 如何配置各种选项（OpenAI、黑名单、高风险路由等）
+- 如何使用默认内存 `DataStore` 复用运行时上下文
 - 如何执行扫描并获取结果
 - 如何处理和显示扫描结果
 
@@ -47,6 +50,7 @@ go run main.go
 - 如何处理不同类型的事件（漏洞、资产、风险、进度、错误）
 - 如何根据回调结果控制扫描流程
 - 如何实现自定义的处理逻辑
+- 如何把接口请求/响应和协议轨迹写回你自己的数据库
 
 ### 配置文件示例
 
@@ -59,6 +63,19 @@ go run main.go
 - 如何从配置文件加载扫描选项
 - 如何在加载配置后修改选项
 - 如何结合配置文件和回调函数使用
+
+### 本地引入示例
+
+```bash
+cd example/local-import
+go run main.go
+```
+
+这个示例展示了：
+- 如何以本地 module 方式引用 SDK
+- 如何用一层桥接函数减少对业务代码的侵入
+- 如何把 SDK 事件回流到你自己的接收器
+- 如何为非 ES 场景预留自定义 `DataStore`
 
 ## 使用场景
 
@@ -93,6 +110,23 @@ options.OnResult = func(event lib.ScanEvent) bool {
 ```go
 options, err := lib.LoadScanOptionsFromFile("config.yaml")
 ```
+
+### 4. 自定义存储
+
+适用于你不希望依赖 ES，而要把上下文存到自己的数据库：
+
+```go
+options := lib.NewScanOptions()
+options.DataStore = myStore
+```
+
+这里的 `myStore` 需要实现：
+
+- `ListJSResources`
+- `ListAPIResources`
+- `ListProtocolTraces`
+
+如果你不传 `DataStore`，SDK 会自动创建内存版存储，并在单次扫描过程中复用浏览器抓到的 API 请求/响应与协议轨迹。
 
 ## 事件类型
 
@@ -130,9 +164,12 @@ SDK 支持以下事件类型：
 2. **并发安全**: 如果回调函数中需要访问共享数据，请使用互斥锁保护
 3. **性能考虑**: 回调函数应该快速执行，避免阻塞扫描流程
 4. **错误处理**: 建议在回调函数中添加错误处理逻辑
+5. **上下文复用**: 漏洞分析和静态协议分析会读取 `DataStore` 中的 JS/API/协议轨迹；如果你要跨任务重载结果，建议把这些事件持久化
+6. **无 ES 场景**: SDK 已支持不依赖 ES 运行，默认内存存储适合单次扫描，自定义 `DataStore` 适合平台化接入
 
 ## 更多信息
 
 更多详细信息请参考：
 - SDK 源码: `backend/pkg/lib/sdk.go`
+- SDK 文档: `backend/docs/sdk-usage.md`
 - 主程序: `backend/main.go`

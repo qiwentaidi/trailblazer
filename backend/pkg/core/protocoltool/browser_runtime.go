@@ -30,7 +30,12 @@ func DecryptWithStoredFrontendBrowserRuntime(taskID, pageURL, requestURL, cipher
 		return "", fmt.Errorf("missing task id")
 	}
 
-	jsResources, err := database.QueryJSByTaskID(taskID)
+	store := database.GetScanDataStore()
+	if store == nil {
+		return "", fmt.Errorf("scan data store not configured")
+	}
+
+	jsResources, err := store.ListJSResources(taskID)
 	if err != nil {
 		return "", err
 	}

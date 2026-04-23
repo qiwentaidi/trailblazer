@@ -2,9 +2,9 @@ import {
   DeleteOutlined,
   EyeOutlined,
   LoadingOutlined,
-  PlusOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  PlusOutlined,
   RedoOutlined,
 } from '@ant-design/icons';
 import {
@@ -25,10 +25,10 @@ import { useEffect, useRef, useState } from 'react';
 import {
   deleteTaskRecord,
   fetchTasks,
-  type FetchTasksFilters,
   restartTaskScan,
   startTaskScan,
   stopTaskScan,
+  type FetchTasksFilters,
 } from '@/services/tasks';
 import type { TaskSummary } from '@/types/task';
 import { formatDateTime } from '@/utils/datetime';
@@ -422,25 +422,18 @@ export default function TasksPage() {
     {
       title: '扫描次数',
       key: 'scanCount',
-      width: 160,
+      width: 120,
       render: (_: unknown, record: TaskSummary) => {
         const scanCount = resolveTaskScanCount(record);
         if (!scanCount) {
           return '-';
         }
 
-        return (
-          <Space direction="vertical" size={0}>
-            <Typography.Text strong>{scanCount} 次</Typography.Text>
-            <Typography.Text type="secondary">
-              最新版本 v{record.latestVersion || scanCount}
-            </Typography.Text>
-          </Space>
-        );
+        return <Typography.Text strong>{scanCount} 次</Typography.Text>;
       },
     },
     {
-      title: '最高风险',
+      title: '风险等级',
       dataIndex: 'highestRiskLevel',
       width: 120,
       render: (value: string | undefined) =>
@@ -505,7 +498,9 @@ export default function TasksPage() {
             allowClear
             value={statusFilter}
             placeholder="按状态筛选"
-            options={STATUS_OPTIONS.filter((option) => option.value !== undefined)}
+            options={STATUS_OPTIONS.filter(
+              (option) => option.value !== undefined,
+            )}
             style={{ width: 168 }}
             onChange={(value) => {
               setStatusFilter(value);
@@ -519,13 +514,17 @@ export default function TasksPage() {
         </Space>
 
         <div
-          style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}
         >
-          <Typography.Text type="secondary">
-            列表保留分页、执行与删除操作，后续会补齐筛选和批量能力。
-          </Typography.Text>
           <Space wrap>
-            <Button onClick={() => void loadTasks(page, pageSize, currentFilters)}>
+            <Button
+              onClick={() => void loadTasks(page, pageSize, currentFilters)}
+            >
               刷新
             </Button>
             <Button

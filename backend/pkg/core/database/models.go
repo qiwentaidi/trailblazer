@@ -16,6 +16,77 @@ type TaskRecord struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// BrowserSessionRecord 受控浏览器会话
+type BrowserSessionRecord struct {
+	SessionID             string    `json:"session_id"`
+	SiteHost              string    `json:"site_host"`
+	EntryURL              string    `json:"entry_url"`
+	Status                string    `json:"status"`
+	Mode                  string    `json:"mode"`
+	BrowserMode           string    `json:"browser_mode,omitempty"`
+	ProxyType             string    `json:"proxy_type,omitempty"`
+	ProxyAddress          string    `json:"proxy_address,omitempty"`
+	BrowserVisible        bool      `json:"browser_visible"`
+	PageCount             int       `json:"page_count"`
+	RequestCount          int       `json:"request_count"`
+	SuspiciousCryptoCount int       `json:"suspicious_crypto_count"`
+	StartedAt             time.Time `json:"started_at"`
+	EndedAt               time.Time `json:"ended_at,omitempty"`
+	LastActivityAt        time.Time `json:"last_activity_at"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+// BrowserPageRecord 会话下的页面/标签页记录
+type BrowserPageRecord struct {
+	PageID     string    `json:"page_id"`
+	SessionID  string    `json:"session_id"`
+	URL        string    `json:"url"`
+	Title      string    `json:"title,omitempty"`
+	IsEntry    bool      `json:"is_entry"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+}
+
+// BrowserSessionRequestRecord 会话下的请求/响应历史
+type BrowserSessionRequestRecord struct {
+	ID               int64             `json:"id"`
+	SessionID        string            `json:"session_id"`
+	TraceID          string            `json:"trace_id,omitempty"`
+	URL              string            `json:"url"`
+	Method           string            `json:"method"`
+	ResourceType     string            `json:"resource_type,omitempty"`
+	RequestHeaders   map[string]string `json:"request_headers,omitempty"`
+	RequestBody      string            `json:"request_body,omitempty"`
+	ResponseHeaders  map[string]string `json:"response_headers,omitempty"`
+	ResponseBody     string            `json:"response_body,omitempty"`
+	ResponseCode     int               `json:"response_code,omitempty"`
+	MIMEType         string            `json:"mime_type,omitempty"`
+	HasProtocolTrace bool              `json:"has_protocol_trace,omitempty"`
+	IsSuspicious     bool              `json:"is_suspicious"`
+	SuspiciousTrace  string            `json:"suspicious_trace,omitempty"`
+	CreatedAt        time.Time         `json:"created_at"`
+}
+
+// BrowserSessionTraceRecord 会话下的可疑协议轨迹摘要
+type BrowserSessionTraceRecord struct {
+	ID                     int64                `json:"id"`
+	SessionID              string               `json:"session_id"`
+	TraceID                string               `json:"trace_id"`
+	RequestURL             string               `json:"request_url"`
+	Method                 string               `json:"method"`
+	Algorithms             []string             `json:"algorithms"`
+	RequestBeforeTransform string               `json:"request_before_transform,omitempty"`
+	FinalRequestBody       string               `json:"final_request_body,omitempty"`
+	RequestSteps           []ProtocolCryptoStep `json:"request_steps,omitempty"`
+	ResponseSteps          []ProtocolCryptoStep `json:"response_steps,omitempty"`
+	SessionMaterials       map[string]string    `json:"session_materials,omitempty"`
+	ResponsePlaintext      string               `json:"response_plaintext,omitempty"`
+	ResponseCiphertext     string               `json:"response_ciphertext,omitempty"`
+	SuspiciousReason       string               `json:"suspicious_reason,omitempty"`
+	CreatedAt              time.Time            `json:"created_at"`
+}
+
 // SiteTreeNode 网站树节点
 type SiteTreeNode struct {
 	TaskID    string    `json:"task_id"`
@@ -92,6 +163,11 @@ type ProtocolTraceRecord struct {
 	Algorithms             []string             `json:"algorithms,omitempty"`
 	Stack                  string               `json:"stack,omitempty"`
 	CreatedAt              time.Time            `json:"created_at"`
+}
+
+type VulnStaticContext struct {
+	SourceURL string `json:"source_url"`
+	Snippet   string `json:"snippet"`
 }
 
 func (r *ProtocolTraceRecord) NormalizeForView() {
@@ -732,31 +808,33 @@ func decodeHexASCII(text string) string {
 
 // VulnRecord 漏洞记录
 type VulnRecord struct {
-	TaskID             string    `json:"task_id"`
-	Version            int       `json:"version"`
-	VulnID             string    `json:"vuln_id"`
-	Title              string    `json:"title"`
-	Level              string    `json:"level"` // high, medium, low, info
-	Type               string    `json:"type"`
-	URL                string    `json:"url"`
-	Method             string    `json:"method,omitempty"`
-	Request            string    `json:"request,omitempty"`
-	Response           string    `json:"response,omitempty"`
-	TraceID            string    `json:"trace_id,omitempty"`
-	HasProtocolTrace   bool      `json:"has_protocol_trace,omitempty"`
-	ResponseCiphertext string    `json:"response_ciphertext,omitempty"`
-	DecryptionStatus   string    `json:"decryption_status,omitempty"`
-	DecryptionDetail   string    `json:"decryption_detail,omitempty"`
-	ResponseLength     int       `json:"response_length,omitempty"` // 原始响应长度（字节）
-	Confidence         string    `json:"confidence,omitempty"`
-	ConfidenceReason   string    `json:"confidence_reason,omitempty"`
-	DenyTemplateID     string    `json:"deny_template_id,omitempty"`
-	DenyTemplateKind   string    `json:"deny_template_kind,omitempty"`
-	DenyTemplateLabel  string    `json:"deny_template_label,omitempty"`
-	DenyTemplateCount  int       `json:"deny_template_count,omitempty"`
-	Description        string    `json:"description"`
-	AIVerified         bool      `json:"ai_verified"` // AI辅助验证标记
-	CreatedAt          time.Time `json:"created_at"`
+	TaskID             string              `json:"task_id"`
+	Version            int                 `json:"version"`
+	VulnID             string              `json:"vuln_id"`
+	Title              string              `json:"title"`
+	Level              string              `json:"level"` // high, medium, low, info
+	Status             string              `json:"status,omitempty"`
+	Type               string              `json:"type"`
+	URL                string              `json:"url"`
+	Method             string              `json:"method,omitempty"`
+	Request            string              `json:"request,omitempty"`
+	Response           string              `json:"response,omitempty"`
+	TraceID            string              `json:"trace_id,omitempty"`
+	HasProtocolTrace   bool                `json:"has_protocol_trace,omitempty"`
+	ResponseCiphertext string              `json:"response_ciphertext,omitempty"`
+	DecryptionStatus   string              `json:"decryption_status,omitempty"`
+	DecryptionDetail   string              `json:"decryption_detail,omitempty"`
+	ResponseLength     int                 `json:"response_length,omitempty"` // 原始响应长度（字节）
+	Confidence         string              `json:"confidence,omitempty"`
+	ConfidenceReason   string              `json:"confidence_reason,omitempty"`
+	DenyTemplateID     string              `json:"deny_template_id,omitempty"`
+	DenyTemplateKind   string              `json:"deny_template_kind,omitempty"`
+	DenyTemplateLabel  string              `json:"deny_template_label,omitempty"`
+	DenyTemplateCount  int                 `json:"deny_template_count,omitempty"`
+	StaticContexts     []VulnStaticContext `json:"static_contexts,omitempty"`
+	Description        string              `json:"description"`
+	AIVerified         bool                `json:"ai_verified"` // AI辅助验证标记
+	CreatedAt          time.Time           `json:"created_at"`
 }
 
 // AssetRecord 资产记录（统一存储所有资产类型）
@@ -785,12 +863,13 @@ type User struct {
 
 // ES 索引名称
 const (
-	IndexSiteTree = "trailblazer-sitetree"
-	IndexJS       = "trailblazer-js"
-	IndexAPI      = "trailblazer-api"
-	IndexProtocol = "trailblazer-protocol"
-	IndexVuln     = "trailblazer-vuln"
-	IndexAsset    = "trailblazer-asset"
+	IndexSiteTree               = "trailblazer-sitetree"
+	IndexJS                     = "trailblazer-js"
+	IndexAPI                    = "trailblazer-api"
+	IndexProtocol               = "trailblazer-protocol"
+	IndexStaticProtocolAnalysis = "trailblazer-static-protocol"
+	IndexVuln                   = "trailblazer-vuln"
+	IndexAsset                  = "trailblazer-asset"
 )
 
 // SaveSiteTreeNode 保存网站树节点
@@ -815,6 +894,10 @@ func SaveProtocolTrace(trace ProtocolTraceRecord) error {
 
 // SaveVuln 保存漏洞
 func SaveVuln(vuln VulnRecord) error {
+	if strings.TrimSpace(vuln.Status) == "" {
+		vuln.Status = "open"
+	}
+
 	err := InsertToES(vuln, IndexVuln, false)
 	if err != nil {
 		return err

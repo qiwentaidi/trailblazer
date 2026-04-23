@@ -5,19 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 	"trailblazer/pkg/config"
 	"trailblazer/pkg/core/crawl"
 	"trailblazer/pkg/core/database"
-	"trailblazer/pkg/core/structs"
+	"trailblazer/pkg/core/scanexec"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
 	"gopkg.in/yaml.v3"
 )
@@ -118,6 +114,33 @@ func nonEmptySourceList(sources ...string) []string {
 			continue
 		}
 		result = append(result, trimmed)
+	}
+	return result
+}
+
+func convertSharedSensitiveItems(items []scanexec.SensitiveItem) []SensitiveItem {
+	result := make([]SensitiveItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, SensitiveItem{
+			Value:  item.Value,
+			Source: item.Source,
+		})
+	}
+	return result
+}
+
+func convertSharedRisks(items []scanexec.RiskItem) []RiskItem {
+	result := make([]RiskItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, RiskItem{
+			ID:          item.ID,
+			Title:       item.Title,
+			Level:       item.Level,
+			Type:        item.Type,
+			URL:         item.URL,
+			Description: item.Description,
+			CreatedAt:   item.CreatedAt,
+		})
 	}
 	return result
 }
@@ -246,13 +269,6 @@ func performAsyncScan(urls []string, taskId string) {
 	for i, targetURL := range urls {
 		fmt.Printf("[INFO] Processing URL %d/%d: %s\n", i+1, len(urls), targetURL)
 
-		// 存活验证
-		_, err = clients.SimpleGet(targetURL, clients.DefaultRestyClient())
-		if err != nil {
-			fmt.Printf("[WARNING] Target %s is not accessible: %v\n", targetURL, err)
-			continue
-		}
-
 		result := ScanResult{
 			TaskID: taskId,
 			Target: targetURL,
@@ -260,14 +276,23 @@ func performAsyncScan(urls []string, taskId string) {
 			Risks:  []RiskItem{},
 		}
 
-		e := crawl.Extract{}
-		filter := crawl.Filter{}
+		targetScanResult, err := scanexec.RunTarget(targetURL, scanexec.Options{
+			TaskID:         taskId,
+			Version:        version,
+			BlackDomain:    config.BlackDomain,
+			HighRiskRouter: config.HighRiskRouter,
+			Authentication: config.Authentication,
+			Placeholder:    config.Placeholder,
+			OpenAI:         config.OpenAI,
+			VulnDetection:  resolvedVulnDetection,
+			DataStore:      database.GetScanDataStore(),
+		})
+		if err != nil {
+			fmt.Printf("[WARNING] Target %s is not accessible: %v\n", targetURL, err)
+			continue
+		}
 
-		// 1. 捕获网络链接和运行时接口请求/响应记录
-		allNetworkURLs, capturedAPIRecords, protocolTraces := crawl.CaptureNetworkActivity(targetURL)
-
-		// 2. 生成网站树并保存到ES
-		result.TreeData = crawl.BuildElTree(allNetworkURLs)
+		result.TreeData = targetScanResult.TreeData
 		if database.ESClient != nil {
 			saveTreeToESWithURL(taskId, version, targetURL, result.TreeData, now)
 			fmt.Printf("[DEBUG] Saved %d tree nodes to ES for task %s (URL: %s)\n", countTreeNodes(result.TreeData), taskId, targetURL)
@@ -275,120 +300,23 @@ func performAsyncScan(urls []string, taskId string) {
 			fmt.Printf("[DEBUG] ES client is nil, tree not saved\n")
 		}
 
-		// 3. 分类链接（使用已捕获的链接）
-		classified := e.ClassifyLinks(allNetworkURLs, config.BlackDomain)
-
-		// 4. 静态JS提取 + 合并去重
-		var allJS []string
-		staticJsLinks := filter.Blacklist(e.StaticJSLink(targetURL), config.BlackDomain)
-		classified.Classification.JS = filter.Blacklist(classified.Classification.JS, config.BlackDomain)
-
-		allJS = classified.Classification.JS
-		if len(classified.Classification.JS) > 0 {
-			for _, static := range staticJsLinks {
-				present := false
-				for _, dynamic := range classified.Classification.JS {
-					if strings.Contains(dynamic, static) || strings.Contains(static, dynamic) {
-						present = true
-						break
-					}
-				}
-				if !present {
-					allJS = append(allJS, static)
-				}
-			}
-		} else {
-			allJS = append(allJS, staticJsLinks...)
-		}
-		allJS = arrayutil.RemoveDuplicates(allJS)
-		staticHeaderHints := make(map[string]map[string]string)
-		staticMethodHints := make(map[string]string)
-		staticConstantParamHints := make(map[string]url.Values)
-		staticRequestPayloadHints := make(map[string]structs.StaticRequestPayloadHint)
-
-		const maxStaticHintJS = 40
-		filteredHintJS := make([]database.JSResource, 0, maxStaticHintJS)
-		for _, jsURL := range allJS {
-			if len(filteredHintJS) >= maxStaticHintJS {
-				break
-			}
-			if filter.IsBlacklist(jsURL, config.BlackDomain) {
-				continue
-			}
-			resp, err := clients.SimpleGet(jsURL, clients.DefaultRestyClient())
-			if err != nil {
-				continue
-			}
-			filteredHintJS = append(filteredHintJS, database.JSResource{
-				TaskID:       taskId,
-				Version:      version,
-				URL:          jsURL,
-				Content:      string(resp.Body()),
-				ResponseCode: resp.StatusCode(),
-				Size:         len(resp.Body()),
-				FetchedAt:    time.Now(),
-			})
-		}
-		hintStartedAt := time.Now()
-		hintBundle := crawl.BuildStaticEndpointHintBundle(filteredHintJS)
-		if len(hintBundle.ConstantParams) > 0 {
-			staticConstantParamHints = hintBundle.ConstantParams
-			fmt.Printf("[DEBUG] Built %d static constant-param endpoint hints for %s\n", len(hintBundle.ConstantParams), targetURL)
-		}
-		if len(hintBundle.Methods) > 0 {
-			staticMethodHints = hintBundle.Methods
-			fmt.Printf("[DEBUG] Built %d static method endpoint hints for %s\n", len(hintBundle.Methods), targetURL)
-		}
-		if len(hintBundle.Headers) > 0 {
-			staticHeaderHints = hintBundle.Headers
-			fmt.Printf("[DEBUG] Built %d static header endpoint hints for %s\n", len(hintBundle.Headers), targetURL)
-		}
-		if len(hintBundle.RequestPayload) > 0 {
-			staticRequestPayloadHints = hintBundle.RequestPayload
-			fmt.Printf("[DEBUG] Built %d static payload endpoint hints for %s\n", len(hintBundle.RequestPayload), targetURL)
-		}
-		fmt.Printf("[INFO] Static endpoint hint analysis finished for %s in %s (js=%d)\n", targetURL, time.Since(hintStartedAt).Round(time.Millisecond), len(filteredHintJS))
-
-		// 保存JS资源到ES（采样保存，避免数据量过大，且过滤黑名单域名）
 		if database.ESClient != nil {
-			filter := crawl.Filter{}
 			savedCount := 0
-			for _, jsURL := range allJS {
+			for _, jsResource := range targetScanResult.JSResources {
 				if savedCount >= 50 { // 限制最多保存50个JS
 					break
 				}
-
-				// 黑名单过滤：跳过黑名单域名的JS
-				if filter.IsBlacklist(jsURL, config.BlackDomain) {
-					fmt.Printf("[DEBUG] Skipped blacklisted JS: %s\n", jsURL)
-					continue
-				}
-
 				savedCount++
-				// 异步保存，不阻塞主流程
-				go func(url string) {
-					resp, err := clients.SimpleGet(url, clients.DefaultRestyClient())
-					if err != nil {
-						return
+				go func(resource database.JSResource) {
+					if err := database.SaveJSResource(resource); err != nil {
+						fmt.Printf("[ERROR] Failed to save JS %s: %v\n", resource.URL, err)
 					}
-					err = database.SaveJSResource(database.JSResource{
-						TaskID:       taskId,
-						Version:      version,
-						URL:          url,
-						Content:      string(resp.Body()),
-						ResponseCode: resp.StatusCode(),
-						Size:         len(resp.Body()),
-						FetchedAt:    time.Now(),
-					})
-					if err != nil {
-						fmt.Printf("[ERROR] Failed to save JS %s: %v\n", url, err)
-					}
-				}(jsURL)
+				}(jsResource)
 			}
-			fmt.Printf("[DEBUG] Scheduled %d JS files for saving (out of %d total)\n", savedCount, len(allJS))
+			fmt.Printf("[DEBUG] Scheduled %d JS files for saving (out of %d total)\n", savedCount, len(targetScanResult.JSResources))
 
 			savedAPIRecordCount := 0
-			for _, apiRecord := range capturedAPIRecords {
+			for _, apiRecord := range targetScanResult.APIRecords {
 				savedAPIRecordCount++
 				go func(record crawl.NetworkRecord) {
 					err := database.SaveAPIResource(database.APIResource{
@@ -413,7 +341,7 @@ func performAsyncScan(urls []string, taskId string) {
 			fmt.Printf("[DEBUG] Scheduled %d API records for saving\n", savedAPIRecordCount)
 
 			savedProtocolTraceCount := 0
-			for _, trace := range protocolTraces {
+			for _, trace := range targetScanResult.ProtocolTraces {
 				savedProtocolTraceCount++
 				go func(record crawl.ProtocolTraceRecord) {
 					requestSteps := make([]database.ProtocolCryptoStep, 0, len(record.RequestSteps))
@@ -468,129 +396,17 @@ func performAsyncScan(urls []string, taskId string) {
 			fmt.Printf("[DEBUG] Scheduled %d protocol traces for saving\n", savedProtocolTraceCount)
 		}
 
-		// 5. 初始化AI检测器（如果启用）
-		var aiChecker *crawl.SensitiveInfoChecker
-		if config.OpenAI.Enabled && config.OpenAI.APIKey != "" {
-			aiChecker = crawl.NewSensitiveInfoChecker(
-				config.OpenAI.APIKey,
-				config.OpenAI.BaseURL,
-				config.OpenAI.Model,
-			)
-			fmt.Printf("[INFO] AI-assisted sensitive info detection enabled (model: %s)\n", config.OpenAI.Model)
-		} else {
-			fmt.Printf("[INFO] AI detection disabled, using regex only\n")
-		}
-
-		// 6. 从JS中提取资产（使用AI过滤）
-		findSomething := crawl.Scan(targetURL, allJS, aiChecker)
-		// 转换资产数据
-		for _, item := range findSomething.Email {
-			result.Assets.Email = append(result.Assets.Email, SensitiveItem{
-				Value:  item.Filed,
-				Source: item.Source,
-			})
-		}
-		for _, item := range findSomething.IDCard {
-			result.Assets.IDCard = append(result.Assets.IDCard, SensitiveItem{
-				Value:  item.Filed,
-				Source: item.Source,
-			})
-		}
-		for _, item := range findSomething.Phone {
-			result.Assets.Phone = append(result.Assets.Phone, SensitiveItem{
-				Value:  item.Filed,
-				Source: item.Source,
-			})
-		}
-		for _, item := range findSomething.IP_URL {
-			result.Assets.IPURL = append(result.Assets.IPURL, SensitiveItem{
-				Value:  item.Filed,
-				Source: item.Source,
-			})
-		}
-		for _, item := range findSomething.Sensitive {
-			result.Assets.Sensitive = append(result.Assets.Sensitive, SensitiveItem{
-				Value:  item.Filed,
-				Source: item.Source,
-			})
-		}
-
-		// 7. API路由整合
-		var apiRouter []string
-		for _, item := range findSomething.APIRoute {
-			if strings.Contains(item.Filed, "[") || strings.Contains(item.Filed, "]") {
-				continue
-			}
-			// 删除空行和空白字符
-			route := strings.TrimSpace(item.Filed)
-			if route != "" {
-				apiRouter = append(apiRouter, route)
-			}
-		}
-		for _, route := range classified.Classification.APIRoute {
-			// 删除空行和空白字符
-			trimmedRoute := strings.TrimSpace(route)
-			if trimmedRoute != "" {
-				apiRouter = append(apiRouter, trimmedRoute)
-			}
-		}
-		apiRouter = arrayutil.RemoveDuplicates(apiRouter)
-		apiRouter = filter.FilterAPIRoutes(apiRouter)
-
-		// 排序：优先处理完整URL的API（以http://或https://开头的排在前面），一般完整的URL都是动态链接获取到的准确度比较高，先访问也防止后续被WAF等设备拦截
-		sort.Slice(apiRouter, func(i, j int) bool {
-			iIsFullURL := strings.HasPrefix(apiRouter[i], "http://") || strings.HasPrefix(apiRouter[i], "https://")
-			jIsFullURL := strings.HasPrefix(apiRouter[j], "http://") || strings.HasPrefix(apiRouter[j], "https://")
-
-			// 如果一个是完整URL，另一个不是，完整URL排在前面
-			if iIsFullURL && !jIsFullURL {
-				return true
-			}
-			if !iIsFullURL && jIsFullURL {
-				return false
-			}
-			// 如果都是完整URL或都不是，保持原有顺序（稳定排序）
-			return false
-		})
-
-		result.Assets.APIRoutes = apiRouter
-
-		// 8. API根路径分析
-		apiRoots := filter.APIRoots(apiRouter, 1)
-		allApiRoots := classified.Classification.APIRoot
-		// 残缺的API路径还需要拼接，但是如果有完整的就跳过
-		// e.g. apiRoots: ["/api/v1", "/api/v2"] classified.Classification.APIRoot: ["http://127.0.0.1:8080/api/v1"]
-		for _, item := range classified.Classification.APIRoot {
-			for _, v := range apiRoots {
-				if !strings.Contains(item, v) {
-					allApiRoots = append(allApiRoots, v)
-				}
-			}
-		}
-		allApiRoots = append(allApiRoots, apiRoots...)
-		allApiRoots = arrayutil.RemoveDuplicates(allApiRoots)
-
-		if parsedURL, err := url.Parse(targetURL); err == nil && parsedURL.Scheme != "" && parsedURL.Host != "" {
-			siteRoot := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
-			allApiRoots = append(allApiRoots, siteRoot)
-			allApiRoots = arrayutil.RemoveDuplicates(allApiRoots)
-		}
-
-		if len(allApiRoots) == 0 {
-			if parsedURL, err := url.Parse(targetURL); err == nil && parsedURL.Scheme != "" && parsedURL.Host != "" {
-				fallbackRoot := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
-				fmt.Printf("[INFO] No API root detected, using target root as fallback: %s\n", fallbackRoot)
-				allApiRoots = append(allApiRoots, fallbackRoot)
-			} else {
-				fmt.Printf("[WARN] No API root detected and failed to parse target URL: %s\n", targetURL)
-			}
-		}
-
-		result.APIRoots = allApiRoots
+		result.Assets.Email = convertSharedSensitiveItems(targetScanResult.Assets.Email)
+		result.Assets.IDCard = convertSharedSensitiveItems(targetScanResult.Assets.IDCard)
+		result.Assets.Phone = convertSharedSensitiveItems(targetScanResult.Assets.Phone)
+		result.Assets.IPURL = convertSharedSensitiveItems(targetScanResult.Assets.IPURL)
+		result.Assets.Sensitive = convertSharedSensitiveItems(targetScanResult.Assets.Sensitive)
+		result.Assets.APIRoutes = targetScanResult.Assets.APIRoutes
+		result.APIRoots = targetScanResult.Assets.APIRoots
 
 		currentIPURLAssets := assetValuesFromSensitiveItems(result.Assets.IPURL)
-		currentAPIRouterAssets := assetValuesFromStrings(apiRouter, targetURL)
-		currentAPIRootAssets := buildAPIRootAssetValues(allApiRoots, apiRouter, targetURL)
+		currentAPIRouterAssets := assetValuesFromStrings(result.Assets.APIRoutes, targetURL)
+		currentAPIRootAssets := buildAPIRootAssetValues(result.APIRoots, result.Assets.APIRoutes, targetURL)
 
 		// 收集当前URL的资产数据
 		for _, item := range currentIPURLAssets {
@@ -605,7 +421,7 @@ func performAsyncScan(urls []string, taskId string) {
 		}
 
 		fmt.Printf("[DEBUG] Collected assets for URL %s: %d IP/URLs, %d API roots, %d API routes\n",
-			targetURL, len(result.Assets.IPURL), len(allApiRoots), len(apiRouter))
+			targetURL, len(result.Assets.IPURL), len(result.APIRoots), len(result.Assets.APIRoutes))
 
 		// 立即保存当前URL的资产数据到ES（在漏洞检测之前）
 		if database.ESClient != nil {
@@ -631,88 +447,31 @@ func performAsyncScan(urls []string, taskId string) {
 			}
 		}
 
-		// 8. 漏洞检测（API漏洞扫描）
-		// 调用 AnalyzeAPI 进行漏洞检测（每个API根路径）
-		for _, root := range allApiRoots {
-			fmt.Printf("[INFO] Analyzing API root: %s\n", root)
-			options := structs.JSFindOptions{
-				TaskID:                    taskId, // 传递任务ID，用于保存漏洞结果
-				Version:                   version,
-				HomeURL:                   targetURL,
-				ApiList:                   apiRouter,
-				ApiRoot:                   root,
-				StaticMethodHints:         staticMethodHints,
-				StaticHeaderHints:         staticHeaderHints,
-				StaticConstantParams:      staticConstantParamHints,
-				StaticRequestPayloadHints: staticRequestPayloadHints,
-				SkipVulnScan:              !resolvedVulnDetection.Enabled,
-				HighRiskRouter:            config.HighRiskRouter,
-				Authentication:            config.Authentication,
-				Placeholder:               config.Placeholder,
-				LFIConfig:                 resolvedVulnDetection.LFI,
-				SSRFConfig:                resolvedVulnDetection.SSRF,
-				RedirectConfig:            resolvedVulnDetection.Redirect,
-				SQLInjConfig:              resolvedVulnDetection.SQLInjection,
-				XSSConfig:                 resolvedVulnDetection.XSS,
-				UploadConfig:              resolvedVulnDetection.Upload,
-				AIChecker:                 aiChecker, // 传递AI检测器用于文件上传检测
-			}
-
-			// 调用漏洞检测（异步执行，不阻塞主流程）
-			// 检测结果会直接保存到数据库或打印到日志
-			crawl.AnalyzeAPI(options)
-		}
-
-		// 生成风险项
-		timestamp := time.Now().Format("2006-01-02 15:04:05")
-
-		// 检查是否启用了AI辅助验证
-		aiEnabled := aiChecker != nil
-
-		// 生成风险项并保存到ES
-		saveAssetAndRisk := func(level, title, riskType string, items []SensitiveItem, isAIVerified bool) {
-			for _, item := range items {
-				riskID := uuid.New().String()
-				risk := RiskItem{
-					ID:          riskID,
-					Title:       title,
-					Level:       level,
-					Type:        riskType,
-					URL:         item.Source,
-					Description: fmt.Sprintf("发现%s: %s", title, item.Value),
-					CreatedAt:   timestamp,
-				}
-				result.Risks = append(result.Risks, risk)
-
-				// 保存到ES（只保存漏洞记录，不保存资产记录）
-				if database.ESClient != nil {
-					database.SaveVuln(database.VulnRecord{
-						TaskID:      taskId,
-						Version:     version,
-						VulnID:      riskID,
-						Title:       title,
-						Level:       level,
-						Type:        riskType,
-						URL:         item.Source,
-						Description: risk.Description,
-						AIVerified:  isAIVerified, // 只有经过AI验证的才标记为true
-						CreatedAt:   now,
-					})
+		if database.ESClient != nil {
+			for _, vulnRecord := range targetScanResult.Vulnerabilities {
+				if err := database.SaveVuln(vulnRecord); err != nil {
+					fmt.Printf("[ERROR] Failed to save vulnerability %s %s: %v\n", vulnRecord.Method, vulnRecord.URL, err)
 				}
 			}
 		}
 
-		// 身份证 - 低危（不经过AI验证）
-		saveAssetAndRisk("low", "身份证号码泄露", "敏感信息泄露", result.Assets.IDCard, false)
-
-		// 手机号 - 低危（不经过AI验证）
-		saveAssetAndRisk("low", "手机号码泄露", "敏感信息泄露", result.Assets.Phone, false)
-
-		// 敏感关键词 - 中危（经过AI验证）
-		saveAssetAndRisk("medium", "敏感关键词泄露", "敏感信息泄露", result.Assets.Sensitive, aiEnabled)
-
-		// 邮箱 - 信息级别（不经过AI验证）
-		saveAssetAndRisk("info", "邮箱信息泄露", "信息泄露", result.Assets.Email, false)
+		result.Risks = convertSharedRisks(targetScanResult.Risks)
+		for _, risk := range result.Risks {
+			if database.ESClient != nil {
+				database.SaveVuln(database.VulnRecord{
+					TaskID:      taskId,
+					Version:     version,
+					VulnID:      risk.ID,
+					Title:       risk.Title,
+					Level:       risk.Level,
+					Type:        risk.Type,
+					URL:         risk.URL,
+					Description: risk.Description,
+					AIVerified:  false,
+					CreatedAt:   now,
+				})
+			}
+		}
 
 		// 将当前URL的结果添加到总结果中
 		allResults = append(allResults, result)

@@ -206,15 +206,8 @@ func Scan(target string, jsLinks []string, aiChecker *SensitiveInfoChecker) stru
 	if aiChecker != nil {
 		aiStartedAt := time.Now()
 
-		// 只提取敏感关键词的值
-		sensitiveValues := extractFields(fs.Sensitive)
-		fmt.Printf("[INFO] Starting AI-assisted filtering for sensitive keywords... (candidates=%d)\n", len(sensitiveValues))
-
-		// AI过滤敏感关键词
-		filteredSensitive := filterWithAI(aiChecker, sensitiveValues)
-
-		// 根据过滤结果保留对应的InfoSource
-		fs.Sensitive = filterInfoSourceByFields(fs.Sensitive, filteredSensitive)
+		fmt.Printf("[INFO] Starting AI-assisted filtering for sensitive keywords... (candidates=%d)\n", len(fs.Sensitive))
+		fs.Sensitive = filterInfoSourceWithAI(aiChecker, fs.Sensitive)
 
 		fmt.Printf("[INFO] Sensitive keywords after AI filtering: %d items (elapsed=%s)\n", len(fs.Sensitive), time.Since(aiStartedAt).Round(time.Millisecond))
 	}
@@ -302,6 +295,51 @@ func filterWithAI(checker *SensitiveInfoChecker, items []string) []string {
 	return filtered
 }
 
+func filterInfoSourceWithAI(checker *SensitiveInfoChecker, sources []structs.InfoSource) []structs.InfoSource {
+	if checker == nil {
+		return sources
+	}
+
+	if len(sources) == 0 {
+		return sources
+	}
+
+	filtered := make([]structs.InfoSource, 0, len(sources))
+	var confirmed, rejected, failed int
+
+	for _, item := range sources {
+		if item.Filed == "" {
+			continue
+		}
+
+		isSensitive, err := checker.Check(item.Filed)
+		if err != nil {
+			fmt.Printf("[WARNING] AI detection failed for '%s': %v, keeping original\n", item.Filed, err)
+			item.AIVerified = false
+			filtered = append(filtered, item)
+			failed++
+			continue
+		}
+
+		if isSensitive {
+			item.AIVerified = true
+			filtered = append(filtered, item)
+			confirmed++
+			fmt.Printf("[INFO] AI confirmed: %s\n", truncateString(item.Filed, 50))
+		} else {
+			rejected++
+			fmt.Printf("[INFO] AI rejected: %s\n", truncateString(item.Filed, 50))
+		}
+	}
+
+	if confirmed > 0 || rejected > 0 {
+		fmt.Printf("[INFO] AI result: %d confirmed, %d rejected, %d errors (total: %d)\n",
+			confirmed, rejected, failed, len(sources))
+	}
+
+	return filtered
+}
+
 // truncateString 截断字符串用于日志显示
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
@@ -313,7 +351,7 @@ func truncateString(s string, maxLen int) string {
 func AppendSource(source string, filed []string) *[]structs.InfoSource {
 	is := []structs.InfoSource{}
 	for _, f := range filed {
-		is = append(is, structs.InfoSource{Filed: f, Source: source})
+		is = append(is, structs.InfoSource{Filed: f, Source: source, AIVerified: false})
 	}
 	return &is
 }
@@ -1349,7 +1387,14 @@ type unauthorizedURLMeta struct {
 }
 
 func loadUnauthorizedAPIResourceIndex(o structs.JSFindOptions) *unauthorizedAPIResourceIndex {
-	if strings.TrimSpace(o.TaskID) == "" || database.ESClient == nil {
+	if strings.TrimSpace(o.TaskID) == "" {
+		return nil
+	}
+	store := o.DataStore
+	if store == nil {
+		store = database.GetScanDataStore()
+	}
+	if store == nil {
 		return nil
 	}
 
@@ -1358,9 +1403,9 @@ func loadUnauthorizedAPIResourceIndex(o structs.JSFindOptions) *unauthorizedAPIR
 		err          error
 	)
 	if o.Version > 0 {
-		apiResources, err = database.QueryAPIResourcesByTaskID(o.TaskID, o.Version)
+		apiResources, err = store.ListAPIResources(o.TaskID, o.Version)
 	} else {
-		apiResources, err = database.QueryAPIResourcesByTaskID(o.TaskID)
+		apiResources, err = store.ListAPIResources(o.TaskID)
 	}
 	if err != nil {
 		fmt.Printf("[WARNING] 加载任务 %s 的 API 记录失败，未授权漏洞将缺少协议轨迹关联: %v\n", o.TaskID, err)
@@ -1371,7 +1416,14 @@ func loadUnauthorizedAPIResourceIndex(o structs.JSFindOptions) *unauthorizedAPIR
 }
 
 func loadUnauthorizedProtocolTraceIndex(o structs.JSFindOptions) *unauthorizedProtocolTraceIndex {
-	if strings.TrimSpace(o.TaskID) == "" || database.ESClient == nil {
+	if strings.TrimSpace(o.TaskID) == "" {
+		return nil
+	}
+	store := o.DataStore
+	if store == nil {
+		store = database.GetScanDataStore()
+	}
+	if store == nil {
 		return nil
 	}
 
@@ -1380,9 +1432,9 @@ func loadUnauthorizedProtocolTraceIndex(o structs.JSFindOptions) *unauthorizedPr
 		err            error
 	)
 	if o.Version > 0 {
-		protocolTraces, err = database.QueryProtocolTracesByTaskID(o.TaskID, o.Version)
+		protocolTraces, err = store.ListProtocolTraces(o.TaskID, o.Version)
 	} else {
-		protocolTraces, err = database.QueryProtocolTracesByTaskID(o.TaskID)
+		protocolTraces, err = store.ListProtocolTraces(o.TaskID)
 	}
 	if err != nil {
 		fmt.Printf("[WARNING] 加载任务 %s 的协议轨迹失败，未授权漏洞将无法自动复用加密链路: %v\n", o.TaskID, err)

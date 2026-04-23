@@ -42,9 +42,9 @@ func main() {
 
 	// 6. 配置占位符（可选）
 	options.Placeholder = map[string]string{
-		"id":       "1",
-		"keyword":  "test",
-		"name":     "test",
+		"id":        "1",
+		"keyword":   "test",
+		"name":      "test",
 		"timestamp": "1758791720",
 	}
 

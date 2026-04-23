@@ -124,8 +124,6 @@ func exportTaskReport(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "failed to query vulns", "detail": err.Error()})
 		return
 	}
-	vulns = annotateUnauthorizedNoise(vulns)
-
 	treeNodes, err := database.QuerySiteTreeByTaskID(taskID, versionArgs(version)...)
 	if err != nil && !reportCanIgnoreError(err) {
 		c.JSON(500, gin.H{"error": "failed to query tree", "detail": err.Error()})

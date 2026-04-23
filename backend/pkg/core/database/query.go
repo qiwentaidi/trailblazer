@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 func resolveQueryVersion(taskID string, versions ...int) (*int, *TaskVersion, error) {
@@ -271,7 +273,57 @@ func QueryVulnsByTaskID(taskID string, versions ...int) ([]VulnRecord, error) {
 		vulns = append(vulns, hit.Source)
 	}
 
-	return vulns, nil
+	return dedupeQueriedVulns(vulns), nil
+}
+
+func dedupeQueriedVulns(vulns []VulnRecord) []VulnRecord {
+	if len(vulns) <= 1 {
+		return vulns
+	}
+
+	index := make(map[string]int, len(vulns))
+	result := make([]VulnRecord, 0, len(vulns))
+	for _, vuln := range vulns {
+		key := queriedVulnDedupKey(vuln)
+		if idx, ok := index[key]; ok {
+			result[idx] = choosePreferredQueriedVuln(result[idx], vuln)
+			continue
+		}
+		index[key] = len(result)
+		result = append(result, vuln)
+	}
+	return result
+}
+
+func queriedVulnDedupKey(vuln VulnRecord) string {
+	parsed, err := url.Parse(strings.TrimSpace(vuln.URL))
+	if err == nil && parsed.Host != "" {
+		return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" +
+			strings.ToLower(parsed.Host) + "|" +
+			parsed.Path + "|" +
+			strings.TrimSpace(vuln.Type)
+	}
+	return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" +
+		strings.TrimSpace(vuln.URL) + "|" +
+		strings.TrimSpace(vuln.Type)
+}
+
+func choosePreferredQueriedVuln(current, candidate VulnRecord) VulnRecord {
+	currentURL := strings.ToLower(strings.TrimSpace(current.URL))
+	candidateURL := strings.ToLower(strings.TrimSpace(candidate.URL))
+	if strings.HasPrefix(candidateURL, "https://") && !strings.HasPrefix(currentURL, "https://") {
+		return candidate
+	}
+	if candidate.ResponseLength > current.ResponseLength {
+		return candidate
+	}
+	if len(strings.TrimSpace(candidate.Response)) > len(strings.TrimSpace(current.Response)) {
+		return candidate
+	}
+	if candidate.CreatedAt.After(current.CreatedAt) {
+		return candidate
+	}
+	return current
 }
 
 // QueryJSByTaskID 查询任务的JS资源

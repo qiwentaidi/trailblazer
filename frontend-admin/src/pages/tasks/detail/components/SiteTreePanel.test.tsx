@@ -102,6 +102,34 @@ describe('SiteTreePanel', () => {
     ).toBeGreaterThan(0);
   });
 
+  test('hides empty detail sections for static non-js nodes', () => {
+    render(
+      <SiteTreePanel
+        taskId="task-1"
+        treeData={[
+          {
+            id: 'css-node-1',
+            label: 'app.css',
+            url: 'https://example.com/static/app.css',
+          },
+        ]}
+        jsResources={[]}
+        apiResources={[]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('app.css'));
+
+    expect(screen.queryByText('请求体')).not.toBeInTheDocument();
+    expect(screen.queryByText('响应体')).not.toBeInTheDocument();
+    expect(screen.queryByText('原始内容')).not.toBeInTheDocument();
+    expect(screen.queryByText('相关 JS 内容')).not.toBeInTheDocument();
+    expect(screen.queryByText('相关接口内容')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('当前节点未命中可展示的动态请求或响应内容'),
+    ).toBeInTheDocument();
+  });
+
   test('renders only raw content for js nodes', () => {
     render(
       <SiteTreePanel
@@ -205,5 +233,68 @@ describe('SiteTreePanel', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/\.\.\. \[内容过长，已截断显示前 20000 个字符\]/)).toBeInTheDocument();
     expect(screen.queryByText(hugeContent)).not.toBeInTheDocument();
+  });
+
+  test('deduplicates related api records and keeps all unique dynamic payloads', () => {
+    render(
+      <SiteTreePanel
+        taskId="task-1"
+        treeData={[
+          {
+            id: 'api-path-node',
+            label: 'demo',
+            url: 'https://example.com/api/demo',
+          },
+        ]}
+        jsResources={[]}
+        apiResources={[
+          {
+            taskId: 'task-1',
+            version: 1,
+            url: 'https://example.com/api/demo',
+            method: 'POST',
+            requestBody: '{"page":1}',
+            responseBody: '{"ok":true}',
+            responseCode: 200,
+          },
+          {
+            taskId: 'task-1',
+            version: 1,
+            url: 'https://example.com/api/demo',
+            method: 'POST',
+            requestBody: '{"page":1}',
+            responseBody: '{"ok":true}',
+            responseCode: 200,
+          },
+          {
+            taskId: 'task-1',
+            version: 1,
+            url: 'https://example.com/api/demo',
+            method: 'POST',
+            requestBody: '',
+            responseBody: '',
+            responseCode: 200,
+          },
+          {
+            taskId: 'task-1',
+            version: 1,
+            url: 'https://example.com/api/demo',
+            method: 'POST',
+            requestBody: '{"page":2}',
+            responseBody: '{"ok":false}',
+            responseCode: 200,
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('demo'));
+
+    expect(screen.getByText('相关接口内容')).toBeInTheDocument();
+    expect(screen.getByText('2 条命中')).toBeInTheDocument();
+    expect(screen.getByText('{"page":1}')).toBeInTheDocument();
+    expect(screen.getByText('{"page":2}')).toBeInTheDocument();
+    expect(screen.getByText('{"ok":true}')).toBeInTheDocument();
+    expect(screen.getByText('{"ok":false}')).toBeInTheDocument();
   });
 });

@@ -1,10 +1,14 @@
 package structs
 
-import "net/url"
+import (
+	"net/url"
+	"trailblazer/pkg/core/database"
+)
 
 type InfoSource struct {
-	Filed  string
-	Source string
+	Filed      string
+	Source     string
+	AIVerified bool
 }
 
 type FindSomething struct {
@@ -57,6 +61,7 @@ type JSFindOptions struct {
 	XSSConfig                 interface{} // XSS检测配置
 	UploadConfig              interface{} // 文件上传检测配置
 	AIChecker                 interface{} // AI检测器（用于文件上传等漏洞检测），类型为 *crawl.SensitiveInfoChecker
+	DataStore                 database.ScanDataStore
 }
 
 // APIRequest 结构体表示 API 请求信息

@@ -88,3 +88,146 @@ func TestFilterAPIRoutesDropsDotSegments(t *testing.T) {
 		t.Fatalf("expected only normal api route to remain, got %#v", filtered)
 	}
 }
+
+func TestFilterAPIRoutesDropsWhitespaceAndContentTypeNoise(t *testing.T) {
+	filter := &Filter{}
+
+	routes := []string{
+		"/ page",
+		"/api/v1/users",
+		"multipart/form-data",
+		"application/json",
+		"/api/order/list",
+	}
+
+	filtered := filter.FilterAPIRoutes(routes)
+
+	for _, rejected := range []string{
+		"/ page",
+		"multipart/form-data",
+		"application/json",
+	} {
+		for _, got := range filtered {
+			if got == rejected {
+				t.Fatalf("expected noisy route %q to be filtered out, got %#v", rejected, filtered)
+			}
+		}
+	}
+
+	for _, kept := range []string{
+		"/api/v1/users",
+		"/api/order/list",
+	} {
+		found := false
+		for _, got := range filtered {
+			if got == kept {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected normal api route %q to be kept, got %#v", kept, filtered)
+		}
+	}
+}
+
+func TestFilterAPIRoutesDropsSuspiciousShortSingleSegmentRoutes(t *testing.T) {
+	filter := &Filter{}
+
+	routes := []string{
+		"/AB",
+		"/A1",
+		"/POA",
+		"/SeX",
+		"/T2A",
+		"/byt",
+		"/a/b",
+		"/a/i",
+		"/im",
+		"/v1",
+		"/api/v1/users",
+		"/ccat/step/getSteps",
+		"/im/20231030/653f182403668167a4489460",
+		"/sms",
+	}
+
+	filtered := filter.FilterAPIRoutes(routes)
+
+	for _, rejected := range []string{
+		"/AB",
+		"/A1",
+		"/POA",
+		"/SeX",
+		"/T2A",
+	} {
+		for _, got := range filtered {
+			if got == rejected {
+				t.Fatalf("expected suspicious short route %q to be filtered out, got %#v", rejected, filtered)
+			}
+		}
+	}
+
+	for _, kept := range []string{
+		"/byt",
+		"/a/b",
+		"/a/i",
+		"/api/v1/users",
+		"/im",
+		"/v1",
+		"/ccat/step/getSteps",
+		"/im/20231030/653f182403668167a4489460",
+		"/sms",
+	} {
+		found := false
+		for _, got := range filtered {
+			if got == kept {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected route %q to be kept, got %#v", kept, filtered)
+		}
+	}
+}
+
+func TestAPIRootsKeepsPrefixedAPISegment(t *testing.T) {
+	filter := &Filter{}
+
+	roots := filter.APIRoots([]string{
+		"/ccat/api/getApisGroupByApp",
+		"/ccat/api/refreshApiInfoByInterfaceName",
+	}, 1)
+
+	expected := map[string]bool{
+		"/api/":      true,
+		"/ccat/api/": true,
+	}
+
+	for _, root := range roots {
+		delete(expected, root)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("expected prefixed api roots to be preserved, missing %#v from %#v", expected, roots)
+	}
+}
+
+func TestAPIRootsKeepsPrefixedVersionedAPISegment(t *testing.T) {
+	filter := &Filter{}
+
+	roots := filter.APIRoots([]string{
+		"/gateway/api/v1/orders/list",
+	}, 1)
+
+	expected := map[string]bool{
+		"/api/v1/":         true,
+		"/gateway/api/v1/": true,
+	}
+
+	for _, root := range roots {
+		delete(expected, root)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("expected versioned prefixed api roots to be preserved, missing %#v from %#v", expected, roots)
+	}
+}

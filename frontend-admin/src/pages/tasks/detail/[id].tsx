@@ -14,8 +14,8 @@ import {
 } from 'antd';
 
 import {
-  downloadTaskHTMLReport,
   deriveAssetData,
+  downloadTaskHTMLReport,
   fetchTaskAPIs,
   fetchTaskAssets,
   fetchTaskDetail,
@@ -760,6 +760,7 @@ export default function TaskDetailPage() {
                 polling={Boolean(taskId)}
                 onRefresh={() => void loadRisks(true)}
                 onDeleted={() => void loadRisks(false)}
+                onUpdated={() => void loadRisks(false)}
               />
             ),
           },

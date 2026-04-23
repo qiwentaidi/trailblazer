@@ -88,12 +88,23 @@ var (
 )
 
 func AnalyzeStoredJSProtocols(taskID string, versions ...int) (*StaticProtocolAnalysisResult, error) {
-	jsResources, err := database.QueryJSByTaskID(taskID, versions...)
+	return AnalyzeStoredJSProtocolsWithStore(taskID, nil, versions...)
+}
+
+func AnalyzeStoredJSProtocolsWithStore(taskID string, store database.ScanDataStore, versions ...int) (*StaticProtocolAnalysisResult, error) {
+	if store == nil {
+		store = database.GetScanDataStore()
+	}
+	if store == nil {
+		return nil, nil
+	}
+
+	jsResources, err := store.ListJSResources(taskID, versions...)
 	if err != nil {
 		return nil, err
 	}
 
-	apiResources, err := database.QueryAPIResourcesByTaskID(taskID, versions...)
+	apiResources, err := store.ListAPIResources(taskID, versions...)
 	if err != nil {
 		if !strings.Contains(err.Error(), "index_not_found_exception") &&
 			!strings.Contains(err.Error(), "ES client not initialized") &&
@@ -103,7 +114,7 @@ func AnalyzeStoredJSProtocols(taskID string, versions ...int) (*StaticProtocolAn
 		apiResources = nil
 	}
 
-	traces, err := database.QueryProtocolTracesByTaskID(taskID, versions...)
+	traces, err := store.ListProtocolTraces(taskID, versions...)
 	if err != nil {
 		if !strings.Contains(err.Error(), "index_not_found_exception") &&
 			!strings.Contains(err.Error(), "ES client not initialized") &&

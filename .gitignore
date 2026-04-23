@@ -71,3 +71,4 @@ backend/.git/**
 
 .vscode/
 release/
+dist/

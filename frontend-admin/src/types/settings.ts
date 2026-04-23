@@ -85,6 +85,7 @@ export interface SettingsConfig {
   blackDomain: string[]
   highRiskRouter: string[]
   authentication: string[]
+  learnedAuthentication: string[]
   placeholder: Record<string, string>
   vulnDetection: VulnDetectionSettings
 }

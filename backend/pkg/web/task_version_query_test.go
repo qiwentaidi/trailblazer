@@ -231,6 +231,91 @@ func TestGetTaskVulnsVersionQueryUsesSelectedVersionWithoutMixing(t *testing.T) 
 	})
 }
 
+func TestGetTaskVulnsDedupesHTTPHTTPSDuplicates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "task_versions.db")
+	if err := database.InitSQLite(dbPath); err != nil {
+		t.Fatalf("InitSQLite() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if database.DB != nil {
+			_ = database.DB.Close()
+			database.DB = nil
+		}
+	})
+
+	task := database.Task{
+		ID:      "dedupe-vulns-task",
+		Name:    "dedupe-vulns-task",
+		Targets: []string{"https://example.com"},
+		Status:  "pending",
+	}
+	if _, err := task.Save(); err != nil {
+		t.Fatalf("Task.Save() error = %v", err)
+	}
+
+	if _, err := database.CreateTaskVersion(task.ID, []string{"https://example.com"}, []byte(`{"version":1}`), "manual"); err != nil {
+		t.Fatalf("CreateTaskVersion() error = %v", err)
+	}
+
+	restoreES := installMockElasticsearch(t, map[string][]map[string]any{
+		database.IndexVuln: {
+			{
+				"task_id":         task.ID,
+				"version":         1,
+				"vuln_id":         "http-dup",
+				"title":           "dup",
+				"level":           "medium",
+				"type":            "未授权访问",
+				"url":             "http://example.com/api/common/getCitys",
+				"method":          "GET",
+				"response_length": 100,
+				"created_at":      "2026-04-20T10:00:00Z",
+			},
+			{
+				"task_id":         task.ID,
+				"version":         1,
+				"vuln_id":         "https-dup",
+				"title":           "dup",
+				"level":           "medium",
+				"type":            "未授权访问",
+				"url":             "https://example.com/api/common/getCitys",
+				"method":          "GET",
+				"response_length": 100,
+				"created_at":      "2026-04-20T10:01:00Z",
+			},
+		},
+	})
+	defer restoreES()
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodGet, "/api/task/"+task.ID+"/vulns?version=1", nil)
+	ctx.Request = req
+	ctx.Params = gin.Params{{Key: "taskId", Value: task.ID}}
+
+	getTaskVulns(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response struct {
+		Data []database.VulnRecord `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; body=%s", err, recorder.Body.String())
+	}
+
+	if len(response.Data) != 1 {
+		t.Fatalf("len(response.Data) = %d, want 1; data=%#v", len(response.Data), response.Data)
+	}
+	if response.Data[0].URL != "https://example.com/api/common/getCitys" {
+		t.Fatalf("expected https variant to be preserved, got %#v", response.Data[0])
+	}
+}
+
 func installMockElasticsearch(t *testing.T, docsByIndex map[string][]map[string]any) func() {
 	t.Helper()
 

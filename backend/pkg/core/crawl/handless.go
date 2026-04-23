@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -37,6 +38,34 @@ type NetworkRecord struct {
 	FetchedAt        time.Time         `json:"fetched_at"`
 }
 
+// CaptureSnapshot 表示动态采集过程中的一次增量快照。
+type CaptureSnapshot struct {
+	NetworkURLs    []string              `json:"network_urls"`
+	APIRecords     []NetworkRecord       `json:"api_records"`
+	ProtocolTraces []ProtocolTraceRecord `json:"protocol_traces"`
+	CapturedAt     time.Time             `json:"captured_at"`
+}
+
+// CaptureOptions 控制动态采集期间的页面交互行为。
+type CaptureOptions struct {
+	Timeout               time.Duration
+	InitialWait           time.Duration
+	PostInteractionWait   time.Duration
+	BrowserVisible        bool
+	ProxyServer           string
+	ProxyBypassList       string
+	AutoTriggerForms      bool
+	AutoTriggerAttempts   int
+	AutoTriggerRetryDelay time.Duration
+	NativeFormTrigger     bool
+	UsernameSelector      string
+	PasswordSelector      string
+	SubmitSelector        string
+	UsernameValue         string
+	PasswordValue         string
+	OnUpdate              func(CaptureSnapshot)
+}
+
 // 动态捕获网站访问时加载的所有链接
 func CaptureNetworkURLs(url string) []string {
 	networks, _, _ := CaptureNetworkActivity(url)
@@ -45,15 +74,27 @@ func CaptureNetworkURLs(url string) []string {
 
 // CaptureNetworkActivity 捕获页面加载过程中的网络链接和接口请求/响应记录
 func CaptureNetworkActivity(url string) ([]string, []NetworkRecord, []ProtocolTraceRecord) {
+	return CaptureNetworkActivityWithOptions(url, CaptureOptions{})
+}
+
+// CaptureNetworkActivityWithOptions 捕获页面加载和可选交互过程中的网络链接、接口请求/响应记录。
+func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]string, []NetworkRecord, []ProtocolTraceRecord) {
+	options = normalizeCaptureOptions(options)
+
 	var networks []string
 	var apiRecords []NetworkRecord
 	var protocolTraces []ProtocolTraceRecord
-	ctx, cancel := chromedp.NewContext(context.Background())
+	allocOpts := buildExecAllocatorOptions(options)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+	defer allocCancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	// 延长超时到 120 秒，适应慢速网站
-	ctx, cancel = context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
+	if options.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, options.Timeout)
+		defer cancel()
+	}
 
 	linkSet := make(map[string]bool)
 	apiRecordSet := make(map[string]bool)
@@ -83,6 +124,7 @@ func CaptureNetworkActivity(url string) ([]string, []NetworkRecord, []ProtocolTr
 
 			mu.Lock()
 			upsertProtocolTraceRecord(protocolTraceIndex, &protocolTraces, payload.ProtocolTraceRecord)
+			emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
 			mu.Unlock()
 
 		case *network.EventRequestWillBeSent:
@@ -172,6 +214,7 @@ func CaptureNetworkActivity(url string) ([]string, []NetworkRecord, []ProtocolTr
 
 				appendAPIRecord(apiRecordSet, &apiRecords, record)
 				finalizedRequest[requestID] = true
+				emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
 			}(ev.RequestID)
 
 		case *network.EventLoadingFailed:
@@ -185,10 +228,11 @@ func CaptureNetworkActivity(url string) ([]string, []NetworkRecord, []ProtocolTr
 
 			appendAPIRecord(apiRecordSet, &apiRecords, record)
 			finalizedRequest[ev.RequestID] = true
+			emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
 		}
 	})
 
-	err := chromedp.Run(ctx,
+	actions := []chromedp.Action{
 		runtime.Enable(),
 		runtime.AddBinding(protocolHookBindingName),
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -197,19 +241,524 @@ func CaptureNetworkActivity(url string) ([]string, []NetworkRecord, []ProtocolTr
 		}),
 		network.Enable(),
 		chromedp.Navigate(url),
-		chromedp.Sleep(10*time.Second),
-	)
+		chromedp.Sleep(options.InitialWait),
+	}
+	if options.NativeFormTrigger {
+		actions = append(actions, nativeFormTriggerAction(options))
+	} else if options.AutoTriggerForms {
+		actions = append(actions, autoTriggerFormsAction(options))
+	}
+	if options.PostInteractionWait > 0 {
+		actions = append(actions, chromedp.Sleep(options.PostInteractionWait))
+	} else {
+		actions = append(actions, waitForBrowserSessionEndAction())
+	}
+
+	err := chromedp.Run(ctx, actions...)
 	wg.Wait()
 	backfillProtocolTraceResponsesFromAPIRecords(protocolTraces, apiRecords)
 	linkAPIRecordsToProtocolTraces(apiRecords, protocolTraces)
+	emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
 
 	if err != nil {
+		if isExpectedCaptureCancellation(err) {
+			fmt.Printf("[INFO] %s 动态捕获已结束，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹, 结束原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), err)
+			return networks, apiRecords, protocolTraces
+		}
 		fmt.Printf("[ERROR] %s 动态捕获网络请求失败，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹, 错误原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), err)
 		return networks, apiRecords, protocolTraces
 	}
 	fmt.Printf("[INFO] %s 成功捕获 %d 个网络请求，提取 %d 条接口记录、%d 条协议轨迹\n", url, len(networks), len(apiRecords), len(protocolTraces))
 	return networks, apiRecords, protocolTraces
 }
+
+func isExpectedCaptureCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || strings.Contains(strings.ToLower(err.Error()), "context canceled")
+}
+
+func emitCaptureUpdateLocked(callback func(CaptureSnapshot), networks []string, apiRecords []NetworkRecord, protocolTraces []ProtocolTraceRecord) {
+	if callback == nil {
+		return
+	}
+
+	snapshot := CaptureSnapshot{
+		NetworkURLs:    append([]string(nil), networks...),
+		APIRecords:     cloneNetworkRecords(apiRecords),
+		ProtocolTraces: cloneProtocolTraceRecords(protocolTraces),
+		CapturedAt:     time.Now(),
+	}
+	callback(snapshot)
+}
+
+func cloneNetworkRecords(records []NetworkRecord) []NetworkRecord {
+	cloned := make([]NetworkRecord, 0, len(records))
+	for _, record := range records {
+		next := record
+		next.RequestHeaders = cloneStringMap(record.RequestHeaders)
+		next.ResponseHeaders = cloneStringMap(record.ResponseHeaders)
+		cloned = append(cloned, next)
+	}
+	return cloned
+}
+
+func cloneProtocolTraceRecords(records []ProtocolTraceRecord) []ProtocolTraceRecord {
+	cloned := make([]ProtocolTraceRecord, 0, len(records))
+	for _, record := range records {
+		next := record
+		next.RequestHeaders = cloneStringMap(record.RequestHeaders)
+		next.DynamicParams = cloneStringMap(record.DynamicParams)
+		next.SessionMaterials = cloneStringMap(record.SessionMaterials)
+		next.SignatureFields = append([]string(nil), record.SignatureFields...)
+		next.RequestSteps = append([]ProtocolCryptoStep(nil), record.RequestSteps...)
+		next.ResponseSteps = append([]ProtocolCryptoStep(nil), record.ResponseSteps...)
+		next.Algorithms = append([]string(nil), record.Algorithms...)
+		cloned = append(cloned, next)
+	}
+	return cloned
+}
+
+func buildExecAllocatorOptions(options CaptureOptions) []chromedp.ExecAllocatorOption {
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", !options.BrowserVisible),
+	)
+
+	flags := buildCaptureChromeFlags(options)
+	if proxyServer, ok := flags["proxy-server"].(string); ok && proxyServer != "" {
+		allocOpts = append(allocOpts, chromedp.ProxyServer(proxyServer))
+	}
+	if bypassList, ok := flags["proxy-bypass-list"].(string); ok && bypassList != "" {
+		allocOpts = append(allocOpts, chromedp.Flag("proxy-bypass-list", bypassList))
+	}
+
+	return allocOpts
+}
+
+func buildCaptureChromeFlags(options CaptureOptions) map[string]any {
+	flags := map[string]any{
+		"headless": !options.BrowserVisible,
+	}
+
+	if proxyServer := strings.TrimSpace(options.ProxyServer); proxyServer != "" {
+		flags["proxy-server"] = proxyServer
+	}
+	if bypassList := strings.TrimSpace(options.ProxyBypassList); bypassList != "" {
+		flags["proxy-bypass-list"] = bypassList
+	}
+
+	return flags
+}
+
+func normalizeCaptureOptions(options CaptureOptions) CaptureOptions {
+	if options.Timeout < 0 {
+		options.Timeout = 0
+	} else if options.Timeout == 0 && options.PostInteractionWait > 0 {
+		options.Timeout = 120 * time.Second
+	}
+	if options.NativeFormTrigger {
+		if options.InitialWait <= 0 {
+			options.InitialWait = 2 * time.Second
+		}
+		if options.PostInteractionWait <= 0 {
+			options.PostInteractionWait = 8 * time.Second
+		}
+		return options
+	}
+	if options.AutoTriggerForms {
+		if options.InitialWait <= 0 {
+			options.InitialWait = 2 * time.Second
+		}
+		if options.PostInteractionWait <= 0 {
+			options.PostInteractionWait = 6 * time.Second
+		}
+		if options.AutoTriggerAttempts <= 0 {
+			options.AutoTriggerAttempts = 3
+		}
+		if options.AutoTriggerRetryDelay <= 0 {
+			options.AutoTriggerRetryDelay = 1500 * time.Millisecond
+		}
+		return options
+	}
+
+	if options.InitialWait <= 0 {
+		options.InitialWait = 10 * time.Second
+	}
+	if options.PostInteractionWait < 0 {
+		options.PostInteractionWait = 0
+	}
+	return options
+}
+
+func waitForBrowserSessionEndAction() chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+}
+
+func nativeFormTriggerAction(options CaptureOptions) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		usernameSelector := strings.TrimSpace(options.UsernameSelector)
+		passwordSelector := strings.TrimSpace(options.PasswordSelector)
+		submitSelector := strings.TrimSpace(options.SubmitSelector)
+		usernameValue := strings.TrimSpace(options.UsernameValue)
+		passwordValue := strings.TrimSpace(options.PasswordValue)
+
+		if usernameSelector == "" || passwordSelector == "" || submitSelector == "" {
+			return fmt.Errorf("native form trigger requires username/password/submit selectors")
+		}
+
+		if err := chromedp.Run(ctx,
+			chromedp.WaitVisible(usernameSelector, chromedp.ByQuery),
+			chromedp.Click(usernameSelector, chromedp.ByQuery),
+		); err != nil {
+			return err
+		}
+		if usernameValue != "" {
+			if err := chromedp.Run(ctx, chromedp.SendKeys(usernameSelector, usernameValue, chromedp.ByQuery)); err != nil {
+				return err
+			}
+		}
+
+		if err := chromedp.Run(ctx,
+			chromedp.WaitVisible(passwordSelector, chromedp.ByQuery),
+			chromedp.Click(passwordSelector, chromedp.ByQuery),
+		); err != nil {
+			return err
+		}
+		if passwordValue != "" {
+			if err := chromedp.Run(ctx, chromedp.SendKeys(passwordSelector, passwordValue, chromedp.ByQuery)); err != nil {
+				return err
+			}
+		}
+
+		if err := chromedp.Run(ctx,
+			chromedp.WaitVisible(submitSelector, chromedp.ByQuery),
+			chromedp.Click(submitSelector, chromedp.ByQuery),
+		); err != nil {
+			return err
+		}
+
+		fmt.Printf(
+			"[INFO] 原生表单触发已执行 user=%s pass=%s submit=%s\n",
+			usernameSelector,
+			passwordSelector,
+			submitSelector,
+		)
+		return nil
+	})
+}
+
+type autoTriggerResult struct {
+	Triggered         bool   `json:"triggered"`
+	Reason            string `json:"reason"`
+	FormAction        string `json:"formAction"`
+	FieldCount        int    `json:"fieldCount"`
+	ButtonText        string `json:"buttonText"`
+	CandidateCount    int    `json:"candidateCount"`
+	RawFieldCount     int    `json:"rawFieldCount"`
+	FirstCandidateTag string `json:"firstCandidateTag"`
+	FirstCandidateCls string `json:"firstCandidateCls"`
+}
+
+func autoTriggerFormsAction(options CaptureOptions) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		for attempt := 0; attempt < options.AutoTriggerAttempts; attempt++ {
+			var result autoTriggerResult
+			if err := chromedp.Evaluate(autoTriggerFormsScript, &result).Do(ctx); err != nil {
+				return err
+			}
+			if result.Triggered {
+				fmt.Printf(
+					"[INFO] 自动表单触发成功 attempt=%d fields=%d candidates=%d raw_fields=%d action=%s button=%s reason=%s\n",
+					attempt+1,
+					result.FieldCount,
+					result.CandidateCount,
+					result.RawFieldCount,
+					strings.TrimSpace(result.FormAction),
+					strings.TrimSpace(result.ButtonText),
+					strings.TrimSpace(result.Reason),
+				)
+				return nil
+			}
+			if attempt == options.AutoTriggerAttempts-1 {
+				fmt.Printf(
+					"[INFO] 自动表单触发未命中 attempt=%d reason=%s candidates=%d raw_fields=%d first=%s.%s\n",
+					attempt+1,
+					strings.TrimSpace(result.Reason),
+					result.CandidateCount,
+					result.RawFieldCount,
+					strings.TrimSpace(result.FirstCandidateTag),
+					strings.TrimSpace(result.FirstCandidateCls),
+				)
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(options.AutoTriggerRetryDelay):
+			}
+		}
+		return nil
+	})
+}
+
+const autoTriggerFormsScript = `(function () {
+  function isVisible(el) {
+    if (!el) {
+      return false;
+    }
+    var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (style && (style.display === "none" || style.visibility === "hidden")) {
+      return false;
+    }
+    var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (!rect) {
+      return false;
+    }
+    if (rect.width > 0 && rect.height > 0) {
+      return true;
+    }
+    return !!(el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length));
+  }
+
+  function dispatchInputEvents(el) {
+    ["input", "change", "blur"].forEach(function (name) {
+      try {
+        el.dispatchEvent(new Event(name, { bubbles: true }));
+      } catch (err) {}
+    });
+  }
+
+  function deriveFieldLabel(el) {
+    return String(el.name || el.id || el.placeholder || el.type || "").toLowerCase();
+  }
+
+  function buildValue(el, index) {
+    var label = deriveFieldLabel(el);
+    var type = String(el.type || "").toLowerCase();
+    var seed = Date.now().toString(36).slice(-6) + String(index || 0);
+    if (type === "email" || label.indexOf("mail") >= 0 || label.indexOf("邮箱") >= 0) {
+      return "trailblazer+" + seed + "@example.com";
+    }
+    if (type === "password" || label.indexOf("pass") >= 0 || label.indexOf("pwd") >= 0 || label.indexOf("密码") >= 0) {
+      return "Tb!" + seed + "Aa1";
+    }
+    if (type === "tel" || label.indexOf("phone") >= 0 || label.indexOf("mobile") >= 0 || label.indexOf("tel") >= 0 || label.indexOf("手机") >= 0) {
+      return "13800138" + String((10 + index) % 90).padStart(2, "0");
+    }
+    if (type === "number") {
+      return String(1000 + index);
+    }
+    return "trailblazer_" + seed;
+  }
+
+  function candidateFields(root) {
+    return Array.prototype.slice.call(root.querySelectorAll("input, textarea, select")).filter(function (el) {
+      if (el.disabled || el.readOnly) {
+        return false;
+      }
+      var type = String(el.type || "").toLowerCase();
+      if (["hidden", "submit", "button", "reset", "file", "image"].indexOf(type) >= 0) {
+        return false;
+      }
+      if (isVisible(el)) {
+        return true;
+      }
+      var wrapper = el.closest(".ant-form-item, .ant-input-affix-wrapper, .ant-input, .login-form, .login, .form-item");
+      return !!(wrapper && isVisible(wrapper));
+    });
+  }
+
+  function fillFields(fields) {
+    var filled = 0;
+    fields.forEach(function (el, index) {
+      var tag = String(el.tagName || "").toLowerCase();
+      var type = String(el.type || "").toLowerCase();
+      if (tag === "select") {
+        var nextOption = Array.prototype.slice.call(el.options || []).find(function (option) {
+          return !option.disabled && String(option.value || "").trim() !== "";
+        });
+        if (nextOption) {
+          el.value = nextOption.value;
+          dispatchInputEvents(el);
+          filled += 1;
+        }
+        return;
+      }
+      if (type === "checkbox" || type === "radio") {
+        el.checked = true;
+        dispatchInputEvents(el);
+        filled += 1;
+        return;
+      }
+      var value = buildValue(el, index + 1);
+      try {
+        el.focus();
+      } catch (err) {}
+      el.value = value;
+      dispatchInputEvents(el);
+      filled += 1;
+    });
+    return filled;
+  }
+
+  function chooseSubmitButton(root) {
+    var candidates = Array.prototype.slice.call(root.querySelectorAll("button, input[type='submit'], input[type='button'], [role='button']"))
+      .filter(function (el) {
+        if (el.disabled) {
+          return false;
+        }
+        if (isVisible(el)) {
+          return true;
+        }
+        var wrapper = el.closest(".ant-btn, .login-form, .login, .form-item");
+        return !!(wrapper && isVisible(wrapper));
+      });
+    if (!candidates.length) {
+      return null;
+    }
+    var preferred = candidates.find(function (el) {
+      var text = String(el.innerText || el.textContent || el.value || "").toLowerCase();
+      var type = String(el.type || "").toLowerCase();
+      return type === "submit" || /(login|sign in|signin|submit|next|continue|confirm|登录|提交|确定|继续)/i.test(text);
+    });
+    return preferred || candidates[0];
+  }
+
+  function formCandidates() {
+    var preferredSelectors = [
+      "form.login-form",
+      "form.ant-form",
+      ".login form",
+      ".login-form",
+      ".login-account-pwd form",
+      ".ggd-gateway__login form",
+      ".ggd-gateway__login",
+      ".login",
+      "[role='form']"
+    ];
+    var preferred = [];
+    preferredSelectors.forEach(function (selector) {
+      Array.prototype.slice.call(document.querySelectorAll(selector)).forEach(function (node) {
+        if (preferred.indexOf(node) < 0) {
+          preferred.push(node);
+        }
+      });
+    });
+    preferred = preferred.filter(function (node) {
+      return isVisible(node) || candidateFields(node).length > 0;
+    });
+    if (preferred.length) {
+      return preferred;
+    }
+
+    var forms = Array.prototype.slice.call(document.querySelectorAll("form")).filter(function (node) {
+      return isVisible(node) || candidateFields(node).length > 0;
+    });
+    if (forms.length) {
+      return forms;
+    }
+    var anchorField = Array.prototype.slice.call(document.querySelectorAll("input, textarea, select"))
+      .find(function (el) {
+        return !el.disabled && candidateFields(el.form || el.closest("form, .login-form, .login, .ant-form, [role='form']") || document.body).length > 0;
+      });
+    if (!anchorField) {
+      return [];
+    }
+    var container = anchorField.closest("[role='form'], .ant-form, .el-form, .login, .login-form, .form") ||
+      anchorField.parentElement || document.body;
+    return container ? [container] : [];
+  }
+
+  var candidates = formCandidates();
+  if (!candidates.length) {
+    return { triggered: false, reason: "no_visible_form", candidateCount: 0, rawFieldCount: 0 };
+  }
+
+  var firstCandidate = candidates[0];
+  var rawFieldCount = firstCandidate ? firstCandidate.querySelectorAll("input, textarea, select").length : 0;
+  var firstCandidateTag = firstCandidate && firstCandidate.tagName ? String(firstCandidate.tagName).toLowerCase() : "";
+  var firstCandidateCls = firstCandidate ? String(firstCandidate.className || "") : "";
+
+  for (var i = 0; i < candidates.length; i++) {
+    var root = candidates[i];
+    if (root.__trailblazerAutoTriggered) {
+      continue;
+    }
+    var fields = candidateFields(root);
+    if (!fields.length) {
+      continue;
+    }
+    var button = chooseSubmitButton(root);
+    var filled = fillFields(fields);
+    root.__trailblazerAutoTriggered = true;
+    if (button && typeof button.click === "function") {
+      button.click();
+      return {
+        triggered: true,
+        reason: "clicked_submit_control",
+        formAction: String(root.action || ""),
+        fieldCount: filled,
+        buttonText: String(button.innerText || button.textContent || button.value || ""),
+        candidateCount: candidates.length,
+        rawFieldCount: root.querySelectorAll("input, textarea, select").length,
+        firstCandidateTag: firstCandidateTag,
+        firstCandidateCls: firstCandidateCls
+      };
+    }
+    if (root.tagName && String(root.tagName).toLowerCase() === "form" && typeof root.requestSubmit === "function") {
+      root.requestSubmit();
+      return {
+        triggered: true,
+        reason: "request_submit",
+        formAction: String(root.action || ""),
+        fieldCount: filled,
+        buttonText: "",
+        candidateCount: candidates.length,
+        rawFieldCount: root.querySelectorAll("input, textarea, select").length,
+        firstCandidateTag: firstCandidateTag,
+        firstCandidateCls: firstCandidateCls
+      };
+    }
+    if (root.tagName && String(root.tagName).toLowerCase() === "form" && typeof root.submit === "function") {
+      root.submit();
+      return {
+        triggered: true,
+        reason: "submit",
+        formAction: String(root.action || ""),
+        fieldCount: filled,
+        buttonText: "",
+        candidateCount: candidates.length,
+        rawFieldCount: root.querySelectorAll("input, textarea, select").length,
+        firstCandidateTag: firstCandidateTag,
+        firstCandidateCls: firstCandidateCls
+      };
+    }
+    return {
+      triggered: filled > 0,
+      reason: filled > 0 ? "filled_only" : "no_fillable_fields",
+      formAction: String(root.action || ""),
+      fieldCount: filled,
+      buttonText: "",
+      candidateCount: candidates.length,
+      rawFieldCount: root.querySelectorAll("input, textarea, select").length,
+      firstCandidateTag: firstCandidateTag,
+      firstCandidateCls: firstCandidateCls
+    };
+  }
+
+  return {
+    triggered: false,
+    reason: "no_fillable_form",
+    candidateCount: candidates.length,
+    rawFieldCount: rawFieldCount,
+    firstCandidateTag: firstCandidateTag,
+    firstCandidateCls: firstCandidateCls
+  };
+})()`
 
 func appendAPIRecord(apiRecordSet map[string]bool, apiRecords *[]NetworkRecord, record *NetworkRecord) {
 	if record == nil || !isAPIResource(record) {

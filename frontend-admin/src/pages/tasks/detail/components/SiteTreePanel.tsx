@@ -96,6 +96,42 @@ const formatNodeValue = (value: unknown) => {
   }
 };
 
+const hasDisplayableValue = (value: unknown) => {
+  if (value == null) {
+    return false;
+  }
+
+  if (typeof value === 'string') {
+    return Boolean(value.trim());
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  if (typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>).length > 0;
+  }
+
+  return true;
+};
+
+const dedupeBy = <T,>(items: T[], buildKey: (item: T) => string) => {
+  const seen = new Set<string>();
+  const result: T[] = [];
+
+  for (const item of items) {
+    const key = buildKey(item);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(item);
+  }
+
+  return result;
+};
+
 const renderCodeBlock = (
   title: string,
   value: unknown,
@@ -260,10 +296,13 @@ export default function SiteTreePanel({
   const relatedJSResources = useMemo(
     () =>
       searchNeedles.length
-        ? jsResources.filter(
-            (resource) =>
-              includesNeedle(resource.url, searchNeedles) ||
-              includesNeedle(resource.content, searchNeedles),
+        ? dedupeBy(
+            jsResources.filter(
+              (resource) =>
+                includesNeedle(resource.url, searchNeedles) ||
+                includesNeedle(resource.content, searchNeedles),
+            ),
+            (resource) => resource.url,
           )
         : [],
     [jsResources, searchNeedles],
@@ -271,11 +310,30 @@ export default function SiteTreePanel({
   const relatedAPIResources = useMemo(
     () =>
       searchNeedles.length
-        ? apiResources.filter(
+        ? dedupeBy(
+            apiResources.filter((resource) => {
+              const hasDynamicPayload =
+                hasDisplayableValue(resource.requestBody) ||
+                hasDisplayableValue(resource.responseBody);
+
+              if (!hasDynamicPayload) {
+                return false;
+              }
+
+              return (
+                includesNeedle(resource.url, searchNeedles) ||
+                includesNeedle(resource.requestBody || '', searchNeedles) ||
+                includesNeedle(resource.responseBody || '', searchNeedles)
+              );
+            }),
             (resource) =>
-              includesNeedle(resource.url, searchNeedles) ||
-              includesNeedle(resource.requestBody || '', searchNeedles) ||
-              includesNeedle(resource.responseBody || '', searchNeedles),
+              [
+                resource.method || 'GET',
+                resource.url,
+                resource.requestBody || '',
+                resource.responseBody || '',
+                String(resource.responseCode ?? ''),
+              ].join('\x00'),
           )
         : [],
     [apiResources, searchNeedles],
@@ -295,6 +353,19 @@ export default function SiteTreePanel({
     () => mapLeafSelectableTree(treeData),
     [treeData],
   );
+  const selectedNodeRequestBody = selectedNode?.requestBody;
+  const selectedNodeResponseBody = selectedNode?.responseBody ?? selectedNode?.response;
+  const hasSelectedNodeRequestBody =
+    !selectedNodeIsJS && hasDisplayableValue(selectedNodeRequestBody);
+  const hasSelectedNodeResponseBody =
+    !selectedNodeIsJS && hasDisplayableValue(selectedNodeResponseBody);
+  const hasSelectedNodeRawContent = hasDisplayableValue(rawContent);
+  const hasDynamicSections =
+    hasSelectedNodeRequestBody ||
+    hasSelectedNodeResponseBody ||
+    hasSelectedNodeRawContent ||
+    relatedJSResources.length > 0 ||
+    relatedAPIResources.length > 0;
 
   const treeProps: TreeProps['fieldNames'] = {
     title: 'label',
@@ -350,23 +421,17 @@ export default function SiteTreePanel({
                 </Descriptions.Item>
               </Descriptions>
 
-              {!selectedNodeIsJS
-                ? renderCodeBlock(
-                    '请求体',
-                    selectedNode.requestBody,
-                    '暂无请求体',
-                  )
+              {hasSelectedNodeRequestBody
+                ? renderCodeBlock('请求体', selectedNodeRequestBody, '暂无请求体')
                 : null}
-              {!selectedNodeIsJS
-                ? renderCodeBlock(
-                    '响应体',
-                    selectedNode.responseBody ?? selectedNode.response,
-                    '暂无响应体',
-                  )
+              {hasSelectedNodeResponseBody
+                ? renderCodeBlock('响应体', selectedNodeResponseBody, '暂无响应体')
                 : null}
-              {renderCodeBlock('原始内容', rawContent, '暂无原始内容', 360)}
+              {hasSelectedNodeRawContent
+                ? renderCodeBlock('原始内容', rawContent, '暂无原始内容', 360)
+                : null}
 
-              {!selectedNodeIsJS ? (
+              {!selectedNodeIsJS && relatedJSResources.length > 0 ? (
                 <Card
                   size="small"
                   title="相关 JS 内容"
@@ -376,47 +441,37 @@ export default function SiteTreePanel({
                     </Typography.Text>
                   }
                 >
-                  {relatedJSResources.length ? (
-                    <List
-                      dataSource={relatedJSResources.slice(0, 10)}
-                      renderItem={(resource) => (
-                        <List.Item>
-                          <div
-                            style={{ display: 'grid', gap: 8, width: '100%' }}
+                  <List
+                    dataSource={relatedJSResources}
+                    renderItem={(resource) => (
+                      <List.Item>
+                        <div
+                          style={{ display: 'grid', gap: 8, width: '100%' }}
+                        >
+                          <Typography.Text strong>
+                            {resource.url}
+                          </Typography.Text>
+                          <pre
+                            style={{
+                              margin: 0,
+                              padding: 16,
+                              overflow: 'auto',
+                              borderRadius: 8,
+                              background: '#f6f8fa',
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-word',
+                            }}
                           >
-                            <Typography.Text strong>
-                              {resource.url}
-                            </Typography.Text>
-                            <pre
-                              style={{
-                                margin: 0,
-                                padding: 16,
-                                overflow: 'auto',
-                                borderRadius: 8,
-                                background: '#f6f8fa',
-                                whiteSpace: 'pre-wrap',
-                                wordBreak: 'break-word',
-                              }}
-                            >
-                              {buildSnippet(resource.content, searchNeedles)}
-                            </pre>
-                          </div>
-                        </List.Item>
-                      )}
-                    />
-                  ) : (
-                    <Empty
-                      description={
-                        selectedNode.url
-                          ? '未命中相关 JS 内容'
-                          : '当前节点没有可搜索 URL'
-                      }
-                    />
-                  )}
+                            {buildSnippet(resource.content, searchNeedles)}
+                          </pre>
+                        </div>
+                      </List.Item>
+                    )}
+                  />
                 </Card>
               ) : null}
 
-              {!selectedNodeIsJS ? (
+              {!selectedNodeIsJS && relatedAPIResources.length > 0 ? (
                 <Card
                   size="small"
                   title="相关接口内容"
@@ -426,53 +481,51 @@ export default function SiteTreePanel({
                     </Typography.Text>
                   }
                 >
-                  {relatedAPIResources.length ? (
-                    <List
-                      dataSource={relatedAPIResources.slice(0, 10)}
-                      renderItem={(resource) => (
-                        <List.Item>
+                  <List
+                    dataSource={relatedAPIResources}
+                    renderItem={(resource) => (
+                      <List.Item>
+                        <div
+                          style={{ display: 'grid', gap: 12, width: '100%' }}
+                        >
                           <div
-                            style={{ display: 'grid', gap: 12, width: '100%' }}
+                            style={{
+                              display: 'flex',
+                              gap: 8,
+                              flexWrap: 'wrap',
+                            }}
                           >
-                            <div
-                              style={{
-                                display: 'flex',
-                                gap: 8,
-                                flexWrap: 'wrap',
-                              }}
-                            >
-                              <Tag color="blue">{resource.method || 'GET'}</Tag>
-                              <Typography.Text strong>
-                                {resource.url}
-                              </Typography.Text>
-                              {typeof resource.responseCode === 'number' ? (
-                                <Tag>{resource.responseCode}</Tag>
-                              ) : null}
-                            </div>
-                            {renderCodeBlock(
-                              '接口请求体',
-                              resource.requestBody,
-                              '暂无请求体',
-                            )}
-                            {renderCodeBlock(
-                              '接口响应体',
-                              resource.responseBody,
-                              '暂无响应体',
-                            )}
+                            <Tag color="blue">{resource.method || 'GET'}</Tag>
+                            <Typography.Text strong>
+                              {resource.url}
+                            </Typography.Text>
+                            {typeof resource.responseCode === 'number' ? (
+                              <Tag>{resource.responseCode}</Tag>
+                            ) : null}
                           </div>
-                        </List.Item>
-                      )}
-                    />
-                  ) : (
-                    <Empty
-                      description={
-                        selectedNode.url
-                          ? '未命中相关接口内容'
-                          : '当前节点没有可搜索 URL'
-                      }
-                    />
-                  )}
+                          {hasDisplayableValue(resource.requestBody)
+                            ? renderCodeBlock(
+                                '接口请求体',
+                                resource.requestBody,
+                                '暂无请求体',
+                              )
+                            : null}
+                          {hasDisplayableValue(resource.responseBody)
+                            ? renderCodeBlock(
+                                '接口响应体',
+                                resource.responseBody,
+                                '暂无响应体',
+                              )
+                            : null}
+                        </div>
+                      </List.Item>
+                    )}
+                  />
                 </Card>
+              ) : null}
+
+              {!hasDynamicSections ? (
+                <Empty description="当前节点未命中可展示的动态请求或响应内容" />
               ) : null}
             </div>
           </Spin>

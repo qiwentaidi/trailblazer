@@ -138,12 +138,15 @@ const protocolHookScript = `(function () {
   var dynamicKeyPattern = /^(sign|signature|timestamp|nonce|token|access_token|auth|authorization|deviceid|device_id|ts|t)$/i;
   var suspiciousFuncPattern = /(encrypt|decrypt|sign|signature|sm2|sm3|sm4|aes|des|rsa|md5|sha1|sha256|sha512|hmac|base64|hex)/i;
   var helperFuncPattern = /^(rn|randomstring|sth|st|sa|sb|sc|sd|se)$/i;
-  var maxWrappedFunctions = 80;
+  var maxWrappedFunctions = 300;
   var wrappedFunctionCount = 0;
   var suppressJSONStringifyCapture = false;
   var recentResponseContexts = [];
   var maxResponseContexts = 16;
   var activeFunctionCallStack = [];
+  var lastRequestStepSeq = 0;
+  var recentSensitiveInputs = [];
+  var maxSensitiveInputs = 20;
 
   function nowMs() {
     return Date.now();
@@ -213,6 +216,16 @@ const protocolHookScript = `(function () {
     return str.slice(0, maxPreviewLength) + "\n...[内容过长，已截断]";
   }
 
+  function stringifyWithoutCapture(value) {
+    var previous = suppressJSONStringifyCapture;
+    suppressJSONStringifyCapture = true;
+    try {
+      return JSON.stringify(value);
+    } finally {
+      suppressJSONStringifyCapture = previous;
+    }
+  }
+
   function normalizeAlgorithm(algorithm) {
     if (!algorithm) {
       return "";
@@ -224,7 +237,7 @@ const protocolHookScript = `(function () {
       return String(algorithm.name);
     }
     try {
-      return limitText(JSON.stringify(algorithm));
+      return limitText(stringifyWithoutCapture(algorithm));
     } catch (err) {
       return limitText(String(algorithm));
     }
@@ -259,7 +272,7 @@ const protocolHookScript = `(function () {
         }
       });
       try {
-        return limitText(JSON.stringify(formObj));
+        return limitText(stringifyWithoutCapture(formObj));
       } catch (err) {
         return "[FormData]";
       }
@@ -283,7 +296,7 @@ const protocolHookScript = `(function () {
         }
       } catch (err) {}
       try {
-        return limitText(JSON.stringify(value));
+        return limitText(stringifyWithoutCapture(value));
       } catch (err) {
         return limitText(String(value));
       }
@@ -498,6 +511,17 @@ const protocolHookScript = `(function () {
     }
 
     if (source.indexOf("encrypt") >= 0 && input && /^[a-f0-9]{32,}$/i.test(output)) {
+      if (step.function_path) {
+        setSessionMaterialIfMissing("request_runtime_function_path", step.function_path);
+      }
+      if (step.module_id) {
+        setSessionMaterialIfMissing("request_runtime_module_id", step.module_id);
+      }
+    }
+
+    if (source.indexOf("encrypt") >= 0 && input && isLikelyRSABase64Ciphertext(output)) {
+      setSessionMaterial("latest_plaintext", input);
+      setSessionMaterial("latest_ciphertext", output);
       if (step.function_path) {
         setSessionMaterialIfMissing("request_runtime_function_path", step.function_path);
       }
@@ -727,6 +751,100 @@ const protocolHookScript = `(function () {
     return false;
   }
 
+  function isLikelyRSABase64Ciphertext(text) {
+    if (!text) {
+      return false;
+    }
+    var trimmed = String(text).trim();
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(trimmed) || trimmed.length % 4 !== 0) {
+      return false;
+    }
+    return trimmed.length === 172 || trimmed.length === 344 || trimmed.length === 684;
+  }
+
+  function isSensitiveInputElement(element) {
+    if (!element) {
+      return false;
+    }
+    var tagName = String(element.tagName || "").toLowerCase();
+    if (tagName !== "input" && tagName !== "textarea") {
+      return false;
+    }
+    var type = String(element.type || "").toLowerCase();
+    var hint = [
+      element.name,
+      element.id,
+      element.className,
+      element.placeholder,
+      element.autocomplete,
+      type
+    ].join(" ").toLowerCase();
+    return type === "password" || /password|passwd|pwd|pass|mm|kl|密码|口令/.test(hint);
+  }
+
+  function rememberSensitiveInput(element) {
+    if (!isSensitiveInputElement(element)) {
+      return;
+    }
+    var value = "";
+    try {
+      value = String(element.value || "");
+    } catch (err) {}
+    if (!value) {
+      return;
+    }
+    recentSensitiveInputs.push({
+      value: limitText(value),
+      hint: limitText([element.name, element.id, element.placeholder, element.type].join("|")),
+      captured_at_ms: nowMs()
+    });
+    if (recentSensitiveInputs.length > maxSensitiveInputs) {
+      recentSensitiveInputs = recentSensitiveInputs.slice(recentSensitiveInputs.length - maxSensitiveInputs);
+    }
+  }
+
+  function scanSensitiveInputsFromDOM() {
+    if (!document || typeof document.querySelectorAll !== "function") {
+      return;
+    }
+    try {
+      var nodes = document.querySelectorAll("input, textarea");
+      Array.prototype.slice.call(nodes).forEach(function (node) {
+        rememberSensitiveInput(node);
+      });
+    } catch (err) {}
+  }
+
+  function latestSensitiveInputValue() {
+    try {
+      rememberSensitiveInput(document.activeElement);
+    } catch (err) {}
+    scanSensitiveInputsFromDOM();
+    var cutoff = nowMs() - recentWindowMs;
+    recentSensitiveInputs = recentSensitiveInputs.filter(function (entry) {
+      return entry && entry.captured_at_ms >= cutoff;
+    });
+    if (!recentSensitiveInputs.length) {
+      return "";
+    }
+    return recentSensitiveInputs[recentSensitiveInputs.length - 1].value || "";
+  }
+
+  function hookSensitiveInputCapture() {
+    if (!document || document.__trailblazerSensitiveInputHooked) {
+      return;
+    }
+    var handler = function (event) {
+      rememberSensitiveInput(event && event.target);
+    };
+    try {
+      document.addEventListener("input", handler, true);
+      document.addEventListener("change", handler, true);
+      document.addEventListener("keyup", handler, true);
+      document.__trailblazerSensitiveInputHooked = true;
+    } catch (err) {}
+  }
+
   function isLikelyRawAESKey(value) {
     if (!value || (value.length !== 16 && value.length !== 24 && value.length !== 32)) {
       return false;
@@ -917,7 +1035,7 @@ const protocolHookScript = `(function () {
         responseBody = xhr.responseText || "";
       } else if (xhr.responseType === "json") {
         if (xhr.response != null) {
-          responseBody = JSON.stringify(xhr.response);
+          responseBody = stringifyWithoutCapture(xhr.response);
         }
       } else if (typeof ArrayBuffer !== "undefined" && xhr.response instanceof ArrayBuffer) {
         responseBody = arrayBufferToBase64(xhr.response);
@@ -939,12 +1057,18 @@ const protocolHookScript = `(function () {
   function recordCryptoStep(source, algorithm, input, output, meta) {
     var activeCall = currentFunctionCall();
     meta = meta || {};
+    var inputPreview = toPreview(input);
+    var outputPreview = toPreview(output);
+    var normalizedAlgorithm = normalizeAlgorithm(algorithm);
+    if (String(source || "").toLowerCase().indexOf("encrypt") >= 0 && isLikelyRSABase64Ciphertext(outputPreview)) {
+      normalizedAlgorithm = "rsa.encrypt";
+    }
     var step = {
       seq: ++nextCryptoStepSeq,
       source: source,
-      algorithm: normalizeAlgorithm(algorithm),
-      input_preview: toPreview(input),
-      output_preview: toPreview(output),
+      algorithm: normalizedAlgorithm,
+      input_preview: inputPreview,
+      output_preview: outputPreview,
       call_id: String(meta.call_id || (activeCall && activeCall.call_id) || ""),
       parent_call_id: String(meta.parent_call_id || (activeCall && activeCall.parent_call_id) || ""),
       function_path: String(meta.function_path || (activeCall && activeCall.function_path) || ""),
@@ -1083,6 +1207,133 @@ const protocolHookScript = `(function () {
     });
   }
 
+  function collectEncryptedFieldCandidates(value, path, target) {
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.slice(0, 80).forEach(function (entry, index) {
+        collectEncryptedFieldCandidates(entry, path.concat(String(index)), target);
+      });
+      return;
+    }
+    Object.keys(value).slice(0, 80).forEach(function (key) {
+      var nextPath = path.concat(key);
+      var entry = value[key];
+      if (typeof entry === "string" && isLikelyEncodedPayload(entry)) {
+        target.push({ path: nextPath, key: key, value: entry });
+        return;
+      }
+      collectEncryptedFieldCandidates(entry, nextPath, target);
+    });
+  }
+
+  function setPathValue(root, path, value) {
+    var cursor = root;
+    for (var i = 0; i < path.length - 1; i++) {
+      if (!cursor || typeof cursor !== "object") {
+        return;
+      }
+      cursor = cursor[path[i]];
+    }
+    if (cursor && typeof cursor === "object" && path.length) {
+      cursor[path[path.length - 1]] = value;
+    }
+  }
+
+  function normalizeCiphertextForCompare(value) {
+    var normalized = String(value || "").trim();
+    if (normalized.length >= 2 && normalized.charAt(0) === '"' && normalized.charAt(normalized.length - 1) === '"') {
+      normalized = normalized.slice(1, normalized.length - 1);
+    }
+    return normalized;
+  }
+
+  function findCryptoStepForCiphertext(cryptoSteps, ciphertext) {
+    var expected = normalizeCiphertextForCompare(ciphertext);
+    if (!expected) {
+      return null;
+    }
+    for (var i = (cryptoSteps || []).length - 1; i >= 0; i--) {
+      var step = cryptoSteps[i] || {};
+      if (normalizeCiphertextForCompare(step.output_preview) === expected) {
+        return step;
+      }
+    }
+    return null;
+  }
+
+  function synthesizeFieldEncryptionSteps(finalBodyPreview, cryptoSteps) {
+    var steps = [];
+    if (!finalBodyPreview || !isLikelyJSONText(finalBodyPreview)) {
+      return steps;
+    }
+    var body;
+    try {
+      body = JSON.parse(finalBodyPreview);
+    } catch (err) {
+      return steps;
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return steps;
+    }
+
+    var candidates = [];
+    var reconstructedBody = null;
+    var hasReconstructedPlaintext = false;
+    collectEncryptedFieldCandidates(body, [], candidates);
+    candidates.forEach(function (candidate) {
+      var key = candidate.key;
+      var value = candidate.value;
+      var matchedStep = findCryptoStepForCiphertext(cryptoSteps, value);
+      var plaintext = "";
+      var algorithm = "";
+      var functionPath = "";
+      var source = "request-field." + candidate.path.join(".");
+      if (matchedStep) {
+        plaintext = matchedStep.input_preview || "";
+        algorithm = matchedStep.algorithm || matchedStep.source || "field.encrypt";
+        functionPath = matchedStep.function_path || "matched runtime crypto output";
+        if (!reconstructedBody) {
+          try {
+            reconstructedBody = JSON.parse(stringifyWithoutCapture(body));
+          } catch (err) {
+            reconstructedBody = null;
+          }
+        }
+        if (reconstructedBody) {
+          setPathValue(reconstructedBody, candidate.path, plaintext || "[captured-empty-input]");
+          hasReconstructedPlaintext = true;
+        }
+      } else {
+        algorithm = isLikelyRSABase64Ciphertext(value) ? "rsa.encrypt(inferred)" : "encrypted-field(inferred)";
+        plaintext = "[unknown-plaintext]";
+        functionPath = "request body field inference (no matching runtime step)";
+      }
+      steps.push({
+        source: source,
+        algorithm: algorithm,
+        input_preview: limitText(plaintext || "[sensitive-input-unavailable]"),
+        output_preview: limitText(value),
+        call_id: "",
+        parent_call_id: "",
+        function_path: functionPath,
+        module_id: "",
+        stack: "",
+        captured_at_ms: nowMs()
+      });
+      setSessionMaterial("latest_ciphertext", value);
+    });
+    if (hasReconstructedPlaintext && reconstructedBody) {
+      try {
+        setSessionMaterial("latest_plaintext", stringifyWithoutCapture(reconstructedBody));
+      } catch (err) {}
+    } else if (candidates.length) {
+      setSessionMaterial("encrypted_field_inference_only", "true");
+    }
+    return steps;
+  }
+
   function inferAlgorithms(finalBodyPreview, cryptoSteps) {
     var algorithms = [];
     var seen = {};
@@ -1115,6 +1366,9 @@ const protocolHookScript = `(function () {
   function pickRequestBeforeTransformCandidate(finalBodyPreview, cryptoSteps, sessionMaterials) {
     if (sessionMaterials && isLikelyJSONText(sessionMaterials["latest_plaintext"])) {
       return sessionMaterials["latest_plaintext"];
+    }
+    if (sessionMaterials && sessionMaterials["encrypted_field_inference_only"] === "true") {
+      return "";
     }
 
     for (var i = cryptoSteps.length - 1; i >= 0; i--) {
@@ -1149,10 +1403,22 @@ const protocolHookScript = `(function () {
 
   function buildRequestTrace(transport, requestURL, method, requestBody, requestHeaders) {
     var finalBodyPreview = toPreview(requestBody);
-    var requestSteps = snapshotRecentCryptoSteps();
+    var normalizedMethod = String(method || "GET").toUpperCase();
+    var hasRequestBody = !!finalBodyPreview && normalizedMethod !== "GET" && normalizedMethod !== "HEAD" && normalizedMethod !== "OPTIONS";
+    var requestStepStartSeq = lastRequestStepSeq;
+    var requestSteps = hasRequestBody ? snapshotRecentCryptoSteps(requestStepStartSeq) : [];
+    var inferredFieldSteps = synthesizeFieldEncryptionSteps(finalBodyPreview, requestSteps);
+    if (inferredFieldSteps.length) {
+      requestSteps = requestSteps.concat(inferredFieldSteps);
+    }
     var normalizedHeaders = normalizeHeadersInput(requestHeaders);
     var dynamicParams = collectDynamicParams(requestURL, finalBodyPreview, normalizedHeaders);
     var sessionMaterials = snapshotSessionMaterials();
+    delete sessionMaterials["latest_response_ciphertext"];
+    delete sessionMaterials["latest_response_plaintext"];
+    delete sessionMaterials["response_runtime_function_path"];
+    delete sessionMaterials["response_runtime_module_id"];
+    delete sessionMaterials["response_processing_source"];
     if (normalizedHeaders["gv59jppeesnw"]) {
       sessionMaterials["nonce"] = normalizedHeaders["gv59jppeesnw"];
     }
@@ -1174,9 +1440,16 @@ const protocolHookScript = `(function () {
     if (finalBodyPreview) {
       sessionMaterials["latest_ciphertext"] = finalBodyPreview;
     }
-    var requestBeforeTransform = pickRequestBeforeTransformCandidate(finalBodyPreview, requestSteps, sessionMaterials);
+    var requestBeforeTransform = "";
+    if (!hasRequestBody) {
+      requestSteps = [];
+    } else if (finalBodyPreview || (requestSteps && requestSteps.length > 0)) {
+      requestBeforeTransform = pickRequestBeforeTransformCandidate(finalBodyPreview, requestSteps, sessionMaterials);
+    }
     if (requestBeforeTransform) {
       sessionMaterials["latest_plaintext"] = requestBeforeTransform;
+    } else {
+      delete sessionMaterials["latest_plaintext"];
     }
     var trace = {
       kind: "request-trace",
@@ -1184,7 +1457,7 @@ const protocolHookScript = `(function () {
       transport: transport,
       page_url: window.location.href,
       request_url: requestURL,
-      method: (method || "GET").toUpperCase(),
+      method: normalizedMethod,
       request_headers: normalizedHeaders,
       request_before_transform: requestBeforeTransform,
       final_request_body: finalBodyPreview,
@@ -1197,6 +1470,7 @@ const protocolHookScript = `(function () {
       captured_at_ms: nowMs()
     };
     markTraceStepCursor(trace, "__request_step_seq", currentCryptoStepSeq());
+    lastRequestStepSeq = currentCryptoStepSeq();
     return trace;
   }
 
@@ -1246,9 +1520,31 @@ const protocolHookScript = `(function () {
     return true;
   }
 
-  function scanAndWrapSuspiciousFunctions(root, rootName, depth) {
-    if (!root || typeof root !== "object" || depth < 0 || wrappedFunctionCount >= maxWrappedFunctions) {
+  function scanAndWrapPrototypeFunctions(candidate, label) {
+    if (!candidate || typeof candidate !== "function" || !candidate.prototype || wrappedFunctionCount >= maxWrappedFunctions) {
       return;
+    }
+    var prototype = candidate.prototype;
+    try {
+      Object.getOwnPropertyNames(prototype).slice(0, 80).forEach(function (methodName) {
+        if (methodName === "constructor" || wrappedFunctionCount >= maxWrappedFunctions) {
+          return;
+        }
+        if (!suspiciousFuncPattern.test(methodName) && !helperFuncPattern.test(methodName)) {
+          return;
+        }
+        wrapNamedFunction(prototype, methodName, label + ".prototype." + methodName);
+      });
+    } catch (err) {}
+  }
+
+  function scanAndWrapSuspiciousFunctions(root, rootName, depth) {
+    if (!root || (typeof root !== "object" && typeof root !== "function") || depth < 0 || wrappedFunctionCount >= maxWrappedFunctions) {
+      return;
+    }
+
+    if (typeof root === "function") {
+      scanAndWrapPrototypeFunctions(root, rootName);
     }
 
     Object.keys(root).slice(0, 120).forEach(function (key) {
@@ -1263,6 +1559,10 @@ const protocolHookScript = `(function () {
         return;
       }
 
+      if (typeof value === "function") {
+        scanAndWrapPrototypeFunctions(value, rootName + "." + key);
+      }
+
       if (!suspiciousFuncPattern.test(key) && !helperFuncPattern.test(key)) {
         if (depth > 0 && value && typeof value === "object" && !Array.isArray(value)) {
           scanAndWrapSuspiciousFunctions(value, rootName + "." + key, depth - 1);
@@ -1271,6 +1571,7 @@ const protocolHookScript = `(function () {
       }
 
       if (typeof value === "function") {
+        scanAndWrapPrototypeFunctions(value, rootName + "." + key);
         wrapNamedFunction(root, key, rootName + "." + key);
         return;
       }
@@ -1302,8 +1603,39 @@ const protocolHookScript = `(function () {
       if (!exportsRoot || (typeof exportsRoot !== "object" && typeof exportsRoot !== "function")) {
         return;
       }
+      if (typeof exportsRoot === "function") {
+        scanAndWrapPrototypeFunctions(exportsRoot, runtimeLabel + "(" + moduleID + ").exports");
+      }
       scanAndWrapSuspiciousFunctions(exportsRoot, runtimeLabel + "(" + moduleID + ").exports", 2);
     });
+  }
+
+  function hookKnownCryptoConstructors() {
+    try {
+      if (typeof window.JSEncrypt === "function") {
+        scanAndWrapPrototypeFunctions(window.JSEncrypt, "window.JSEncrypt");
+      }
+    } catch (err) {}
+    try {
+      if (typeof window.RSAKey === "function") {
+        scanAndWrapPrototypeFunctions(window.RSAKey, "window.RSAKey");
+      }
+    } catch (err) {}
+    try {
+      if (window.KJUR && window.KJUR.crypto && typeof window.KJUR.crypto.Cipher === "object") {
+        scanAndWrapSuspiciousFunctions(window.KJUR.crypto.Cipher, "window.KJUR.crypto.Cipher", 1);
+      }
+    } catch (err) {}
+    try {
+      if (window.sm2 && typeof window.sm2 === "object") {
+        scanAndWrapSuspiciousFunctions(window.sm2, "window.sm2", 1);
+      }
+    } catch (err) {}
+    try {
+      if (window.sm4 && typeof window.sm4 === "object") {
+        scanAndWrapSuspiciousFunctions(window.sm4, "window.sm4", 1);
+      }
+    } catch (err) {}
   }
 
   function scanWebpackRuntimeCandidates() {
@@ -1794,6 +2126,8 @@ const protocolHookScript = `(function () {
   hookWorkers();
   hookWebAssembly();
   hookCommonEncodingHelpers();
+  hookSensitiveInputCapture();
+  hookKnownCryptoConstructors();
   scanAndWrapSuspiciousFunctions(window, "window", 2);
   scanWebpackRuntimeCandidates();
   hookCryptoJS();
@@ -1801,6 +2135,8 @@ const protocolHookScript = `(function () {
   var timer = window.setInterval(function () {
     attempts += 1;
     hookCryptoJS();
+    hookSensitiveInputCapture();
+    hookKnownCryptoConstructors();
     scanAndWrapSuspiciousFunctions(window, "window", 2);
     scanWebpackRuntimeCandidates();
     if (attempts > 20) {

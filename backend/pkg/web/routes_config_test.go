@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"trailblazer/pkg/core/database"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
@@ -199,5 +200,94 @@ vuln-detection:
 
 	if response.Data.VulnDetection.Enabled {
 		t.Fatalf("expected getConfig to return vulnDetection.enabled=false, got true")
+	}
+}
+
+func TestGetConfigReturnsLearnedAuthenticationPatterns(t *testing.T) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, configPath)
+	configData := []byte(`
+openai:
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+  model: "qwen-plus"
+  enabled: false
+black-domain: []
+high-risk-router: []
+authentication: []
+placeholder: {}
+vuln-detection:
+  enabled: true
+  sql-injection:
+    enabled: true
+  lfi:
+    enabled: true
+  ssrf:
+    enabled: true
+  redirect:
+    enabled: true
+  xss:
+    enabled: true
+  upload:
+    enabled: true
+`)
+	if err := os.WriteFile(configFile, configData, 0o644); err != nil {
+		t.Fatalf("expected config file to be written: %v", err)
+	}
+
+	dbPath := filepath.Join(tempDir, "test.db")
+	if database.DB != nil {
+		_ = database.DB.Close()
+		database.DB = nil
+	}
+	if err := database.InitSQLite(dbPath); err != nil {
+		t.Fatalf("expected sqlite init to succeed: %v", err)
+	}
+	defer func() {
+		if database.DB != nil {
+			_ = database.DB.Close()
+			database.DB = nil
+		}
+	}()
+
+	if err := database.UpsertLearnedAuthPattern(`请先完成统一身份认证后再访问`, "test"); err != nil {
+		t.Fatalf("expected learned auth pattern to be inserted: %v", err)
+	}
+
+	previousWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("expected working directory: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(previousWD)
+	}()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("expected to chdir into temp dir: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/config", nil)
+
+	getConfig(context)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected getConfig to return 200, got %d with body %s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Data struct {
+			LearnedAuthentication []string `json:"learnedAuthentication"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("expected response body to parse: %v", err)
+	}
+
+	if len(response.Data.LearnedAuthentication) != 1 || response.Data.LearnedAuthentication[0] != `请先完成统一身份认证后再访问` {
+		t.Fatalf("expected learned auth patterns to be returned, got %#v", response.Data.LearnedAuthentication)
 	}
 }

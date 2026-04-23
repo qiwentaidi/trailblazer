@@ -1,13 +1,10 @@
 import {
   Button,
   Card,
-  Col,
   Descriptions,
   message,
   Progress,
-  Row,
   Space,
-  Statistic,
   Tag,
   Typography,
 } from 'antd';
@@ -117,29 +114,6 @@ export default function TaskOverview({
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
-      <Row gutter={16}>
-        <Col xs={24} sm={12} xl={6}>
-          <Card styles={{ body: { padding: 16 } }}>
-            <Statistic title="任务状态" value={executionStatus || '-'} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card styles={{ body: { padding: 16 } }}>
-            <Statistic title="风险总数" value={risks.length} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card styles={{ body: { padding: 16 } }}>
-            <Statistic title="高风险" value={riskCountMap.high} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} xl={6}>
-          <Card styles={{ body: { padding: 16 } }}>
-            <Statistic title="站点节点" value={countTreeNodes(treeData)} />
-          </Card>
-        </Col>
-      </Row>
-
       <Card title="任务概况" styles={{ body: { paddingTop: 16 } }}>
         <Descriptions column={2} bordered>
           <Descriptions.Item label="任务名称">
@@ -165,6 +139,10 @@ export default function TaskOverview({
           <Descriptions.Item label="资产分类">{assetGroups}</Descriptions.Item>
           <Descriptions.Item label="扫描次数">
             {versionCount || '-'}
+          </Descriptions.Item>
+          <Descriptions.Item label="风险总数">{risks.length}</Descriptions.Item>
+          <Descriptions.Item label="站点节点">
+            {countTreeNodes(treeData)}
           </Descriptions.Item>
           <Descriptions.Item label="当前视图">
             <Tag color="blue">{currentScanLabel}</Tag>

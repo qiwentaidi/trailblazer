@@ -1,50 +1,61 @@
 package lib
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"trailblazer/pkg/config"
 	"trailblazer/pkg/core/crawl"
 	"trailblazer/pkg/core/database"
+	tbdb "trailblazer/pkg/core/database"
 	"trailblazer/pkg/core/protocoltool"
+	"trailblazer/pkg/core/scanexec"
 	"trailblazer/pkg/core/structs"
 
-	"github.com/google/uuid"
 	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
 	"gopkg.in/yaml.v3"
 )
 
+var sdkIgnoredProtocolAlgorithms = map[string]struct{}{
+	"json.stringify": {},
+	"json.parse":     {},
+}
+
 // VulnRecord 漏洞记录（SDK独立定义，避免ES依赖）
 type VulnRecord struct {
-	TaskID             string    `json:"task_id"`
-	VulnID             string    `json:"vuln_id"`
-	Title              string    `json:"title"`
-	Level              string    `json:"level"` // high, medium, low, info
-	Type               string    `json:"type"`
-	URL                string    `json:"url"`
-	Method             string    `json:"method,omitempty"`
-	Request            string    `json:"request,omitempty"`
-	Response           string    `json:"response,omitempty"`
-	TraceID            string    `json:"trace_id,omitempty"`
-	HasProtocolTrace   bool      `json:"has_protocol_trace,omitempty"`
-	ResponseCiphertext string    `json:"response_ciphertext,omitempty"`
-	DecryptionStatus   string    `json:"decryption_status,omitempty"`
-	DecryptionDetail   string    `json:"decryption_detail,omitempty"`
-	ResponseLength     int       `json:"response_length,omitempty"` // 原始响应长度（字节）
-	Confidence         string    `json:"confidence,omitempty"`
-	ConfidenceReason   string    `json:"confidence_reason,omitempty"`
-	DenyTemplateID     string    `json:"deny_template_id,omitempty"`
-	DenyTemplateKind   string    `json:"deny_template_kind,omitempty"`
-	DenyTemplateLabel  string    `json:"deny_template_label,omitempty"`
-	DenyTemplateCount  int       `json:"deny_template_count,omitempty"`
-	Description        string    `json:"description"`
-	AIVerified         bool      `json:"ai_verified"` // AI辅助验证标记
-	CreatedAt          time.Time `json:"created_at"`
+	TaskID             string                       `json:"task_id"`
+	VulnID             string                       `json:"vuln_id"`
+	Title              string                       `json:"title"`
+	Level              string                       `json:"level"` // high, medium, low, info
+	Type               string                       `json:"type"`
+	URL                string                       `json:"url"`
+	Method             string                       `json:"method,omitempty"`
+	Request            string                       `json:"request,omitempty"`
+	Response           string                       `json:"response,omitempty"`
+	TraceID            string                       `json:"trace_id,omitempty"`
+	HasProtocolTrace   bool                         `json:"has_protocol_trace,omitempty"`
+	ResponseCiphertext string                       `json:"response_ciphertext,omitempty"`
+	DecryptionStatus   string                       `json:"decryption_status,omitempty"`
+	DecryptionDetail   string                       `json:"decryption_detail,omitempty"`
+	ResponseLength     int                          `json:"response_length,omitempty"` // 原始响应长度（字节）
+	Confidence         string                       `json:"confidence,omitempty"`
+	ConfidenceReason   string                       `json:"confidence_reason,omitempty"`
+	DenyTemplateID     string                       `json:"deny_template_id,omitempty"`
+	DenyTemplateKind   string                       `json:"deny_template_kind,omitempty"`
+	DenyTemplateLabel  string                       `json:"deny_template_label,omitempty"`
+	DenyTemplateCount  int                          `json:"deny_template_count,omitempty"`
+	StaticContexts     []database.VulnStaticContext `json:"static_contexts,omitempty"`
+	Description        string                       `json:"description"`
+	AIVerified         bool                         `json:"ai_verified"` // AI辅助验证标记
+	CreatedAt          time.Time                    `json:"created_at"`
 }
 
 // ScanEventType 扫描事件类型
@@ -102,6 +113,8 @@ type ScanOptions struct {
 	OnResult ScanCallback `json:"-"`
 
 	Proxy string `json:"proxy,omitempty"` // 代理设置（可选）
+
+	DataStore database.ScanDataStore `json:"-"`
 }
 
 // OpenAIOptions OpenAI配置选项
@@ -213,28 +226,225 @@ func buildSDKJSFindOptions(
 	targetURL string,
 	apiRouter []string,
 	root string,
+	hintBundle crawl.StaticEndpointHintBundle,
 	options *ScanOptions,
 	aiChecker *crawl.SensitiveInfoChecker,
 ) structs.JSFindOptions {
 	vulnDetection := resolveSDKVulnDetectionOptions(options.VulnDetection)
 
 	return structs.JSFindOptions{
-		TaskID:         taskID,
-		HomeURL:        targetURL,
-		ApiList:        apiRouter,
-		ApiRoot:        root,
-		SkipVulnScan:   !vulnDetection.Enabled,
-		HighRiskRouter: options.HighRiskRouter,
-		Authentication: options.Authentication,
-		Placeholder:    options.Placeholder,
-		LFIConfig:      vulnDetection.LFI,
-		SSRFConfig:     vulnDetection.SSRF,
-		RedirectConfig: vulnDetection.Redirect,
-		SQLInjConfig:   vulnDetection.SQLInjection,
-		XSSConfig:      vulnDetection.XSS,
-		UploadConfig:   vulnDetection.Upload,
-		AIChecker:      aiChecker,
+		TaskID:                    taskID,
+		HomeURL:                   targetURL,
+		ApiList:                   apiRouter,
+		ApiRoot:                   root,
+		StaticMethodHints:         hintBundle.Methods,
+		StaticHeaderHints:         hintBundle.Headers,
+		StaticConstantParams:      hintBundle.ConstantParams,
+		StaticRequestPayloadHints: hintBundle.RequestPayload,
+		SkipVulnScan:              !vulnDetection.Enabled,
+		HighRiskRouter:            options.HighRiskRouter,
+		Authentication:            options.Authentication,
+		Placeholder:               options.Placeholder,
+		LFIConfig:                 vulnDetection.LFI,
+		SSRFConfig:                vulnDetection.SSRF,
+		RedirectConfig:            vulnDetection.Redirect,
+		SQLInjConfig:              vulnDetection.SQLInjection,
+		XSSConfig:                 vulnDetection.XSS,
+		UploadConfig:              vulnDetection.Upload,
+		AIChecker:                 aiChecker,
+		DataStore:                 options.DataStore,
 	}
+}
+
+type sdkJSFetcher func(string) ([]byte, error)
+
+func defaultSDKJSFetcher(jsURL string) ([]byte, error) {
+	resp, err := clients.SimpleGet(jsURL, clients.DefaultRestyClient())
+	if err != nil {
+		return nil, err
+	}
+	body := resp.Body()
+	copied := make([]byte, len(body))
+	copy(copied, body)
+	return copied, nil
+}
+
+func buildSDKStaticHintBundle(homeURL string, jsLinks []string) crawl.StaticEndpointHintBundle {
+	return buildSDKStaticHintBundleWithFetcherAndTempDir(homeURL, jsLinks, defaultSDKJSFetcher, "")
+}
+
+func buildSDKStaticHintBundleWithFetcherAndTempDir(
+	homeURL string,
+	jsLinks []string,
+	fetcher sdkJSFetcher,
+	tempParentDir string,
+) crawl.StaticEndpointHintBundle {
+	if len(jsLinks) == 0 || fetcher == nil {
+		return crawl.StaticEndpointHintBundle{}
+	}
+
+	tempDir, err := os.MkdirTemp(tempParentDir, "trailblazer-sdk-js-*")
+	if err != nil {
+		fmt.Printf("[WARNING] 无法创建SDK JS临时目录: %v\n", err)
+		return crawl.StaticEndpointHintBundle{}
+	}
+	defer os.RemoveAll(tempDir)
+
+	merged := crawl.StaticEndpointHintBundle{}
+	for _, jsLink := range jsLinks {
+		resolvedURL := normalizeSDKJSURL(homeURL, jsLink)
+		if strings.TrimSpace(resolvedURL) == "" {
+			continue
+		}
+
+		content, err := fetcher(resolvedURL)
+		if err != nil {
+			fmt.Printf("[WARNING] SDK下载JS失败 %s: %v\n", resolvedURL, err)
+			continue
+		}
+
+		filePath := filepath.Join(tempDir, buildSDKTempJSFileName(resolvedURL))
+		if err := os.WriteFile(filePath, content, 0o600); err != nil {
+			fmt.Printf("[WARNING] SDK写入JS临时文件失败 %s: %v\n", resolvedURL, err)
+			continue
+		}
+
+		fileContent, err := os.ReadFile(filePath)
+		_ = os.Remove(filePath)
+		if err != nil {
+			fmt.Printf("[WARNING] SDK读取JS临时文件失败 %s: %v\n", resolvedURL, err)
+			continue
+		}
+
+		singleBundle := crawl.BuildStaticEndpointHintBundle([]database.JSResource{
+			{
+				TaskID:    "cli-mode",
+				URL:       resolvedURL,
+				Content:   string(fileContent),
+				Size:      len(fileContent),
+				FetchedAt: time.Now(),
+			},
+		})
+		merged = mergeSDKStaticHintBundles(merged, singleBundle)
+	}
+
+	return merged
+}
+
+func normalizeSDKJSURL(homeURL, jsLink string) string {
+	jsLink = strings.TrimSpace(jsLink)
+	if jsLink == "" {
+		return ""
+	}
+	if strings.HasPrefix(jsLink, "http://") || strings.HasPrefix(jsLink, "https://") {
+		return jsLink
+	}
+
+	baseURL := strings.TrimSpace(homeURL)
+	if parsed, err := url.Parse(baseURL); err == nil && parsed != nil && parsed.Scheme != "" && parsed.Host != "" {
+		return parsed.Scheme + "://" + parsed.Host + "/" + strings.TrimLeft(jsLink, "/")
+	}
+	return jsLink
+}
+
+func buildSDKTempJSFileName(jsURL string) string {
+	sum := sha1.Sum([]byte(jsURL))
+	extension := filepath.Ext(strings.TrimSpace(jsURL))
+	if extension == "" || len(extension) > 10 {
+		extension = ".js"
+	}
+	return hex.EncodeToString(sum[:]) + extension
+}
+
+func mergeSDKStaticHintBundles(base, extra crawl.StaticEndpointHintBundle) crawl.StaticEndpointHintBundle {
+	if len(extra.Methods) > 0 {
+		if base.Methods == nil {
+			base.Methods = make(map[string]string, len(extra.Methods))
+		}
+		for path, method := range extra.Methods {
+			method = strings.ToUpper(strings.TrimSpace(method))
+			if strings.TrimSpace(path) == "" || method == "" {
+				continue
+			}
+			current := strings.ToUpper(strings.TrimSpace(base.Methods[path]))
+			if current == "" || (current == "GET" && method == "POST") {
+				base.Methods[path] = method
+			}
+		}
+	}
+
+	if len(extra.ConstantParams) > 0 {
+		if base.ConstantParams == nil {
+			base.ConstantParams = make(map[string]url.Values, len(extra.ConstantParams))
+		}
+		for key, values := range extra.ConstantParams {
+			if strings.TrimSpace(key) == "" || len(values) == 0 {
+				continue
+			}
+			if _, exists := base.ConstantParams[key]; !exists {
+				base.ConstantParams[key] = url.Values{}
+			}
+			for paramName, paramValues := range values {
+				if len(paramValues) == 0 || strings.TrimSpace(paramValues[0]) == "" {
+					continue
+				}
+				if _, exists := base.ConstantParams[key][paramName]; exists {
+					continue
+				}
+				base.ConstantParams[key][paramName] = []string{paramValues[0]}
+			}
+		}
+	}
+
+	if len(extra.Headers) > 0 {
+		if base.Headers == nil {
+			base.Headers = make(map[string]map[string]string, len(extra.Headers))
+		}
+		for key, headers := range extra.Headers {
+			if strings.TrimSpace(key) == "" || len(headers) == 0 {
+				continue
+			}
+			if _, exists := base.Headers[key]; !exists {
+				base.Headers[key] = make(map[string]string, len(headers))
+			}
+			for headerName, headerValue := range headers {
+				if strings.TrimSpace(headerName) == "" || strings.TrimSpace(headerValue) == "" {
+					continue
+				}
+				if _, exists := base.Headers[key][headerName]; exists {
+					continue
+				}
+				base.Headers[key][headerName] = headerValue
+			}
+		}
+	}
+
+	if len(extra.RequestPayload) > 0 {
+		if base.RequestPayload == nil {
+			base.RequestPayload = make(map[string]structs.StaticRequestPayloadHint, len(extra.RequestPayload))
+		}
+		for key, hint := range extra.RequestPayload {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			if current, exists := base.RequestPayload[key]; exists {
+				if strings.TrimSpace(current.Carrier) == "" {
+					current.Carrier = hint.Carrier
+				}
+				if strings.TrimSpace(current.Format) == "" {
+					current.Format = hint.Format
+				}
+				if strings.TrimSpace(current.Preview) == "" {
+					current.Preview = hint.Preview
+				}
+				base.RequestPayload[key] = current
+				continue
+			}
+			base.RequestPayload[key] = hint
+		}
+	}
+
+	return base
 }
 
 // ScanResult CLI扫描结果
@@ -248,11 +458,53 @@ type ScanResult struct {
 type TargetResult struct {
 	Target          string              `json:"target"`
 	SiteTree        []crawl.ElTreeNode  `json:"siteTree"`
+	JSResources     []tbdb.JSResource   `json:"jsResources,omitempty"`
 	APIRecords      []APIRecord         `json:"apiRecords,omitempty"`
 	ProtocolTraces  []ProtocolTrace     `json:"protocolTraces,omitempty"`
 	Assets          AssetInfo           `json:"assets"`
 	Risks           []RiskItem          `json:"risks"`
 	Vulnerabilities []VulnerabilityItem `json:"vulnerabilities"`
+}
+
+func sdkVulnerabilityDedupKey(vuln VulnRecord) string {
+	parsed, err := url.Parse(strings.TrimSpace(vuln.URL))
+	if err == nil && parsed.Host != "" {
+		return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" + strings.ToLower(parsed.Host) + "|" + parsed.Path + "|" + strings.TrimSpace(vuln.Type)
+	}
+	return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" + strings.TrimSpace(vuln.URL) + "|" + strings.TrimSpace(vuln.Type)
+}
+
+func choosePreferredSDKVulnerability(current, candidate VulnRecord) VulnRecord {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(candidate.URL)), "https://") &&
+		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(current.URL)), "https://") {
+		return candidate
+	}
+	if candidate.ResponseLength > current.ResponseLength {
+		return candidate
+	}
+	if len(strings.TrimSpace(candidate.Response)) > len(strings.TrimSpace(current.Response)) {
+		return candidate
+	}
+	return current
+}
+
+func dedupeSDKVulnerabilities(vulns []VulnRecord) []VulnRecord {
+	if len(vulns) <= 1 {
+		return vulns
+	}
+
+	index := make(map[string]int, len(vulns))
+	result := make([]VulnRecord, 0, len(vulns))
+	for _, vuln := range vulns {
+		key := sdkVulnerabilityDedupKey(vuln)
+		if idx, ok := index[key]; ok {
+			result[idx] = choosePreferredSDKVulnerability(result[idx], vuln)
+			continue
+		}
+		index[key] = len(result)
+		result = append(result, vuln)
+	}
+	return result
 }
 
 // APIRecord 浏览器运行时捕获到的接口请求/响应记录
@@ -323,8 +575,9 @@ type AssetInfo struct {
 }
 
 type SensitiveItem struct {
-	Value  string `json:"value"`
-	Source string `json:"source"`
+	Value      string `json:"value"`
+	Source     string `json:"source"`
+	AIVerified bool   `json:"aiVerified,omitempty"`
 }
 
 type RiskItem struct {
@@ -339,23 +592,26 @@ type RiskItem struct {
 
 // VulnerabilityItem 漏洞信息（来自AnalyzeAPI检测）
 type VulnerabilityItem struct {
-	ID                 string `json:"id"`
-	Title              string `json:"title"`
-	Level              string `json:"level"`
-	Type               string `json:"type"`
-	URL                string `json:"url"`
-	Method             string `json:"method,omitempty"`
-	Request            string `json:"request,omitempty"`
-	Response           string `json:"response,omitempty"`
-	TraceID            string `json:"traceId,omitempty"`
-	HasProtocolTrace   bool   `json:"hasProtocolTrace,omitempty"`
-	ResponseCiphertext string `json:"responseCiphertext,omitempty"`
-	DecryptionStatus   string `json:"decryptionStatus,omitempty"`
-	DecryptionDetail   string `json:"decryptionDetail,omitempty"`
-	ResponseLength     int    `json:"responseLength,omitempty"`
-	Description        string `json:"description"`
-	AIVerified         bool   `json:"aiVerified"`
-	CreatedAt          string `json:"createdAt"`
+	ID                 string                       `json:"id"`
+	Title              string                       `json:"title"`
+	Level              string                       `json:"level"`
+	Type               string                       `json:"type"`
+	URL                string                       `json:"url"`
+	Method             string                       `json:"method,omitempty"`
+	Request            string                       `json:"request,omitempty"`
+	Response           string                       `json:"response,omitempty"`
+	TraceID            string                       `json:"traceId,omitempty"`
+	HasProtocolTrace   bool                         `json:"hasProtocolTrace,omitempty"`
+	ResponseCiphertext string                       `json:"responseCiphertext,omitempty"`
+	DecryptionStatus   string                       `json:"decryptionStatus,omitempty"`
+	DecryptionDetail   string                       `json:"decryptionDetail,omitempty"`
+	ResponseLength     int                          `json:"responseLength,omitempty"`
+	Confidence         string                       `json:"confidence,omitempty"`
+	ConfidenceReason   string                       `json:"confidenceReason,omitempty"`
+	StaticContexts     []database.VulnStaticContext `json:"staticContexts,omitempty"`
+	Description        string                       `json:"description"`
+	AIVerified         bool                         `json:"aiVerified"`
+	CreatedAt          string                       `json:"createdAt"`
 }
 
 // Summary 扫描摘要
@@ -521,6 +777,111 @@ func convertProtocolTrace(record crawl.ProtocolTraceRecord) ProtocolTrace {
 	}
 }
 
+func convertDatabaseProtocolTrace(record database.ProtocolTraceRecord) ProtocolTrace {
+	requestSteps := make([]ProtocolCryptoStep, 0, len(record.RequestSteps))
+	for _, step := range record.RequestSteps {
+		requestSteps = append(requestSteps, ProtocolCryptoStep{
+			Source:        step.Source,
+			Algorithm:     step.Algorithm,
+			InputPreview:  step.InputPreview,
+			OutputPreview: step.OutputPreview,
+			CallID:        step.CallID,
+			ParentCallID:  step.ParentCallID,
+			FunctionPath:  step.FunctionPath,
+			ModuleID:      step.ModuleID,
+			Stack:         step.Stack,
+			CapturedAtMS:  step.CapturedAtMS,
+		})
+	}
+	responseSteps := make([]ProtocolCryptoStep, 0, len(record.ResponseSteps))
+	for _, step := range record.ResponseSteps {
+		responseSteps = append(responseSteps, ProtocolCryptoStep{
+			Source:        step.Source,
+			Algorithm:     step.Algorithm,
+			InputPreview:  step.InputPreview,
+			OutputPreview: step.OutputPreview,
+			CallID:        step.CallID,
+			ParentCallID:  step.ParentCallID,
+			FunctionPath:  step.FunctionPath,
+			ModuleID:      step.ModuleID,
+			Stack:         step.Stack,
+			CapturedAtMS:  step.CapturedAtMS,
+		})
+	}
+
+	return ProtocolTrace{
+		TaskID:                 record.TaskID,
+		Version:                record.Version,
+		TargetURL:              record.TargetURL,
+		TraceID:                record.TraceID,
+		Transport:              record.Transport,
+		PageURL:                record.PageURL,
+		RequestURL:             record.RequestURL,
+		Method:                 record.Method,
+		RequestHeaders:         record.RequestHeaders,
+		RequestBeforeTransform: record.RequestBeforeTransform,
+		FinalRequestBody:       record.FinalRequestBody,
+		RequestSteps:           requestSteps,
+		ResponseSteps:          responseSteps,
+		SignatureFields:        record.SignatureFields,
+		DynamicParams:          record.DynamicParams,
+		SessionMaterials:       record.SessionMaterials,
+		Algorithms:             record.Algorithms,
+		Stack:                  record.Stack,
+		CreatedAt:              record.CreatedAt,
+	}
+}
+
+func normalizeSDKProtocolTraceForView(trace ProtocolTrace) ProtocolTrace {
+	dbTrace := toDatabaseProtocolTrace(trace)
+	dbTrace.NormalizeForView()
+	normalized := convertDatabaseProtocolTrace(*dbTrace)
+	normalized.RequestSteps = filterSDKProtocolSteps(normalized.RequestSteps)
+	normalized.ResponseSteps = filterSDKProtocolSteps(normalized.ResponseSteps)
+	normalized.Algorithms = filterSDKProtocolAlgorithms(normalized.Algorithms)
+	return normalized
+}
+
+func filterSDKProtocolSteps(steps []ProtocolCryptoStep) []ProtocolCryptoStep {
+	if len(steps) == 0 {
+		return steps
+	}
+
+	filtered := make([]ProtocolCryptoStep, 0, len(steps))
+	for _, step := range steps {
+		if shouldIgnoreSDKProtocolAlgorithm(step.Algorithm) {
+			continue
+		}
+		filtered = append(filtered, step)
+	}
+	return filtered
+}
+
+func filterSDKProtocolAlgorithms(algorithms []string) []string {
+	if len(algorithms) == 0 {
+		return algorithms
+	}
+
+	filtered := make([]string, 0, len(algorithms))
+	seen := make(map[string]struct{}, len(algorithms))
+	for _, algorithm := range algorithms {
+		if shouldIgnoreSDKProtocolAlgorithm(algorithm) {
+			continue
+		}
+		if _, ok := seen[algorithm]; ok {
+			continue
+		}
+		seen[algorithm] = struct{}{}
+		filtered = append(filtered, algorithm)
+	}
+	return filtered
+}
+
+func shouldIgnoreSDKProtocolAlgorithm(algorithm string) bool {
+	_, ignored := sdkIgnoredProtocolAlgorithms[strings.ToLower(strings.TrimSpace(algorithm))]
+	return ignored
+}
+
 func toDatabaseProtocolTrace(trace ProtocolTrace) *database.ProtocolTraceRecord {
 	requestSteps := make([]database.ProtocolCryptoStep, 0, len(trace.RequestSteps))
 	for _, step := range trace.RequestSteps {
@@ -591,9 +952,228 @@ func newTargetResultFromCapturedActivity(targetURL string, allNetworkURLs []stri
 		result.APIRecords = append(result.APIRecords, convertNetworkRecord(record))
 	}
 	for _, trace := range protocolTraces {
-		result.ProtocolTraces = append(result.ProtocolTraces, convertProtocolTrace(trace))
+		result.ProtocolTraces = append(
+			result.ProtocolTraces,
+			normalizeSDKProtocolTraceForView(convertProtocolTrace(trace)),
+		)
 	}
 
+	return result
+}
+
+func convertNetworkRecordToDatabaseAPIResource(taskID string, version int, record crawl.NetworkRecord) database.APIResource {
+	return database.APIResource{
+		TaskID:           taskID,
+		Version:          version,
+		URL:              record.URL,
+		Method:           record.Method,
+		TraceID:          record.TraceID,
+		HasProtocolTrace: record.HasProtocolTrace,
+		RequestHeaders:   record.RequestHeaders,
+		RequestBody:      record.RequestBody,
+		ResponseHeaders:  record.ResponseHeaders,
+		ResponseBody:     record.ResponseBody,
+		ResponseCode:     record.ResponseCode,
+		Headers:          record.ResponseHeaders,
+		FetchedAt:        record.FetchedAt,
+	}
+}
+
+func preferTraceResponseBody(trace crawl.ProtocolTraceRecord) string {
+	if body := strings.TrimSpace(trace.SessionMaterials["latest_response_plaintext"]); body != "" {
+		return body
+	}
+	if body := strings.TrimSpace(trace.SessionMaterials["latest_response_ciphertext"]); body != "" {
+		return body
+	}
+	return ""
+}
+
+func mergeCapturedAPIRecordsWithProtocolTraces(apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord) []crawl.NetworkRecord {
+	merged := make([]crawl.NetworkRecord, 0, len(apiRecords)+len(protocolTraces))
+	recordIndex := make(map[string]int, len(apiRecords)+len(protocolTraces))
+	traceIndex := make(map[string]int, len(apiRecords)+len(protocolTraces))
+	urlMethodIndex := make(map[string]int, len(apiRecords)+len(protocolTraces))
+
+	putRecord := func(record crawl.NetworkRecord) {
+		key := strings.TrimSpace(record.Method) + "|" + strings.TrimSpace(record.URL) + "|" + strings.TrimSpace(record.RequestBody)
+		urlMethodKey := strings.TrimSpace(record.Method) + "|" + strings.TrimSpace(record.URL)
+
+		idx := -1
+		if traceID := strings.TrimSpace(record.TraceID); traceID != "" {
+			if existingIdx, ok := traceIndex[traceID]; ok {
+				idx = existingIdx
+			}
+		}
+		if idx == -1 {
+			if existingIdx, ok := recordIndex[key]; ok {
+				idx = existingIdx
+			}
+		}
+		if idx == -1 {
+			if existingIdx, ok := urlMethodIndex[urlMethodKey]; ok {
+				existing := merged[existingIdx]
+				if strings.TrimSpace(existing.RequestBody) == "" || strings.TrimSpace(record.RequestBody) == "" {
+					idx = existingIdx
+				}
+			}
+		}
+
+		if idx >= 0 {
+			existing := &merged[idx]
+			if existing.TraceID == "" {
+				existing.TraceID = record.TraceID
+			}
+			existing.HasProtocolTrace = existing.HasProtocolTrace || record.HasProtocolTrace
+			if existing.ResourceType == "" {
+				existing.ResourceType = record.ResourceType
+			}
+			if len(existing.RequestHeaders) == 0 {
+				existing.RequestHeaders = record.RequestHeaders
+			}
+			if existing.RequestBody == "" {
+				existing.RequestBody = record.RequestBody
+			}
+			if len(existing.ResponseHeaders) == 0 {
+				existing.ResponseHeaders = record.ResponseHeaders
+			}
+			if existing.ResponseBody == "" {
+				existing.ResponseBody = record.ResponseBody
+			}
+			if existing.ResponseCode == 0 {
+				existing.ResponseCode = record.ResponseCode
+			}
+			if existing.MIMEType == "" {
+				existing.MIMEType = record.MIMEType
+			}
+			if existing.FetchedAt.IsZero() {
+				existing.FetchedAt = record.FetchedAt
+			}
+			recordIndex[key] = idx
+			urlMethodIndex[urlMethodKey] = idx
+			if traceID := strings.TrimSpace(existing.TraceID); traceID != "" {
+				traceIndex[traceID] = idx
+			}
+			return
+		}
+
+		nextIdx := len(merged)
+		recordIndex[key] = nextIdx
+		urlMethodIndex[urlMethodKey] = nextIdx
+		if traceID := strings.TrimSpace(record.TraceID); traceID != "" {
+			traceIndex[traceID] = nextIdx
+		}
+		merged = append(merged, record)
+	}
+
+	for _, record := range apiRecords {
+		putRecord(record)
+	}
+
+	for _, trace := range protocolTraces {
+		requestURL := strings.TrimSpace(trace.RequestURL)
+		if requestURL == "" {
+			continue
+		}
+
+		record := crawl.NetworkRecord{
+			URL:              requestURL,
+			Method:           trace.Method,
+			ResourceType:     trace.Transport,
+			TraceID:          trace.TraceID,
+			HasProtocolTrace: strings.TrimSpace(trace.TraceID) != "",
+			RequestHeaders:   trace.RequestHeaders,
+			RequestBody:      trace.FinalRequestBody,
+			ResponseBody:     preferTraceResponseBody(trace),
+			FetchedAt:        trace.CreatedAt,
+		}
+
+		if strings.HasPrefix(strings.TrimSpace(record.ResponseBody), "{") || strings.HasPrefix(strings.TrimSpace(record.ResponseBody), "[") {
+			record.MIMEType = "application/json"
+		}
+
+		putRecord(record)
+	}
+
+	return merged
+}
+
+func mergeRuntimeAPIRoutes(routes []string, apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord) []string {
+	merged := append([]string{}, routes...)
+	for _, record := range apiRecords {
+		if url := strings.TrimSpace(record.URL); url != "" {
+			merged = append(merged, url)
+		}
+	}
+	for _, trace := range protocolTraces {
+		if url := strings.TrimSpace(trace.RequestURL); url != "" {
+			merged = append(merged, url)
+		}
+	}
+	return arrayutil.RemoveDuplicates(merged)
+}
+
+func preferAbsoluteRuntimeRoutes(routes []string) []string {
+	absoluteByPath := make(map[string]bool)
+	for _, route := range routes {
+		parsed, err := url.Parse(strings.TrimSpace(route))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			continue
+		}
+		absoluteByPath[strings.TrimSpace(parsed.Path)] = true
+	}
+
+	result := make([]string, 0, len(routes))
+	for _, route := range routes {
+		trimmed := strings.TrimSpace(route)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "/") && absoluteByPath[trimmed] {
+			continue
+		}
+		result = append(result, trimmed)
+	}
+	return arrayutil.RemoveDuplicates(result)
+}
+
+func sdkEnsureTrailingSlash(value string) string {
+	if strings.HasSuffix(value, "/") {
+		return value
+	}
+	return value + "/"
+}
+
+func preferAbsoluteAPIRoots(roots []string) []string {
+	absoluteByPath := make(map[string]bool)
+	for _, root := range roots {
+		parsed, err := url.Parse(strings.TrimSpace(root))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			continue
+		}
+		absoluteByPath[sdkEnsureTrailingSlash(parsed.Path)] = true
+	}
+
+	result := make([]string, 0, len(roots))
+	for _, root := range roots {
+		trimmed := strings.TrimSpace(root)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "/") && absoluteByPath[sdkEnsureTrailingSlash(trimmed)] {
+			continue
+		}
+		result = append(result, trimmed)
+	}
+	return arrayutil.RemoveDuplicates(result)
+}
+
+func normalizeProtocolTraceRecordsForStore(records []crawl.ProtocolTraceRecord) []database.ProtocolTraceRecord {
+	result := make([]database.ProtocolTraceRecord, 0, len(records))
+	for _, record := range records {
+		trace := normalizeSDKProtocolTraceForView(convertProtocolTrace(record))
+		result = append(result, *toDatabaseProtocolTrace(trace))
+	}
 	return result
 }
 
@@ -607,32 +1187,26 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 	if options == nil {
 		return nil, fmt.Errorf("scan options cannot be nil")
 	}
+	if options.DataStore == nil {
+		options.DataStore = database.NewMemoryScanDataStore()
+	}
 
 	startTime := time.Now()
 	const cliTaskID = "cli-mode"
 
-	// 存储所有URL的扫描结果
 	var allTargetResults []TargetResult
 	var totalTreeNodes int
 	var totalRisks int
 	var totalVulnerabilities int
 	var totalAssets AssetCount
-
-	// 创建漏洞收集器
-	vulnCollector := NewCLIVulnCollector()
-
-	// 标志变量，用于控制是否继续扫描
 	shouldContinue := true
 
-	// 循环处理每个URL
 	for i, targetURL := range urls {
 		if !shouldContinue {
 			break
 		}
 
 		fmt.Printf("[INFO] 处理 URL %d/%d: %s\n", i+1, len(urls), targetURL)
-
-		// 发送进度事件
 		if options.OnResult != nil {
 			event := ScanEvent{
 				Type:      EventTypeProgress,
@@ -652,13 +1226,34 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			}
 		}
 
-		// 存活验证
-		_, err := clients.SimpleGet(targetURL, clients.DefaultRestyClient())
+		targetScanResult, err := scanexec.RunTarget(targetURL, scanexec.Options{
+			TaskID:         cliTaskID,
+			Version:        0,
+			BlackDomain:    options.BlackDomain,
+			HighRiskRouter: options.HighRiskRouter,
+			Authentication: options.Authentication,
+			Placeholder:    options.Placeholder,
+			OpenAI: config.OpenAI{
+				APIKey:  options.OpenAI.APIKey,
+				BaseURL: options.OpenAI.BaseURL,
+				Model:   options.OpenAI.Model,
+				Enabled: options.OpenAI.Enabled,
+			},
+			VulnDetection: config.VulnDetection{
+				Enabled:      options.VulnDetection.Enabled,
+				SQLInjection: options.VulnDetection.SQLInjection,
+				LFI:          options.VulnDetection.LFI,
+				SSRF:         options.VulnDetection.SSRF,
+				Redirect:     options.VulnDetection.Redirect,
+				XSS:          options.VulnDetection.XSS,
+				Upload:       options.VulnDetection.Upload,
+			},
+			DataStore: options.DataStore,
+		})
 		if err != nil {
 			fmt.Printf("[WARNING] 目标 %s 无法访问: %v\n", targetURL, err)
-			// 发送错误事件
 			if options.OnResult != nil {
-				event := ScanEvent{
+				options.OnResult(ScanEvent{
 					Type:      EventTypeError,
 					Target:    targetURL,
 					Timestamp: time.Now(),
@@ -666,37 +1261,50 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 						"error": err.Error(),
 						"url":   targetURL,
 					},
-				}
-				options.OnResult(event)
+				})
 			}
 			continue
 		}
 
-		e := crawl.Extract{}
-		filter := crawl.Filter{}
-
-		// 1. 捕获网络链接、接口请求/响应和协议轨迹
-		allNetworkURLs, capturedAPIRecords, capturedProtocolTraces := crawl.CaptureNetworkActivity(targetURL)
-		for i := range capturedProtocolTraces {
-			if strings.TrimSpace(capturedProtocolTraces[i].TaskID) == "" {
-				capturedProtocolTraces[i].TaskID = cliTaskID
+		if memoryStore, ok := options.DataStore.(*database.MemoryScanDataStore); ok {
+			apiResources := make([]database.APIResource, 0, len(targetScanResult.APIRecords))
+			for _, record := range targetScanResult.APIRecords {
+				apiResources = append(apiResources, convertNetworkRecordToDatabaseAPIResource(cliTaskID, 0, record))
 			}
+			memoryStore.AddJSResources(cliTaskID, targetScanResult.JSResources)
+			memoryStore.AddAPIResources(cliTaskID, apiResources)
+			memoryStore.AddProtocolTraces(cliTaskID, normalizeProtocolTraceRecordsForStore(targetScanResult.ProtocolTraces))
 		}
 
-		targetResult := newTargetResultFromCapturedActivity(targetURL, allNetworkURLs, capturedAPIRecords, capturedProtocolTraces)
+		targetResult := TargetResult{
+			Target:          targetURL,
+			SiteTree:        targetScanResult.TreeData,
+			JSResources:     make([]tbdb.JSResource, 0, len(targetScanResult.JSResources)),
+			APIRecords:      make([]APIRecord, 0, len(targetScanResult.APIRecords)),
+			ProtocolTraces:  make([]ProtocolTrace, 0, len(targetScanResult.ProtocolTraces)),
+			Assets:          convertSharedAssets(targetScanResult.Assets),
+			Risks:           convertSharedSDKRisks(targetScanResult.Risks),
+			Vulnerabilities: convertSharedVulnerabilities(targetScanResult.Vulnerabilities),
+		}
+		for _, resource := range targetScanResult.JSResources {
+			targetResult.JSResources = append(targetResult.JSResources, resource)
+		}
+		for _, record := range targetScanResult.APIRecords {
+			targetResult.APIRecords = append(targetResult.APIRecords, convertNetworkRecord(record))
+		}
+		for _, trace := range targetScanResult.ProtocolTraces {
+			targetResult.ProtocolTraces = append(targetResult.ProtocolTraces, normalizeSDKProtocolTraceForView(convertProtocolTrace(trace)))
+		}
 
-		// 2. 生成网站树（不保存到ES）
 		totalTreeNodes += countTreeNodes(targetResult.SiteTree)
-
 		if options.OnResult != nil {
 			for _, record := range targetResult.APIRecords {
-				event := ScanEvent{
+				if !options.OnResult(ScanEvent{
 					Type:      EventTypeAPIRecord,
 					Target:    targetURL,
 					Timestamp: record.FetchedAt,
 					Data:      record,
-				}
-				if !options.OnResult(event) {
+				}) {
 					fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
 					shouldContinue = false
 					break
@@ -704,13 +1312,12 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			}
 			if shouldContinue {
 				for _, trace := range targetResult.ProtocolTraces {
-					event := ScanEvent{
+					if !options.OnResult(ScanEvent{
 						Type:      EventTypeProtocolTrace,
 						Target:    targetURL,
 						Timestamp: trace.CreatedAt,
 						Data:      trace,
-					}
-					if !options.OnResult(event) {
+					}) {
 						fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
 						shouldContinue = false
 						break
@@ -722,241 +1329,79 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			}
 		}
 
-		// 3. 分类链接
-		classified := e.ClassifyLinks(allNetworkURLs, options.BlackDomain)
-
-		// 4. 静态JS提取 + 合并去重
-		var allJS []string
-		staticJsLinks := filter.Blacklist(e.StaticJSLink(targetURL), options.BlackDomain)
-		classified.Classification.JS = filter.Blacklist(classified.Classification.JS, options.BlackDomain)
-
-		allJS = classified.Classification.JS
-		if len(classified.Classification.JS) > 0 {
-			for _, static := range staticJsLinks {
-				present := false
-				for _, dynamic := range classified.Classification.JS {
-					if strings.Contains(dynamic, static) || strings.Contains(static, dynamic) {
-						present = true
-						break
-					}
+		for _, assetGroup := range []struct {
+			assetType string
+			items     []SensitiveItem
+		}{
+			{assetType: "email", items: targetResult.Assets.Email},
+			{assetType: "idCard", items: targetResult.Assets.IDCard},
+			{assetType: "phone", items: targetResult.Assets.Phone},
+			{assetType: "ipUrl", items: targetResult.Assets.IPURL},
+			{assetType: "sensitive", items: targetResult.Assets.Sensitive},
+		} {
+			for _, assetItem := range assetGroup.items {
+				if options.OnResult == nil {
+					continue
 				}
-				if !present {
-					allJS = append(allJS, static)
-				}
-			}
-		} else {
-			allJS = append(allJS, staticJsLinks...)
-		}
-		allJS = arrayutil.RemoveDuplicates(allJS)
-
-		// CLI模式不保存JS资源
-
-		// 5. 初始化AI检测器（如果启用）
-		var aiChecker *crawl.SensitiveInfoChecker
-		if options.OpenAI.Enabled && options.OpenAI.APIKey != "" {
-			aiChecker = crawl.NewSensitiveInfoChecker(
-				options.OpenAI.APIKey,
-				options.OpenAI.BaseURL,
-				options.OpenAI.Model,
-			)
-			fmt.Printf("[INFO] AI辅助敏感信息检测已启用 (模型: %s)\n", options.OpenAI.Model)
-		}
-
-		// 6. 从JS中提取资产
-		findSomething := crawl.Scan(targetURL, allJS, aiChecker)
-
-		// 转换资产数据并发送回调
-		processAsset := func(items []structs.InfoSource, assetType string, target *[]SensitiveItem) {
-			for _, item := range items {
-				if !shouldContinue {
-					return
-				}
-
-				assetItem := SensitiveItem{
-					Value:  item.Filed,
-					Source: item.Source,
-				}
-				*target = append(*target, assetItem)
-
-				// 调用回调函数（如果设置了）
-				if options.OnResult != nil {
-					event := ScanEvent{
-						Type:      EventTypeAsset,
-						Target:    targetURL,
-						Timestamp: time.Now(),
-						Data: map[string]interface{}{
-							"type":   assetType,
-							"value":  item.Filed,
-							"source": item.Source,
-						},
-					}
-					if !options.OnResult(event) {
-						// 回调返回false，停止扫描
-						fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
-						shouldContinue = false
-						return
-					}
-				}
-			}
-		}
-
-		processAsset(findSomething.Email, "email", &targetResult.Assets.Email)
-		processAsset(findSomething.IDCard, "idCard", &targetResult.Assets.IDCard)
-		processAsset(findSomething.Phone, "phone", &targetResult.Assets.Phone)
-		processAsset(findSomething.IP_URL, "ipUrl", &targetResult.Assets.IPURL)
-		processAsset(findSomething.Sensitive, "sensitive", &targetResult.Assets.Sensitive)
-
-		// 7. API路由整合
-		var apiRouter []string
-		for _, item := range findSomething.APIRoute {
-			route := strings.TrimSpace(item.Filed)
-			if route != "" {
-				apiRouter = append(apiRouter, route)
-			}
-		}
-		for _, route := range classified.Classification.APIRoute {
-			trimmedRoute := strings.TrimSpace(route)
-			if trimmedRoute != "" {
-				apiRouter = append(apiRouter, trimmedRoute)
-			}
-		}
-		apiRouter = arrayutil.RemoveDuplicates(apiRouter)
-		apiRouter = filter.FilterAPIRoutes(apiRouter)
-		targetResult.Assets.APIRoutes = apiRouter
-
-		// 8. API根路径分析
-		apiRoots := filter.APIRoots(apiRouter, 1)
-		allApiRoots := classified.Classification.APIRoot
-		for _, item := range classified.Classification.APIRoot {
-			for _, v := range apiRoots {
-				if !strings.Contains(item, v) {
-					allApiRoots = append(allApiRoots, v)
-				}
-			}
-		}
-		allApiRoots = append(allApiRoots, apiRoots...)
-		allApiRoots = arrayutil.RemoveDuplicates(allApiRoots)
-		targetResult.Assets.APIRoots = allApiRoots
-
-		// 9. 漏洞检测（使用收集器模式）
-		vulnCollector.Clear()
-
-		// 创建适配器，将SDK的收集器适配为crawl.VulnCollector接口
-		adapter := NewSDKVulnCollectorAdapter(vulnCollector)
-
-		for _, root := range allApiRoots {
-			fmt.Printf("[INFO] 分析 API 根路径: %s\n", root)
-			jsFindOptions := buildSDKJSFindOptions(cliTaskID, targetURL, apiRouter, root, options, aiChecker)
-
-			// 调用漏洞检测，使用适配器收集结果
-			crawl.AnalyzeAPIWithCollector(jsFindOptions, adapter)
-		}
-
-		// 将收集到的漏洞转换为VulnerabilityItem格式
-		for _, vuln := range vulnCollector.GetVulns() {
-			if !shouldContinue {
-				break
-			}
-
-			vulnItem := VulnerabilityItem{
-				ID:                 vuln.VulnID,
-				Title:              vuln.Title,
-				Level:              vuln.Level,
-				Type:               vuln.Type,
-				URL:                vuln.URL,
-				Method:             vuln.Method,
-				Request:            vuln.Request,
-				Response:           vuln.Response,
-				TraceID:            vuln.TraceID,
-				HasProtocolTrace:   vuln.HasProtocolTrace,
-				ResponseCiphertext: vuln.ResponseCiphertext,
-				DecryptionStatus:   vuln.DecryptionStatus,
-				DecryptionDetail:   vuln.DecryptionDetail,
-				ResponseLength:     vuln.ResponseLength,
-				Description:        vuln.Description,
-				AIVerified:         vuln.AIVerified,
-				CreatedAt:          vuln.CreatedAt.Format("2006-01-02 15:04:05"),
-			}
-			targetResult.Vulnerabilities = append(targetResult.Vulnerabilities, vulnItem)
-
-			// 调用回调函数（如果设置了）
-			if options.OnResult != nil {
-				event := ScanEvent{
-					Type:      EventTypeVulnerability,
+				if !options.OnResult(ScanEvent{
+					Type:      EventTypeAsset,
 					Target:    targetURL,
-					Timestamp: vuln.CreatedAt,
-					Data:      vulnItem,
-				}
-				if !options.OnResult(event) {
-					// 回调返回false，停止扫描
+					Timestamp: time.Now(),
+					Data: map[string]interface{}{
+						"type":   assetGroup.assetType,
+						"value":  assetItem.Value,
+						"source": assetItem.Source,
+					},
+				}) {
 					fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
 					shouldContinue = false
 					break
 				}
 			}
+			if !shouldContinue {
+				break
+			}
+		}
+		if !shouldContinue {
+			break
+		}
+
+		for _, vulnItem := range targetResult.Vulnerabilities {
+			if options.OnResult == nil {
+				continue
+			}
+			if !options.OnResult(ScanEvent{
+				Type:      EventTypeVulnerability,
+				Target:    targetURL,
+				Timestamp: parseSDKTimestamp(vulnItem.CreatedAt),
+				Data:      vulnItem,
+			}) {
+				fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
+				shouldContinue = false
+				break
+			}
 		}
 		totalVulnerabilities += len(targetResult.Vulnerabilities)
+		if !shouldContinue {
+			break
+		}
 
-		// 生成风险项（基于敏感信息）
-		timestamp := time.Now().Format("2006-01-02 15:04:05")
-		aiEnabled := aiChecker != nil
-
-		// 生成风险项
-		saveAssetAndRisk := func(level, title, riskType string, items []SensitiveItem, isAIVerified bool) {
-			for _, item := range items {
-				if !shouldContinue {
-					return
-				}
-
-				riskID := uuid.New().String()
-				risk := RiskItem{
-					ID:          riskID,
-					Title:       title,
-					Level:       level,
-					Type:        riskType,
-					URL:         item.Source,
-					Description: fmt.Sprintf("发现%s: %s", title, item.Value),
-					CreatedAt:   timestamp,
-				}
-				targetResult.Risks = append(targetResult.Risks, risk)
-
-				// 调用回调函数（如果设置了）
-				if options.OnResult != nil {
-					event := ScanEvent{
-						Type:      EventTypeRisk,
-						Target:    targetURL,
-						Timestamp: time.Now(),
-						Data:      risk,
-					}
-					if !options.OnResult(event) {
-						// 回调返回false，停止扫描
-						fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
-						shouldContinue = false
-						return
-					}
-				}
+		for _, risk := range targetResult.Risks {
+			if options.OnResult == nil {
+				continue
+			}
+			if !options.OnResult(ScanEvent{
+				Type:      EventTypeRisk,
+				Target:    targetURL,
+				Timestamp: parseSDKTimestamp(risk.CreatedAt),
+				Data:      risk,
+			}) {
+				fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
+				shouldContinue = false
+				break
 			}
 		}
 
-		// 身份证 - 低危
-		saveAssetAndRisk("low", "身份证号码泄露", "敏感信息泄露", targetResult.Assets.IDCard, false)
-		// 手机号 - 低危
-		saveAssetAndRisk("low", "手机号码泄露", "敏感信息泄露", targetResult.Assets.Phone, false)
-		// 敏感关键词 - 中危
-		saveAssetAndRisk("medium", "敏感关键词泄露", "敏感信息泄露", targetResult.Assets.Sensitive, aiEnabled)
-		// 邮箱 - 信息级别
-		saveAssetAndRisk("info", "邮箱信息泄露", "信息泄露", targetResult.Assets.Email, false)
-
-		// 去重处理
-		targetResult.Assets.Email = removeDuplicateSensitiveItems(targetResult.Assets.Email)
-		targetResult.Assets.IDCard = removeDuplicateSensitiveItems(targetResult.Assets.IDCard)
-		targetResult.Assets.Phone = removeDuplicateSensitiveItems(targetResult.Assets.Phone)
-		targetResult.Assets.IPURL = removeDuplicateSensitiveItems(targetResult.Assets.IPURL)
-		targetResult.Assets.Sensitive = removeDuplicateSensitiveItems(targetResult.Assets.Sensitive)
-		targetResult.Assets.APIRoutes = arrayutil.RemoveDuplicates(targetResult.Assets.APIRoutes)
-		targetResult.Assets.APIRoots = arrayutil.RemoveDuplicates(targetResult.Assets.APIRoots)
-
-		// 添加到总结果
 		allTargetResults = append(allTargetResults, targetResult)
 		totalRisks += len(targetResult.Risks)
 		totalAssets.Email += len(targetResult.Assets.Email)
@@ -968,10 +1413,8 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		totalAssets.APIRoots += len(targetResult.Assets.APIRoots)
 	}
 
-	// 清理任务的测试记录
-	crawl.ClearTestedURLs("cli-mode")
+	crawl.ClearTestedURLs(cliTaskID)
 
-	// 构建最终结果
 	result := &ScanResult{
 		Targets:  allTargetResults,
 		ScanTime: time.Now().Format("2006-01-02 15:04:05"),
@@ -984,37 +1427,107 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		},
 	}
 
-	// 发送扫描完成事件
 	if options.OnResult != nil {
-		event := ScanEvent{
+		options.OnResult(ScanEvent{
 			Type:      EventTypeProgress,
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
 				"status":  "completed",
 				"summary": result.Summary,
 			},
-		}
-		options.OnResult(event)
+		})
 	}
 
-	// 如果指定了输出路径，则保存到文件
 	if options.OutputPath != "" {
 		jsonData, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal JSON: %v", err)
 		}
-
-		err = os.WriteFile(options.OutputPath, jsonData, 0644)
-		if err != nil {
+		if err := os.WriteFile(options.OutputPath, jsonData, 0644); err != nil {
 			return nil, fmt.Errorf("failed to write output file: %v", err)
 		}
 		fmt.Printf("[INFO] 扫描结果已保存到: %s\n", options.OutputPath)
 	}
 
-	duration := time.Since(startTime)
-	fmt.Printf("[INFO] 扫描完成，耗时: %v\n", duration)
-
+	fmt.Printf("[INFO] 扫描完成，耗时: %v\n", time.Since(startTime))
 	return result, nil
+}
+
+func convertSharedAssets(assets scanexec.AssetInfo) AssetInfo {
+	return AssetInfo{
+		Email:     convertSharedSensitiveItemsToSDK(assets.Email),
+		IDCard:    convertSharedSensitiveItemsToSDK(assets.IDCard),
+		Phone:     convertSharedSensitiveItemsToSDK(assets.Phone),
+		IPURL:     convertSharedSensitiveItemsToSDK(assets.IPURL),
+		Sensitive: convertSharedSensitiveItemsToSDK(assets.Sensitive),
+		APIRoutes: append([]string{}, assets.APIRoutes...),
+		APIRoots:  append([]string{}, assets.APIRoots...),
+	}
+}
+
+func convertSharedSensitiveItemsToSDK(items []scanexec.SensitiveItem) []SensitiveItem {
+	result := make([]SensitiveItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, SensitiveItem{
+			Value:      item.Value,
+			Source:     item.Source,
+			AIVerified: item.AIVerified,
+		})
+	}
+	return result
+}
+
+func convertSharedSDKRisks(items []scanexec.RiskItem) []RiskItem {
+	result := make([]RiskItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, RiskItem{
+			ID:          item.ID,
+			Title:       item.Title,
+			Level:       item.Level,
+			Type:        item.Type,
+			URL:         item.URL,
+			Description: item.Description,
+			CreatedAt:   item.CreatedAt,
+		})
+	}
+	return result
+}
+
+func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityItem {
+	result := make([]VulnerabilityItem, 0, len(items))
+	for _, vuln := range items {
+		result = append(result, VulnerabilityItem{
+			ID:                 vuln.VulnID,
+			Title:              vuln.Title,
+			Level:              vuln.Level,
+			Type:               vuln.Type,
+			URL:                vuln.URL,
+			Method:             vuln.Method,
+			Request:            vuln.Request,
+			Response:           vuln.Response,
+			TraceID:            vuln.TraceID,
+			HasProtocolTrace:   vuln.HasProtocolTrace,
+			ResponseCiphertext: vuln.ResponseCiphertext,
+			DecryptionStatus:   vuln.DecryptionStatus,
+			DecryptionDetail:   vuln.DecryptionDetail,
+			ResponseLength:     vuln.ResponseLength,
+			Confidence:         vuln.Confidence,
+			ConfidenceReason:   vuln.ConfidenceReason,
+			StaticContexts:     append([]database.VulnStaticContext(nil), vuln.StaticContexts...),
+			Description:        vuln.Description,
+			AIVerified:         vuln.AIVerified,
+			CreatedAt:          vuln.CreatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+	return result
+}
+
+func parseSDKTimestamp(value string) time.Time {
+	timestamp, err := time.ParseInLocation("2006-01-02 15:04:05", strings.TrimSpace(value), time.Local)
+	if err != nil {
+		return time.Now()
+	}
+	return timestamp
 }
 
 // PerformScanWithConfigFile 执行CLI扫描（使用配置文件，向后兼容）

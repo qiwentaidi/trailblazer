@@ -30,6 +30,8 @@ var (
 	// 版本段判断，如 v1, v2, 1, 2
 	versionRe = regexp.MustCompile(`(?i)^v?\d+$`)
 
+	shortRouteTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,3}$`)
+
 	windowsDrivePathRe = regexp.MustCompile(`(?i)^[a-z]:\\`)
 )
 
@@ -64,6 +66,14 @@ var obviousAssetPathKeywords = []string{
 	"/images/",
 	"/img/",
 	"/fonts/",
+}
+
+var obviousContentTypeValues = []string{
+	"multipart/form-data",
+	"application/json",
+	"application/xml",
+	"application/x-www-form-urlencoded",
+	"text/plain",
 }
 
 // 过滤输入目标中以 .js 结尾的链接
@@ -194,10 +204,18 @@ func (*Filter) APIRoots(paths []string, minFreq int) []string {
 		// 构造根路径：至少包含 api 段
 		rootSeg := segs[foundIdx]
 		root := "/" + rootSeg + "/"
+		if foundIdx > 0 {
+			prefixedRoot := "/" + strings.Join(segs[:foundIdx+1], "/") + "/"
+			freq[prefixedRoot]++
+		}
 
 		// 如果紧接着有版本号（v1 或 1），把版本也包含进去
 		if foundIdx+1 < len(segs) && versionRe.MatchString(segs[foundIdx+1]) {
 			root = "/" + rootSeg + "/" + segs[foundIdx+1] + "/"
+			if foundIdx > 0 {
+				prefixedVersionRoot := "/" + strings.Join(segs[:foundIdx+2], "/") + "/"
+				freq[prefixedVersionRoot]++
+			}
 		}
 		freq[root]++
 	}
@@ -254,6 +272,17 @@ func (f *Filter) shouldKeepAPIRoute(raw string) bool {
 
 	lower := strings.ToLower(route)
 	pathOnly := routeCandidatePath(route)
+	lowerPathOnly := strings.ToLower(strings.TrimSpace(pathOnly))
+
+	if !strings.HasPrefix(strings.TrimSpace(route), "/") && f.IsGarbage(route) {
+		return false
+	}
+
+	for _, value := range obviousContentTypeValues {
+		if lower == value || lowerPathOnly == value {
+			return false
+		}
+	}
 
 	for _, keyword := range obviousAssetPathKeywords {
 		if strings.Contains(lower, keyword) {
@@ -284,6 +313,14 @@ func (f *Filter) shouldKeepAPIRoute(raw string) bool {
 	}
 
 	if hasSuspiciousLocalizedSlug(pathOnly) {
+		return false
+	}
+
+	if hasWhitespaceInPathSegment(pathOnly) {
+		return false
+	}
+
+	if hasSuspiciousShortRouteToken(pathOnly) {
 		return false
 	}
 
@@ -332,6 +369,101 @@ func hasDotPathTraversalSegment(path string) bool {
 	}
 
 	return false
+}
+
+func hasWhitespaceInPathSegment(path string) bool {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err == nil && parsed.Path != "" {
+		trimmed = parsed.Path
+	}
+
+	for _, segment := range strings.Split(strings.Trim(trimmed, "/"), "/") {
+		if segment == "" {
+			continue
+		}
+		decoded, err := url.PathUnescape(segment)
+		if err == nil {
+			segment = decoded
+		}
+		if strings.TrimSpace(segment) != segment {
+			return true
+		}
+		for _, r := range segment {
+			if unicode.IsSpace(r) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func hasSuspiciousShortRouteToken(path string) bool {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err == nil && parsed.Path != "" {
+		trimmed = parsed.Path
+	}
+
+	segments := strings.Split(strings.Trim(trimmed, "/"), "/")
+	normalized := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		decoded, err := url.PathUnescape(segment)
+		if err == nil {
+			segment = decoded
+		}
+		normalized = append(normalized, segment)
+	}
+
+	if len(normalized) == 0 {
+		return false
+	}
+
+	if len(normalized) != 1 {
+		return false
+	}
+
+	segment := normalized[0]
+	if !shortRouteTokenRe.MatchString(segment) || segmentApiRe.MatchString(segment) || versionRe.MatchString(segment) {
+		return false
+	}
+
+	hasDigit := false
+	hasUpper := false
+	hasLower := false
+	for _, r := range segment {
+		switch {
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case unicode.IsUpper(r):
+			hasUpper = true
+		case unicode.IsLower(r):
+			hasLower = true
+		}
+	}
+
+	if hasDigit {
+		return true
+	}
+
+	if hasUpper && hasLower {
+		return true
+	}
+
+	return hasUpper
 }
 
 func hasSuspiciousLocalizedSlug(path string) bool {

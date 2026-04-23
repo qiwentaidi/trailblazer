@@ -67,6 +67,7 @@ func ensureAllIndices() {
 		IndexJS,       // trailblazer-js
 		IndexAPI,      // trailblazer-api
 		IndexProtocol, // trailblazer-protocol
+		IndexStaticProtocolAnalysis, // trailblazer-static-protocol
 		IndexVuln,     // trailblazer-vuln
 		IndexAsset,    // trailblazer-asset
 	}
