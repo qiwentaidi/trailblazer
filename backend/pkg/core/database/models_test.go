@@ -202,3 +202,37 @@ func TestNormalizeForViewBackfillsSyntheticRuntimeStepsFromSessionMaterials(t *t
 		t.Fatalf("expected synthetic response algorithm, got %q", got)
 	}
 }
+
+func TestNormalizeForViewSkipsPlaintextOnlyResponseEvidence(t *testing.T) {
+	trace := ProtocolTraceRecord{
+		TraceID: "trace-plaintext-only",
+		SessionMaterials: map[string]string{
+			"latest_response_plaintext": `{"msg":"操作成功","img":"data:image/png;base64,iVBORw0KGgo="}`,
+		},
+		Algorithms: []string{"base64-encoded-payload"},
+	}
+
+	trace.NormalizeForView()
+
+	if got := trace.Algorithms; len(got) != 1 || got[0] != "base64-encoded-payload" {
+		t.Fatalf("expected weak algorithm label to be preserved, got %#v", got)
+	}
+	if len(trace.RequestSteps) != 0 || len(trace.ResponseSteps) != 0 {
+		t.Fatalf("expected protocol steps to be cleared, got request=%#v response=%#v", trace.RequestSteps, trace.ResponseSteps)
+	}
+}
+
+func TestNormalizeForViewDropsWeakInferredAlgorithms(t *testing.T) {
+	trace := ProtocolTraceRecord{
+		TraceID:                "trace-weak-inference",
+		FinalRequestBody:       "QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+		RequestBeforeTransform: "",
+		Algorithms:             []string{"base64-encoded-payload", "encrypted-field(inferred)"},
+	}
+
+	trace.NormalizeForView()
+
+	if got := trace.Algorithms; len(got) != 2 {
+		t.Fatalf("expected weak inferred algorithms to be preserved, got %#v", got)
+	}
+}

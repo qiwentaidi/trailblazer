@@ -533,6 +533,27 @@ func TestBuildSuspiciousBrowserSessionTracesSkipsJSONOnlySignals(t *testing.T) {
 	}
 }
 
+func TestBuildSuspiciousBrowserSessionTracesSkipsPlaintextOnlyResponseMaterials(t *testing.T) {
+	traces := buildSuspiciousBrowserSessionTraces("sess-plaintext-only", []crawl.ProtocolTraceRecord{{
+		TraceID:    "trace-plaintext-only",
+		RequestURL: "https://example.com/prod-api/captchaImage",
+		Method:     http.MethodGet,
+		Algorithms: []string{"base64-encoded-payload"},
+		SessionMaterials: map[string]string{
+			"latest_response_plaintext": `{"msg":"操作成功","img":"data:image/png;base64,iVBORw0KGgo="}`,
+		},
+	}}, []crawl.NetworkRecord{{
+		URL:          "https://example.com/prod-api/captchaImage",
+		Method:       http.MethodGet,
+		ResponseBody: `{"msg":"操作成功","img":"data:image/png;base64,iVBORw0KGgo="}`,
+		MIMEType:     "application/json",
+	}})
+
+	if len(traces) != 0 {
+		t.Fatalf("expected plaintext-only response materials to be skipped, got %#v", traces)
+	}
+}
+
 func TestCountSuspiciousTraceSignalsSkipsJSONOnlySignals(t *testing.T) {
 	count := countSuspiciousTraceSignals([]crawl.ProtocolTraceRecord{
 		{
@@ -551,10 +572,31 @@ func TestCountSuspiciousTraceSignalsSkipsJSONOnlySignals(t *testing.T) {
 			Method:     http.MethodPost,
 			Algorithms: []string{"rsa.encrypt", "json.stringify"},
 		},
-	})
+	}, nil)
 
 	if count != 1 {
 		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
+func TestCountSuspiciousTraceSignalsSkipsPlaintextOnlyResponseMaterials(t *testing.T) {
+	count := countSuspiciousTraceSignals([]crawl.ProtocolTraceRecord{{
+		TraceID:    "trace-plaintext-only",
+		RequestURL: "https://example.com/prod-api/captchaImage",
+		Method:     http.MethodGet,
+		Algorithms: []string{"base64-encoded-payload"},
+		SessionMaterials: map[string]string{
+			"latest_response_plaintext": `{"msg":"操作成功","img":"data:image/png;base64,iVBORw0KGgo="}`,
+		},
+	}}, []crawl.NetworkRecord{{
+		URL:          "https://example.com/prod-api/captchaImage",
+		Method:       http.MethodGet,
+		ResponseBody: `{"msg":"操作成功","img":"data:image/png;base64,iVBORw0KGgo="}`,
+		MIMEType:     "application/json",
+	}})
+
+	if count != 0 {
+		t.Fatalf("count = %d, want 0", count)
 	}
 }
 
@@ -677,7 +719,7 @@ func TestLaunchBrowserSessionPersistsProxyConfiguration(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	originalCapture := captureBrowserSessionNetworkActivity
-	captureBrowserSessionNetworkActivity = func(targetURL string, options crawl.CaptureOptions) ([]string, []crawl.NetworkRecord, []crawl.ProtocolTraceRecord) {
+	captureBrowserSessionNetworkActivity = func(targetURL string, options crawl.CaptureOptions) ([]string, []crawl.NetworkRecord, []crawl.ProtocolTraceRecord, []crawl.FrontendRouteRecord) {
 		if got := strings.TrimSpace(options.ProxyServer); got != "http://127.0.0.1:8080" {
 			t.Errorf("ProxyServer = %q, want %q", got, "http://127.0.0.1:8080")
 		}
@@ -690,7 +732,7 @@ func TestLaunchBrowserSessionPersistsProxyConfiguration(t *testing.T) {
 			RequestURL: targetURL,
 			Method:     http.MethodGet,
 			Algorithms: []string{"rsa"},
-		}}
+		}}, nil
 	}
 	defer func() {
 		captureBrowserSessionNetworkActivity = originalCapture
@@ -753,7 +795,7 @@ func TestLaunchBrowserSessionZeroCaptureDurationWaitsForManualExit(t *testing.T)
 
 	done := make(chan struct{}, 1)
 	originalCapture := captureBrowserSessionNetworkActivity
-	captureBrowserSessionNetworkActivity = func(targetURL string, options crawl.CaptureOptions) ([]string, []crawl.NetworkRecord, []crawl.ProtocolTraceRecord) {
+	captureBrowserSessionNetworkActivity = func(targetURL string, options crawl.CaptureOptions) ([]string, []crawl.NetworkRecord, []crawl.ProtocolTraceRecord, []crawl.FrontendRouteRecord) {
 		if got := options.Timeout; got != 0 {
 			t.Errorf("Timeout = %v, want %v", got, 0)
 		}
@@ -761,7 +803,7 @@ func TestLaunchBrowserSessionZeroCaptureDurationWaitsForManualExit(t *testing.T)
 			t.Errorf("PostInteractionWait = %v, want %v", got, 0)
 		}
 		done <- struct{}{}
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	defer func() {
 		captureBrowserSessionNetworkActivity = originalCapture

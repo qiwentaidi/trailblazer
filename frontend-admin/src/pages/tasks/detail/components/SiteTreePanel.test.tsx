@@ -1,9 +1,16 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-import type { APIResource, JSResource, TreeNode } from '@/types/task';
+import { fetchTaskTree } from '@/services/tasks';
 import SiteTreePanel from './SiteTreePanel';
 
-const buildTree = (): TreeNode[] => [
+jest.mock('@/services/tasks', () => ({
+  __esModule: true,
+  fetchTaskTree: jest.fn(),
+}));
+
+const mockedFetchTaskTree = fetchTaskTree as jest.Mock;
+
+const buildTree = () => [
   {
     id: 'node-1',
     label: '首页接口',
@@ -15,7 +22,7 @@ const buildTree = (): TreeNode[] => [
   },
 ];
 
-const buildJSResources = (): JSResource[] => [
+const buildJSResources = () => [
   {
     taskId: 'task-1',
     version: 1,
@@ -24,7 +31,7 @@ const buildJSResources = (): JSResource[] => [
   },
 ];
 
-const buildAPIResources = (): APIResource[] => [
+const buildAPIResources = () => [
   {
     taskId: 'task-1',
     version: 1,
@@ -71,6 +78,12 @@ describe('SiteTreePanel', () => {
       configurable: true,
       value: ResizeObserverMock,
     });
+  });
+
+  beforeEach(() => {
+    mockedFetchTaskTree.mockImplementation(
+      () => new Promise(() => undefined),
+    );
   });
 
   test('renders split detail sections including request, response and raw content', () => {
@@ -195,6 +208,7 @@ describe('SiteTreePanel', () => {
     expect(screen.getByText('点击左侧节点查看详情')).toBeInTheDocument();
     expect(screen.queryByText('leaf raw payload')).not.toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole('img', { name: 'caret-down' }));
     fireEvent.click(screen.getByText('叶子节点'));
     expect(screen.getByText('leaf raw payload')).toBeInTheDocument();
   });
@@ -296,5 +310,79 @@ describe('SiteTreePanel', () => {
     expect(screen.getByText('{"page":2}')).toBeInTheDocument();
     expect(screen.getByText('{"ok":true}')).toBeInTheDocument();
     expect(screen.getByText('{"ok":false}')).toBeInTheDocument();
+  });
+
+  test('filters tree nodes by keyword', () => {
+    mockedFetchTaskTree.mockImplementation(
+      async (_taskId: string, options?: { keyword?: string }) => ({
+        data:
+          options?.keyword === 'beta'
+            ? [
+                {
+                  id: 'node-b',
+                  label: 'beta-service',
+                  url: 'https://b.example.com',
+                },
+              ]
+            : [
+                {
+                  id: 'node-a',
+                  label: 'alpha-service',
+                  url: 'https://a.example.com',
+                },
+                {
+                  id: 'node-b',
+                  label: 'beta-service',
+                  url: 'https://b.example.com',
+                },
+              ],
+        total: options?.keyword === 'beta' ? 1 : 2,
+        nodeCount: 2,
+      }),
+    );
+
+    render(
+      <SiteTreePanel
+        taskId="task-1"
+        jsResources={[]}
+        apiResources={[]}
+      />,
+    );
+
+    fireEvent.change(
+      screen.getByPlaceholderText('搜索节点名称、URL 或节点 ID'),
+      { target: { value: 'beta' } },
+    );
+
+    return waitFor(() => {
+      expect(screen.queryByText('alpha-service')).not.toBeInTheDocument();
+      expect(screen.getByText('beta-service')).toBeInTheDocument();
+    });
+  });
+
+  test('paginates root tree nodes', () => {
+    mockedFetchTaskTree.mockResolvedValue({
+      data: Array.from({ length: 20 }, (_, index) => ({
+        id: `node-${index + 1}`,
+        label: `root-${index + 1}`,
+        url: `https://example.com/${index + 1}`,
+      })),
+      total: 25,
+      nodeCount: 25,
+    });
+
+    render(
+      <SiteTreePanel
+        taskId="task-1"
+        jsResources={[]}
+        apiResources={[]}
+      />,
+    );
+
+    return screen.findByText('root-1').then(() => {
+      expect(screen.getByText('root-20')).toBeInTheDocument();
+      expect(screen.queryByText('root-21')).not.toBeInTheDocument();
+      expect(screen.getByText('共 25 个根节点')).toBeInTheDocument();
+    });
   });
 });

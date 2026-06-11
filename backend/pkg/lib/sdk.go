@@ -40,6 +40,7 @@ type VulnRecord struct {
 	Method             string                       `json:"method,omitempty"`
 	Request            string                       `json:"request,omitempty"`
 	Response           string                       `json:"response,omitempty"`
+	ResponseType       string                       `json:"response_type,omitempty"`
 	TraceID            string                       `json:"trace_id,omitempty"`
 	HasProtocolTrace   bool                         `json:"has_protocol_trace,omitempty"`
 	ResponseCiphertext string                       `json:"response_ciphertext,omitempty"`
@@ -565,13 +566,14 @@ type DecryptResult = protocoltool.DecryptResult
 
 // AssetInfo 资产信息
 type AssetInfo struct {
-	Email     []SensitiveItem `json:"email"`
-	IDCard    []SensitiveItem `json:"idCard"`
-	Phone     []SensitiveItem `json:"phone"`
-	IPURL     []SensitiveItem `json:"ipUrl"`
-	Sensitive []SensitiveItem `json:"sensitive"`
-	APIRoutes []string        `json:"apiRoutes"`
-	APIRoots  []string        `json:"apiRoots"`
+	Email          []SensitiveItem `json:"email"`
+	IDCard         []SensitiveItem `json:"idCard"`
+	Phone          []SensitiveItem `json:"phone"`
+	IPURL          []SensitiveItem `json:"ipUrl"`
+	Sensitive      []SensitiveItem `json:"sensitive"`
+	FrontendRoutes []string        `json:"frontendRoutes"`
+	APIRoutes      []string        `json:"apiRoutes"`
+	APIRoots       []string        `json:"apiRoots"`
 }
 
 type SensitiveItem struct {
@@ -587,6 +589,7 @@ type RiskItem struct {
 	Type        string `json:"type"`
 	URL         string `json:"url"`
 	Description string `json:"description"`
+	AIVerified  bool   `json:"aiVerified,omitempty"`
 	CreatedAt   string `json:"createdAt"`
 }
 
@@ -600,6 +603,7 @@ type VulnerabilityItem struct {
 	Method             string                       `json:"method,omitempty"`
 	Request            string                       `json:"request,omitempty"`
 	Response           string                       `json:"response,omitempty"`
+	ResponseType       string                       `json:"responseType,omitempty"`
 	TraceID            string                       `json:"traceId,omitempty"`
 	HasProtocolTrace   bool                         `json:"hasProtocolTrace,omitempty"`
 	ResponseCiphertext string                       `json:"responseCiphertext,omitempty"`
@@ -624,13 +628,14 @@ type Summary struct {
 }
 
 type AssetCount struct {
-	Email     int `json:"email"`
-	IDCard    int `json:"idCard"`
-	Phone     int `json:"phone"`
-	IPURL     int `json:"ipUrl"`
-	Sensitive int `json:"sensitive"`
-	APIRoutes int `json:"apiRoutes"`
-	APIRoots  int `json:"apiRoots"`
+	Email          int `json:"email"`
+	IDCard         int `json:"idCard"`
+	Phone          int `json:"phone"`
+	IPURL          int `json:"ipUrl"`
+	Sensitive      int `json:"sensitive"`
+	FrontendRoutes int `json:"frontendRoutes"`
+	APIRoutes      int `json:"apiRoutes"`
+	APIRoots       int `json:"apiRoots"`
 }
 
 // VulnCollector 漏洞收集器接口（SDK版本，避免ES依赖）
@@ -937,7 +942,7 @@ func toDatabaseProtocolTrace(trace ProtocolTrace) *database.ProtocolTraceRecord 
 	}
 }
 
-func newTargetResultFromCapturedActivity(targetURL string, allNetworkURLs []string, apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord) TargetResult {
+func newTargetResultFromCapturedActivity(targetURL string, allNetworkURLs []string, apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord, frontendRoutes []crawl.FrontendRouteRecord) TargetResult {
 	result := TargetResult{
 		Target:          targetURL,
 		SiteTree:        crawl.BuildElTree(allNetworkURLs),
@@ -956,6 +961,11 @@ func newTargetResultFromCapturedActivity(targetURL string, allNetworkURLs []stri
 			result.ProtocolTraces,
 			normalizeSDKProtocolTraceForView(convertProtocolTrace(trace)),
 		)
+	}
+	for _, route := range frontendRoutes {
+		if path := strings.TrimSpace(route.Path); path != "" {
+			result.Assets.FrontendRoutes = append(result.Assets.FrontendRoutes, path)
+		}
 	}
 
 	return result
@@ -1409,6 +1419,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		totalAssets.Phone += len(targetResult.Assets.Phone)
 		totalAssets.IPURL += len(targetResult.Assets.IPURL)
 		totalAssets.Sensitive += len(targetResult.Assets.Sensitive)
+		totalAssets.FrontendRoutes += len(targetResult.Assets.FrontendRoutes)
 		totalAssets.APIRoutes += len(targetResult.Assets.APIRoutes)
 		totalAssets.APIRoots += len(targetResult.Assets.APIRoots)
 	}
@@ -1455,13 +1466,14 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 
 func convertSharedAssets(assets scanexec.AssetInfo) AssetInfo {
 	return AssetInfo{
-		Email:     convertSharedSensitiveItemsToSDK(assets.Email),
-		IDCard:    convertSharedSensitiveItemsToSDK(assets.IDCard),
-		Phone:     convertSharedSensitiveItemsToSDK(assets.Phone),
-		IPURL:     convertSharedSensitiveItemsToSDK(assets.IPURL),
-		Sensitive: convertSharedSensitiveItemsToSDK(assets.Sensitive),
-		APIRoutes: append([]string{}, assets.APIRoutes...),
-		APIRoots:  append([]string{}, assets.APIRoots...),
+		Email:          convertSharedSensitiveItemsToSDK(assets.Email),
+		IDCard:         convertSharedSensitiveItemsToSDK(assets.IDCard),
+		Phone:          convertSharedSensitiveItemsToSDK(assets.Phone),
+		IPURL:          convertSharedSensitiveItemsToSDK(assets.IPURL),
+		Sensitive:      convertSharedSensitiveItemsToSDK(assets.Sensitive),
+		FrontendRoutes: append([]string{}, assets.FrontendRoutes...),
+		APIRoutes:      append([]string{}, assets.APIRoutes...),
+		APIRoots:       append([]string{}, assets.APIRoots...),
 	}
 }
 
@@ -1487,6 +1499,7 @@ func convertSharedSDKRisks(items []scanexec.RiskItem) []RiskItem {
 			Type:        item.Type,
 			URL:         item.URL,
 			Description: item.Description,
+			AIVerified:  item.AIVerified,
 			CreatedAt:   item.CreatedAt,
 		})
 	}
@@ -1505,6 +1518,7 @@ func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityIt
 			Method:             vuln.Method,
 			Request:            vuln.Request,
 			Response:           vuln.Response,
+			ResponseType:       vuln.ResponseType,
 			TraceID:            vuln.TraceID,
 			HasProtocolTrace:   vuln.HasProtocolTrace,
 			ResponseCiphertext: vuln.ResponseCiphertext,

@@ -312,6 +312,19 @@ func filterInfoSourceWithAI(checker *SensitiveInfoChecker, sources []structs.Inf
 			continue
 		}
 
+		if shouldRejectSensitiveCandidate(item.Filed) {
+			rejected++
+			fmt.Printf("[INFO] Local rejected: %s\n", truncateString(item.Filed, 50))
+			continue
+		}
+		if shouldConfirmSensitiveCandidate(item.Filed) {
+			item.AIVerified = true
+			filtered = append(filtered, item)
+			confirmed++
+			fmt.Printf("[INFO] Local confirmed: %s\n", truncateString(item.Filed, 50))
+			continue
+		}
+
 		isSensitive, err := checker.Check(item.Filed)
 		if err != nil {
 			fmt.Printf("[WARNING] AI detection failed for '%s': %v, keeping original\n", item.Filed, err)
@@ -338,6 +351,115 @@ func filterInfoSourceWithAI(checker *SensitiveInfoChecker, sources []structs.Inf
 	}
 
 	return filtered
+}
+
+func shouldRejectSensitiveCandidate(candidate string) bool {
+	key, value, ok := splitSensitiveAssignmentCandidate(candidate)
+	if !ok {
+		return false
+	}
+	if key == "" || value == "" {
+		return false
+	}
+	return isCodeLikeSensitiveValue(value)
+}
+
+func shouldConfirmSensitiveCandidate(candidate string) bool {
+	key, value, ok := splitSensitiveAssignmentCandidate(candidate)
+	if !ok {
+		return false
+	}
+	if !isCredentialLikeSensitiveKey(key) {
+		return false
+	}
+	if !isLikelyLiteralCredentialValue(value) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "admin", "administrator", "root", "test", "guest", "admin123", "admin123456", "123456", "12345678", "password", "passwd", "qwerty":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitSensitiveAssignmentCandidate(candidate string) (string, string, bool) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return "", "", false
+	}
+	idx := strings.IndexAny(candidate, ":=")
+	if idx <= 0 || idx >= len(candidate)-1 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(candidate[:idx])
+	value := strings.TrimSpace(candidate[idx+1:])
+	value = strings.Trim(value, `"'`)
+	if key == "" || value == "" {
+		return "", "", false
+	}
+	return key, value, true
+}
+
+func isCredentialLikeSensitiveKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	switch key {
+	case "username", "user", "account", "login", "password", "passwd", "pwd":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLikelyLiteralCredentialValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	if isCodeLikeSensitiveValue(value) {
+		return false
+	}
+	if strings.ContainsAny(value, " \t\r\n,;{}[]") {
+		return false
+	}
+	literalPattern := regexp.MustCompile(`^[A-Za-z0-9@._!#$%^-]+$`)
+	return literalPattern.MatchString(value)
+}
+
+func isCodeLikeSensitiveValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	codeFragments := []string{
+		"===",
+		"!==",
+		"&&",
+		"||",
+		"void",
+		"function(",
+		"=>",
+		"),",
+		"},{",
+		"[{",
+		"}]",
+		"required:!0",
+	}
+	for _, fragment := range codeFragments {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	if strings.Contains(value, ",") && strings.Contains(value, ":") {
+		return true
+	}
+	if strings.Contains(value, "(") && strings.Contains(value, ")") {
+		return true
+	}
+	if strings.ContainsAny(value, "{}[]") {
+		return true
+	}
+	return false
 }
 
 // truncateString 截断字符串用于日志显示
@@ -515,7 +637,6 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 
 		// 去重检查：如果该 URL 已经测试过，跳过
 		if o.TaskID != "" && isURLTested(o.TaskID, fullURL) {
-			fmt.Printf("[DEBUG] %s 已经测试过，跳过重复检测\n", fullURL)
 			return
 		}
 
@@ -888,6 +1009,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				Method:             method,
 				Request:            result.Request,
 				Response:           result.Response,
+				ResponseType:       assessment.ResponseType,
 				TraceID:            protocolContext.TraceID,
 				HasProtocolTrace:   protocolContext.HasProtocolTrace,
 				ResponseCiphertext: protocolContext.ResponseCiphertext,

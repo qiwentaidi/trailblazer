@@ -21,6 +21,10 @@ func resetUnauthorizedTestState(t *testing.T) {
 	responseSignatureTracker.counts = make(map[string]int)
 	responseSignatureTracker.Unlock()
 
+	responseTemplateTracker.Lock()
+	responseTemplateTracker.clusters = make(map[string][]responseTemplateCluster)
+	responseTemplateTracker.Unlock()
+
 	learnedAuthPatternRegistry.Lock()
 	learnedAuthPatternRegistry.loaded = false
 	learnedAuthPatternRegistry.patterns = nil
@@ -158,6 +162,95 @@ func TestTestUnauthorizedAccessRejectsRepeatedNonBusinessTemplate(t *testing.T) 
 	}
 	if vulnerable {
 		t.Fatal("expected repeated template response not to be marked vulnerable")
+	}
+}
+
+func TestTestUnauthorizedAccessRejectsRepeatedSimilarTemplateWithinSameHost(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"human.verify","message":"请完成人机校验后重试","route":"` + r.URL.Path + `","challenge":"` + r.URL.Query().Get("scene") + `"}`))
+	}))
+	defer server.Close()
+
+	for i, path := range []string{"/api/owa-mail/list", "/api/owa-calendar/list"} {
+		vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+			URL:     server.URL + path + "?scene=" + path,
+			Method:  http.MethodGet,
+			Headers: map[string]string{},
+		}, nil)
+		if err != nil {
+			t.Fatalf("unexpected early rejection on iteration %d: %v", i, err)
+		}
+		if !vulnerable {
+			t.Fatalf("expected similar template probes to remain observable on iteration %d", i)
+		}
+	}
+
+	vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     server.URL + "/api/owa-copilot/list?scene=/api/owa-copilot/list",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected similar repeated template response to be rejected")
+	}
+	if vulnerable {
+		t.Fatal("expected similar repeated template response not to be marked vulnerable")
+	}
+}
+
+func TestTestUnauthorizedAccessTracksSimilarTemplatePerHost(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"human.verify","message":"请完成人机校验后重试","route":"` + r.URL.Path + `","challenge":"` + r.Host + `"}`))
+	}
+
+	serverA := httptest.NewServer(http.HandlerFunc(handler))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(handler))
+	defer serverB.Close()
+
+	vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     serverA.URL + "/api/a",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err != nil || !vulnerable {
+		t.Fatalf("expected first host A probe to pass through, vulnerable=%v err=%v", vulnerable, err)
+	}
+
+	vulnerable, _, _, err = TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     serverB.URL + "/api/b",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err != nil || !vulnerable {
+		t.Fatalf("expected host B probe not to affect host A cluster, vulnerable=%v err=%v", vulnerable, err)
+	}
+
+	vulnerable, _, _, err = TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     serverA.URL + "/api/c",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err != nil || !vulnerable {
+		t.Fatalf("expected second host A probe to remain below threshold, vulnerable=%v err=%v", vulnerable, err)
+	}
+
+	vulnerable, _, _, err = TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     serverA.URL + "/api/d",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected third host A similar template to be rejected")
+	}
+	if vulnerable {
+		t.Fatal("expected rejected host A similar template not to be marked vulnerable")
 	}
 }
 

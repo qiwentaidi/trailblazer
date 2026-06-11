@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -178,10 +179,295 @@ func QuerySiteTreeByTaskID(taskID string, versions ...int) ([]SiteTreeNode, erro
 	return nodes, err
 }
 
+type SiteTreePageResult struct {
+	Nodes          []SiteTreeNode
+	Total          int
+	TotalNodeCount int
+	Page           int
+	PageSize       int
+	Keyword        string
+}
+
+func QuerySiteTreePage(taskID string, page, pageSize int, keyword string, versions ...int) (*SiteTreePageResult, error) {
+	if ESClient == nil {
+		return nil, fmt.Errorf("ES client not initialized")
+	}
+
+	resolvedVersion, _, err := resolveQueryVersion(taskID, versions...)
+	if err != nil {
+		return nil, err
+	}
+
+	page = normalizePositiveInt(page, 1)
+	pageSize = normalizePositiveInt(pageSize, 20)
+	keyword = strings.TrimSpace(keyword)
+
+	totalNodeCount, err := countSiteTree(buildTaskVersionQuery(taskID, resolvedVersion))
+	if err != nil {
+		return nil, err
+	}
+
+	if keyword != "" {
+		return querySiteTreeSearchPage(taskID, resolvedVersion, page, pageSize, keyword, totalNodeCount)
+	}
+
+	return querySiteTreeRootPage(taskID, resolvedVersion, page, pageSize, totalNodeCount)
+}
+
+func querySiteTreeRootPage(taskID string, version *int, page, pageSize, totalNodeCount int) (*SiteTreePageResult, error) {
+	offset := (page - 1) * pageSize
+	query := map[string]interface{}{
+		"query": buildTaskVersionQuery(taskID, version, buildRootNodeClause()),
+		"from":  offset,
+		"size":  pageSize,
+		"sort": []map[string]interface{}{
+			{"node_id.keyword": "asc"},
+		},
+	}
+
+	rootNodes, total, err := querySiteTreeWithTotal(query)
+	if err != nil {
+		return nil, err
+	}
+
+	rootIDs := extractSiteTreeNodeIDs(rootNodes)
+	nodes, err := querySiteTreeByRootIDs(taskID, version, rootIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SiteTreePageResult{
+		Nodes:          nodes,
+		Total:          total,
+		TotalNodeCount: totalNodeCount,
+		Page:           page,
+		PageSize:       pageSize,
+	}, nil
+}
+
+func querySiteTreeSearchPage(taskID string, version *int, page, pageSize int, keyword string, totalNodeCount int) (*SiteTreePageResult, error) {
+	searchQuery := map[string]interface{}{
+		"query": buildTaskVersionQuery(taskID, version, buildSiteTreeKeywordClause(keyword)),
+		"size":  2000,
+		"sort": []map[string]interface{}{
+			{"level": "asc"},
+			{"node_id.keyword": "asc"},
+		},
+	}
+
+	matchedNodes, _, err := querySiteTreeWithTotal(searchQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(matchedNodes) == 0 {
+		return &SiteTreePageResult{
+			Nodes:          []SiteTreeNode{},
+			Total:          0,
+			TotalNodeCount: totalNodeCount,
+			Page:           page,
+			PageSize:       pageSize,
+			Keyword:        keyword,
+		}, nil
+	}
+
+	rootOrder := make([]string, 0)
+	rootSeen := make(map[string]struct{})
+	relevantIDSet := make(map[string]struct{})
+	for _, node := range matchedNodes {
+		nodeID := strings.TrimSpace(node.NodeID)
+		if nodeID == "" {
+			continue
+		}
+		rootID := rootSiteTreeNodeID(nodeID)
+		if rootID == "" {
+			continue
+		}
+		if _, ok := rootSeen[rootID]; !ok {
+			rootSeen[rootID] = struct{}{}
+			rootOrder = append(rootOrder, rootID)
+		}
+		for _, ancestorID := range collectAncestorNodeIDs(nodeID) {
+			relevantIDSet[ancestorID] = struct{}{}
+		}
+	}
+	sort.Strings(rootOrder)
+
+	total := len(rootOrder)
+	start := minInt((page-1)*pageSize, total)
+	end := minInt(start+pageSize, total)
+	currentRootIDs := rootOrder[start:end]
+	currentRootSet := make(map[string]struct{}, len(currentRootIDs))
+	for _, rootID := range currentRootIDs {
+		currentRootSet[rootID] = struct{}{}
+	}
+
+	currentNodeIDs := make([]string, 0, len(relevantIDSet))
+	for nodeID := range relevantIDSet {
+		if _, ok := currentRootSet[rootSiteTreeNodeID(nodeID)]; ok {
+			currentNodeIDs = append(currentNodeIDs, nodeID)
+		}
+	}
+	sort.Strings(currentNodeIDs)
+
+	nodes, err := querySiteTreeByNodeIDs(taskID, version, currentNodeIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SiteTreePageResult{
+		Nodes:          nodes,
+		Total:          total,
+		TotalNodeCount: totalNodeCount,
+		Page:           page,
+		PageSize:       pageSize,
+		Keyword:        keyword,
+	}, nil
+}
+
+func normalizePositiveInt(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func buildRootNodeClause() map[string]interface{} {
+	return map[string]interface{}{
+		"bool": map[string]interface{}{
+			"should": []map[string]interface{}{
+				{
+					"term": map[string]interface{}{
+						"level": 1,
+					},
+				},
+				{
+					"term": map[string]interface{}{
+						"parent_id.keyword": "0",
+					},
+				},
+			},
+			"minimum_should_match": 1,
+		},
+	}
+}
+
+func buildSiteTreeKeywordClause(keyword string) map[string]interface{} {
+	keyword = strings.TrimSpace(keyword)
+	return map[string]interface{}{
+		"bool": map[string]interface{}{
+			"should": []map[string]interface{}{
+				{
+					"multi_match": map[string]interface{}{
+						"query":  keyword,
+						"fields": []string{"label", "url", "node_id"},
+						"type":   "phrase_prefix",
+					},
+				},
+				{
+					"wildcard": map[string]interface{}{
+						"node_id.keyword": map[string]interface{}{
+							"value":            "*" + keyword + "*",
+							"case_insensitive": true,
+						},
+					},
+				},
+			},
+			"minimum_should_match": 1,
+		},
+	}
+}
+
+func rootSiteTreeNodeID(nodeID string) string {
+	normalized := strings.TrimSpace(nodeID)
+	if normalized == "" {
+		return ""
+	}
+	if index := strings.Index(normalized, "/"); index >= 0 {
+		return normalized[:index]
+	}
+	return normalized
+}
+
+func collectAncestorNodeIDs(nodeID string) []string {
+	parts := strings.Split(strings.TrimSpace(nodeID), "/")
+	if len(parts) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(parts))
+	current := ""
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+		if current == "" {
+			current = part
+		} else {
+			current += "/" + part
+		}
+		result = append(result, current)
+	}
+	return result
+}
+
+func extractSiteTreeNodeIDs(nodes []SiteTreeNode) []string {
+	result := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if nodeID := strings.TrimSpace(node.NodeID); nodeID != "" {
+			result = append(result, nodeID)
+		}
+	}
+	return result
+}
+
+func countSiteTree(queryBody map[string]interface{}) (int, error) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(map[string]interface{}{
+		"query": queryBody,
+	}); err != nil {
+		return 0, err
+	}
+
+	res, err := ESClient.Count(
+		ESClient.Count.WithContext(context.Background()),
+		ESClient.Count.WithIndex(IndexSiteTree),
+		ESClient.Count.WithBody(&buf),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return 0, fmt.Errorf("ES error: %s", res.String())
+	}
+
+	var result struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	return result.Count, nil
+}
+
 func querySiteTree(query map[string]interface{}) ([]SiteTreeNode, error) {
+	nodes, _, err := querySiteTreeWithTotal(query)
+	return nodes, err
+}
+
+func querySiteTreeWithTotal(query map[string]interface{}) ([]SiteTreeNode, int, error) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(query); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	res, err := ESClient.Search(
@@ -190,16 +476,19 @@ func querySiteTree(query map[string]interface{}) ([]SiteTreeNode, error) {
 		ESClient.Search.WithBody(&buf),
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
-		return nil, fmt.Errorf("ES error: %s", res.String())
+		return nil, 0, fmt.Errorf("ES error: %s", res.String())
 	}
 
 	var result struct {
 		Hits struct {
+			Total struct {
+				Value int `json:"value"`
+			} `json:"total"`
 			Hits []struct {
 				Source SiteTreeNode `json:"_source"`
 			} `json:"hits"`
@@ -207,7 +496,7 @@ func querySiteTree(query map[string]interface{}) ([]SiteTreeNode, error) {
 	}
 
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var nodes []SiteTreeNode
@@ -215,7 +504,70 @@ func querySiteTree(query map[string]interface{}) ([]SiteTreeNode, error) {
 		nodes = append(nodes, hit.Source)
 	}
 
-	return nodes, nil
+	return nodes, result.Hits.Total.Value, nil
+}
+
+func querySiteTreeByRootIDs(taskID string, version *int, rootIDs []string) ([]SiteTreeNode, error) {
+	if len(rootIDs) == 0 {
+		return []SiteTreeNode{}, nil
+	}
+
+	should := make([]map[string]interface{}, 0, len(rootIDs)*2)
+	for _, rootID := range rootIDs {
+		normalized := strings.TrimSpace(rootID)
+		if normalized == "" {
+			continue
+		}
+		should = append(should,
+			map[string]interface{}{
+				"term": map[string]interface{}{
+					"node_id.keyword": normalized,
+				},
+			},
+			map[string]interface{}{
+				"prefix": map[string]interface{}{
+					"node_id.keyword": normalized + "/",
+				},
+			},
+		)
+	}
+
+	query := map[string]interface{}{
+		"query": buildTaskVersionQuery(taskID, version, map[string]interface{}{
+			"bool": map[string]interface{}{
+				"should":               should,
+				"minimum_should_match": 1,
+			},
+		}),
+		"size": 10000,
+		"sort": []map[string]interface{}{
+			{"level": "asc"},
+			{"node_id.keyword": "asc"},
+		},
+	}
+
+	return querySiteTree(query)
+}
+
+func querySiteTreeByNodeIDs(taskID string, version *int, nodeIDs []string) ([]SiteTreeNode, error) {
+	if len(nodeIDs) == 0 {
+		return []SiteTreeNode{}, nil
+	}
+
+	query := map[string]interface{}{
+		"query": buildTaskVersionQuery(taskID, version, map[string]interface{}{
+			"terms": map[string]interface{}{
+				"node_id.keyword": nodeIDs,
+			},
+		}),
+		"size": len(nodeIDs),
+		"sort": []map[string]interface{}{
+			{"level": "asc"},
+			{"node_id.keyword": "asc"},
+		},
+	}
+
+	return querySiteTree(query)
 }
 
 // QueryVulnsByTaskID 查询任务的漏洞列表
@@ -815,6 +1167,7 @@ func QueryAssetsByTaskID(taskID string, versions ...int) (*AssetRecord, error) {
 		merged.IDCard = MergeAssetValues(merged.IDCard, source.IDCard)
 		merged.Phone = MergeAssetValues(merged.Phone, source.Phone)
 		merged.IPURL = MergeAssetValues(merged.IPURL, source.IPURL)
+		merged.FrontendRoute = MergeAssetValues(merged.FrontendRoute, source.FrontendRoute)
 		merged.APIRoot = MergeAssetValues(merged.APIRoot, source.APIRoot)
 		merged.APIRouter = MergeAssetValues(merged.APIRouter, source.APIRouter)
 	}

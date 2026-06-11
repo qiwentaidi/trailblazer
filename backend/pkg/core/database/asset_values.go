@@ -12,15 +12,16 @@ type AssetValue struct {
 }
 
 type legacyAssetRecord struct {
-	TaskID    string    `json:"task_id"`
-	Version   int       `json:"version"`
-	Email     []string  `json:"email,omitempty"`
-	IDCard    []string  `json:"id_card,omitempty"`
-	Phone     []string  `json:"phone,omitempty"`
-	IPURL     []string  `json:"ip_url,omitempty"`
-	APIRoot   []string  `json:"apiroot,omitempty"`
-	APIRouter []string  `json:"apirouter,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	TaskID        string    `json:"task_id"`
+	Version       int       `json:"version"`
+	Email         []string  `json:"email,omitempty"`
+	IDCard        []string  `json:"id_card,omitempty"`
+	Phone         []string  `json:"phone,omitempty"`
+	IPURL         []string  `json:"ip_url,omitempty"`
+	FrontendRoute []string  `json:"frontend_route,omitempty"`
+	APIRoot       []string  `json:"apiroot,omitempty"`
+	APIRouter     []string  `json:"apirouter,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 func (record *AssetRecord) UnmarshalJSON(data []byte) error {
@@ -47,6 +48,7 @@ func (record *AssetRecord) UnmarshalJSON(data []byte) error {
 	record.IDCard = decodeAssetValues(rawValue(raw, "id_card", "idCard"))
 	record.Phone = decodeAssetValues(rawValue(raw, "phone"))
 	record.IPURL = decodeAssetValues(rawValue(raw, "ip_url", "ipUrl"))
+	record.FrontendRoute = decodeAssetValues(rawValue(raw, "frontend_route", "frontendRoute", "pageRoute", "pageRoutes"))
 	record.APIRoot = decodeAssetValues(rawValue(raw, "apiroot", "api_root", "apiRoot", "apiRoots"))
 	record.APIRouter = decodeAssetValues(rawValue(raw, "apirouter", "api_router", "apiRouter", "apiRoutes"))
 	return nil
@@ -215,14 +217,15 @@ func flattenAssetValues(items []AssetValue) []string {
 
 func toLegacyAssetRecord(asset AssetRecord) legacyAssetRecord {
 	return legacyAssetRecord{
-		TaskID:    asset.TaskID,
-		Version:   asset.Version,
-		Email:     flattenAssetValues(asset.Email),
-		IDCard:    flattenAssetValues(asset.IDCard),
-		Phone:     flattenAssetValues(asset.Phone),
-		IPURL:     flattenAssetValues(asset.IPURL),
-		APIRoot:   flattenAssetValues(asset.APIRoot),
-		APIRouter: flattenAssetValues(asset.APIRouter),
-		CreatedAt: asset.CreatedAt,
+		TaskID:        asset.TaskID,
+		Version:       asset.Version,
+		Email:         flattenAssetValues(asset.Email),
+		IDCard:        flattenAssetValues(asset.IDCard),
+		Phone:         flattenAssetValues(asset.Phone),
+		IPURL:         flattenAssetValues(asset.IPURL),
+		FrontendRoute: flattenAssetValues(asset.FrontendRoute),
+		APIRoot:       flattenAssetValues(asset.APIRoot),
+		APIRouter:     flattenAssetValues(asset.APIRouter),
+		CreatedAt:     asset.CreatedAt,
 	}
 }

@@ -110,6 +110,7 @@ export default function TaskDetailPage() {
 
   const [task, setTask] = useState<TaskSummary | null>(null);
   const [treeData, setTreeData] = useState<TreeNode[]>([]);
+  const [treeNodeCount, setTreeNodeCount] = useState(0);
   const [risks, setRisks] = useState<Risk[]>([]);
   const [assets, setAssets] = useState<AssetData | null>(null);
   const [jsResources, setJSResources] = useState<JSResource[]>([]);
@@ -176,11 +177,19 @@ export default function TaskDetailPage() {
         return;
       }
       setTreeData(response?.data || []);
+      setTreeNodeCount(
+        typeof response?.totalNodeCount === 'number'
+          ? response.totalNodeCount
+          : typeof response?.nodeCount === 'number'
+            ? response.nodeCount
+            : 0,
+      );
     } catch (error) {
       console.error(error);
       if (isMounted.current && activeTaskIdRef.current === requestTaskId) {
         message.warning('网站树加载失败');
         setTreeData([]);
+        setTreeNodeCount(0);
       }
     } finally {
       if (isMounted.current && activeTaskIdRef.current === requestTaskId) {
@@ -357,6 +366,7 @@ export default function TaskDetailPage() {
     setInitialLoaded(false);
     setTask(null);
     setTreeData([]);
+    setTreeNodeCount(0);
     setRisks([]);
     setAssets(null);
     setJSResources([]);
@@ -465,7 +475,7 @@ export default function TaskDetailPage() {
     () => (
       <TaskOverview
         task={task}
-        treeData={treeData}
+        treeNodeCount={treeNodeCount}
         risks={risks}
         assets={assets}
         executionStatus={executionStatus}
@@ -483,7 +493,7 @@ export default function TaskDetailPage() {
       selectedVersion,
       selectedVersionMeta,
       task,
-      treeData,
+      treeNodeCount,
       versions.length,
     ],
   );

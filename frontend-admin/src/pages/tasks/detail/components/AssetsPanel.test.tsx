@@ -81,7 +81,7 @@ describe('AssetsPanel', () => {
 
     expect(screen.getByText('资产详情')).toBeInTheDocument();
     expect(screen.getByText('共 13 条')).toBeInTheDocument();
-    expect(screen.getByText('来源')).toBeInTheDocument();
+    expect(screen.getAllByText('来源').length).toBeGreaterThan(0);
 
     fireEvent.change(screen.getByPlaceholderText('搜索类型、内容或来源'), {
       target: { value: '手机号泄露' },
@@ -100,7 +100,7 @@ describe('AssetsPanel', () => {
     expect(screen.queryByText('13800000000')).not.toBeInTheDocument();
   });
 
-  test('renders long asset values with wrapping-safe styles', () => {
+  test('renders long asset values with truncation-safe styles', () => {
     render(<AssetsPanel assets={buildAssets()} />);
 
     fireEvent.change(screen.getByPlaceholderText('搜索类型、内容或来源'), {
@@ -115,9 +115,9 @@ describe('AssetsPanel', () => {
       display: 'block',
       maxWidth: '100%',
       minWidth: '0',
-      wordBreak: 'break-word',
-      overflowWrap: 'anywhere',
-      whiteSpace: 'normal',
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
     });
   });
 

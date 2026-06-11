@@ -254,3 +254,64 @@ func TestGetTasksSupportsKeywordAndStatusFilters(t *testing.T) {
 		t.Fatalf("latestStatus = %#v, want %q", got, "running")
 	}
 }
+
+func TestGetTasksFallsBackToTaskHighestRiskLevelWhenLatestVersionRiskIsEmpty(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	if err := database.InitSQLite(dbPath); err != nil {
+		t.Fatalf("InitSQLite() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if database.DB != nil {
+			_ = database.DB.Close()
+			database.DB = nil
+		}
+	})
+
+	task := database.Task{
+		ID:               "task-low-fallback",
+		Name:             "task-low-fallback",
+		Targets:          []string{"https://example.com"},
+		Status:           "completed",
+		Progress:         100,
+		HighestRiskLevel: "low",
+	}
+	if _, err := task.Save(); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	version, err := database.CreateTaskVersion(task.ID, task.Targets, []byte(`{"version":1}`), "manual")
+	if err != nil {
+		t.Fatalf("CreateTaskVersion() error = %v", err)
+	}
+	if err := database.UpdateTaskVersionStatus(task.ID, version.Version, "completed", 100); err != nil {
+		t.Fatalf("UpdateTaskVersionStatus() error = %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodGet, "/api/task/records?page=1&size=10", nil)
+	ctx.Request = req
+
+	getTasks(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	var response struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; body=%s", err, recorder.Body.String())
+	}
+
+	if len(response.Data) != 1 {
+		t.Fatalf("len(response.Data) = %d, want 1", len(response.Data))
+	}
+
+	if got := response.Data[0]["highestRiskLevel"]; got != "low" {
+		t.Fatalf("highestRiskLevel = %#v, want %q", got, "low")
+	}
+}

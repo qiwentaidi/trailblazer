@@ -10,6 +10,7 @@ import type {
   Risk,
   StaticProtocolAnalysis,
   TaskSummary,
+  TaskTreeData,
   TaskVersionSummary,
   TreeNode,
 } from '@/types/task';
@@ -17,7 +18,7 @@ import { getApiBaseURL } from '@/utils/apiBase';
 import request from '@/utils/request';
 import { readStoredAuthToken } from '@/utils/session';
 
-type TaskTreeResponse = { data: TreeNode[] };
+type TaskTreeResponse = TaskTreeData;
 type TaskRiskResponse = { data: unknown[] };
 type BackendAssetItem =
   | AssetValue
@@ -174,6 +175,12 @@ interface TaskVersionOptions {
   version?: number;
 }
 
+interface TaskTreeOptions extends TaskVersionOptions {
+  page?: number;
+  pageSize?: number;
+  keyword?: string;
+}
+
 interface UpdateRiskStatusPayload {
   status: NonNullable<Risk['status']>;
 }
@@ -302,9 +309,14 @@ export const fetchTaskVersions = async (
   }));
 };
 
-export const fetchTaskTree = (id: string, options: TaskVersionOptions = {}) =>
+export const fetchTaskTree = (id: string, options: TaskTreeOptions = {}) =>
   request.get<TaskTreeResponse>(`/api/task/${id}/tree`, {
-    params: buildVersionParams(options.version),
+    params: {
+      ...buildVersionParams(options.version),
+      ...(options.page ? { page: options.page } : {}),
+      ...(options.pageSize ? { pageSize: options.pageSize } : {}),
+      ...(options.keyword ? { keyword: options.keyword } : {}),
+    },
   });
 
 export const downloadTaskHTMLReport = async (

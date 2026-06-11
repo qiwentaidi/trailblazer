@@ -207,11 +207,10 @@ func (r *ProtocolTraceRecord) NormalizeForView() {
 
 	r.RequestSteps = compactProtocolCryptoSteps(r.RequestSteps, r.RequestBeforeTransform)
 	r.ResponseSteps = compactProtocolCryptoSteps(r.ResponseSteps, "")
-	r.Algorithms = inferProtocolAlgorithms(r.RequestSteps, r.ResponseSteps, r.FinalRequestBody)
-	if !hasMeaningfulProtocolSignal(r.RequestSteps, r.ResponseSteps, r.FinalRequestBody) {
+	r.Algorithms = normalizeProtocolAlgorithms(append(append([]string{}, r.Algorithms...), inferProtocolAlgorithms(r.RequestSteps, r.ResponseSteps, r.FinalRequestBody)...))
+	if hasPlaintextOnlyProtocolEvidence(r) || !hasMeaningfulProtocolSignal(r.RequestSteps, r.ResponseSteps, r.Algorithms) {
 		r.RequestSteps = nil
 		r.ResponseSteps = nil
-		r.Algorithms = nil
 	}
 }
 
@@ -608,17 +607,44 @@ func inferProtocolAlgorithms(requestSteps, responseSteps []ProtocolCryptoStep, f
 	return algorithms
 }
 
-func hasMeaningfulProtocolSignal(requestSteps, responseSteps []ProtocolCryptoStep, finalRequestBody string) bool {
+func normalizeProtocolAlgorithms(algorithms []string) []string {
+	filtered := make([]string, 0, len(algorithms))
+	seen := make(map[string]bool, len(algorithms))
+	for _, algorithm := range algorithms {
+		trimmed := strings.TrimSpace(algorithm)
+		normalized := strings.ToLower(trimmed)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		filtered = append(filtered, trimmed)
+	}
+	return filtered
+}
+
+func filterMeaningfulProtocolAlgorithms(algorithms []string) []string {
+	filtered := make([]string, 0, len(algorithms))
+	for _, algorithm := range normalizeProtocolAlgorithms(algorithms) {
+		if isIgnorableProtocolAlgorithm(strings.ToLower(strings.TrimSpace(algorithm))) {
+			continue
+		}
+		filtered = append(filtered, algorithm)
+	}
+	return filtered
+}
+
+func hasMeaningfulProtocolSignal(requestSteps, responseSteps []ProtocolCryptoStep, algorithms []string) bool {
+	if len(filterMeaningfulProtocolAlgorithms(algorithms)) > 0 {
+		return true
+	}
 	for _, steps := range [][]ProtocolCryptoStep{requestSteps, responseSteps} {
 		for _, step := range steps {
-			if !isProtocolHelperOnlyStep(step) {
+			if isMeaningfulProtocolStep(step) {
 				return true
 			}
 		}
 	}
-
-	body := strings.TrimSpace(finalRequestBody)
-	return isHexCiphertext(body) || isBase64Like(body)
+	return false
 }
 
 func isProtocolHelperOnlyStep(step ProtocolCryptoStep) bool {
@@ -637,6 +663,84 @@ func isProtocolHelperOnlyStep(step ProtocolCryptoStep) bool {
 	default:
 		return false
 	}
+}
+
+func isIgnorableProtocolAlgorithm(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "",
+		"json.parse",
+		"json.stringify",
+		"json.parse(inferred)",
+		"json.stringify(inferred)",
+		"json.parse()",
+		"json.stringify()",
+		"base64-encoded-payload",
+		"hex-encoded-payload",
+		"encrypted-field(inferred)":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMeaningfulProtocolStep(step ProtocolCryptoStep) bool {
+	source := strings.ToLower(strings.TrimSpace(step.Source))
+	algorithm := strings.ToLower(strings.TrimSpace(step.Algorithm))
+	if isIgnorableProtocolAlgorithm(source) && isIgnorableProtocolAlgorithm(algorithm) {
+		return false
+	}
+	if isProtocolHelperOnlyStep(step) {
+		return false
+	}
+	if strings.Contains(source, "encrypt") || strings.Contains(source, "decrypt") || strings.Contains(source, "sign") {
+		return true
+	}
+	if strings.Contains(algorithm, "encrypt") || strings.Contains(algorithm, "decrypt") || strings.Contains(algorithm, "sign") {
+		return true
+	}
+	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5"} {
+		if strings.Contains(source, token) || strings.Contains(algorithm, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPlaintextOnlyProtocolEvidence(trace *ProtocolTraceRecord) bool {
+	if trace == nil {
+		return false
+	}
+	if len(trace.SessionMaterials) == 0 {
+		return false
+	}
+
+	hasPlaintext := false
+	for key, value := range trace.SessionMaterials {
+		normalizedKey := strings.TrimSpace(key)
+		normalizedValue := strings.TrimSpace(value)
+		if normalizedValue == "" {
+			continue
+		}
+		switch normalizedKey {
+		case "latest_response_plaintext":
+			hasPlaintext = true
+		default:
+			return false
+		}
+	}
+
+	if !hasPlaintext {
+		return false
+	}
+	if len(filterMeaningfulProtocolAlgorithms(trace.Algorithms)) > 0 {
+		return false
+	}
+	for _, step := range append(append([]ProtocolCryptoStep{}, trace.RequestSteps...), trace.ResponseSteps...) {
+		if isMeaningfulProtocolStep(step) {
+			return false
+		}
+	}
+	return true
 }
 
 func isLikelyJSONPreview(text string) bool {
@@ -819,6 +923,7 @@ type VulnRecord struct {
 	Method             string              `json:"method,omitempty"`
 	Request            string              `json:"request,omitempty"`
 	Response           string              `json:"response,omitempty"`
+	ResponseType       string              `json:"response_type,omitempty"`
 	TraceID            string              `json:"trace_id,omitempty"`
 	HasProtocolTrace   bool                `json:"has_protocol_trace,omitempty"`
 	ResponseCiphertext string              `json:"response_ciphertext,omitempty"`
@@ -839,15 +944,16 @@ type VulnRecord struct {
 
 // AssetRecord 资产记录（统一存储所有资产类型）
 type AssetRecord struct {
-	TaskID    string       `json:"task_id"`
-	Version   int          `json:"version"`
-	Email     []AssetValue `json:"email,omitempty"`
-	IDCard    []AssetValue `json:"id_card,omitempty"`
-	Phone     []AssetValue `json:"phone,omitempty"`
-	IPURL     []AssetValue `json:"ip_url"`    // IP和URL列表
-	APIRoot   []AssetValue `json:"apiroot"`   // API根路径列表
-	APIRouter []AssetValue `json:"apirouter"` // API路由列表
-	CreatedAt time.Time    `json:"created_at"`
+	TaskID        string       `json:"task_id"`
+	Version       int          `json:"version"`
+	Email         []AssetValue `json:"email,omitempty"`
+	IDCard        []AssetValue `json:"id_card,omitempty"`
+	Phone         []AssetValue `json:"phone,omitempty"`
+	IPURL         []AssetValue `json:"ip_url"`                   // IP和URL列表
+	FrontendRoute []AssetValue `json:"frontend_route,omitempty"` // 前端页面路由列表
+	APIRoot       []AssetValue `json:"apiroot"`                  // API根路径列表
+	APIRouter     []AssetValue `json:"apirouter"`                // API路由列表
+	CreatedAt     time.Time    `json:"created_at"`
 }
 
 // User 用户模型

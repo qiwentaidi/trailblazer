@@ -2,9 +2,14 @@ package unauth
 
 import (
 	"crypto/sha1"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
+	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"trailblazer/pkg/core/database"
@@ -25,6 +30,12 @@ var responseSignatureTracker = struct {
 }{
 	counts: make(map[string]int),
 }
+var responseTemplateTracker = struct {
+	sync.Mutex
+	clusters map[string][]responseTemplateCluster
+}{
+	clusters: make(map[string][]responseTemplateCluster),
+}
 var learnedAuthPatternRegistry = struct {
 	sync.RWMutex
 	loaded   bool
@@ -44,13 +55,28 @@ var learnableAuthPhrasePatterns = []*regexp.Regexp{
 
 // 风险等级评估相关常量
 const (
-	maxAnalysisLength = 50000 // 50KB，风险等级分析时的最大响应体长度
+	maxAnalysisLength             = 50000 // 50KB，风险等级分析时的最大响应体长度
+	similarTemplateRejectCount    = 3
+	similarTemplateJaccardMinimum = 0.88
 )
 
 type UnauthorizedAssessment struct {
 	RiskLevel        string
 	Confidence       string
 	ConfidenceReason string
+	ResponseType     string
+}
+
+type responseRepeatObservation struct {
+	ExactCount          int
+	SimilarCount        int
+	MatchedBySimilarity bool
+}
+
+type responseTemplateCluster struct {
+	signature string
+	tokens    map[string]struct{}
+	count     int
 }
 
 // 发送请求测试未授权访问
@@ -65,6 +91,7 @@ func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 		return false, "", UnauthorizedAssessment{}, err
 	}
 	body := string(resp.Body())
+	responseType := normalizeUnauthorizedResponseType(resp.Header().Get("Content-Type"))
 
 	// 1. HTTP状态码异常，直接返回
 	if resp.StatusCode() > 400 && resp.StatusCode() != 500 {
@@ -115,7 +142,21 @@ func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 		RiskLevel:        riskLevel,
 		Confidence:       confidence,
 		ConfidenceReason: confidenceReason,
+		ResponseType:     responseType,
 	}, nil
+}
+
+func normalizeUnauthorizedResponseType(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err == nil {
+		return strings.ToLower(strings.TrimSpace(mediaType))
+	}
+	return strings.ToLower(raw)
 }
 
 func mergeAuthPatterns(groups ...[]string) []string {
@@ -850,20 +891,21 @@ func assessRiskLevel(responseBody, url string) string {
 }
 
 func assessConfidence(statusCode int, responseBody, url string) (string, string) {
-	return assessConfidenceWithRepeatCount(statusCode, responseBody, url, recordResponseSignature(statusCode, responseBody))
+	observation := recordResponseObservation(statusCode, responseBody, url)
+	return assessConfidenceWithRepeatCount(statusCode, responseBody, url, observation)
 }
 
 func evaluateUnauthorizedConfidence(statusCode int, responseBody, url string) (string, string) {
-	repeatCount := responseSignatureTrackerCurrentCount(statusCode, responseBody)
-	if repeatCount == 0 {
-		repeatCount = recordResponseSignature(statusCode, responseBody)
+	observation := responseObservationCurrentCount(statusCode, responseBody, url)
+	if observation.ExactCount == 0 && observation.SimilarCount == 0 {
+		observation = recordResponseObservation(statusCode, responseBody, url)
 	}
-	return assessConfidenceWithRepeatCount(statusCode, responseBody, url, repeatCount)
+	return assessConfidenceWithRepeatCount(statusCode, responseBody, url, observation)
 }
 
 func shouldRejectUnauthorizedResponse(statusCode int, responseBody, url string) (bool, string) {
 	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
-	repeatCount := recordResponseSignature(statusCode, responseBody)
+	observation := recordResponseObservation(statusCode, responseBody, url)
 
 	if isLikelyGenericErrorResponse(bodyLower) {
 		return true, "响应内容命中通用错误模板，判定为未授权误报"
@@ -873,8 +915,14 @@ func shouldRejectUnauthorizedResponse(statusCode int, responseBody, url string) 
 		return true, "响应状态为 500 且缺少有效业务数据，判定为未授权误报"
 	}
 
-	if repeatCount >= 3 && !containsMeaningfulDataSignals(bodyLower, url) {
-		return true, fmt.Sprintf("相同响应模板已重复出现 %d 次且缺少有效业务数据，判定为未授权误报", repeatCount)
+	if observation.ExactCount >= similarTemplateRejectCount && !containsMeaningfulDataSignals(bodyLower, url) {
+		return true, fmt.Sprintf("相同响应模板已重复出现 %d 次且缺少有效业务数据，判定为未授权误报", observation.ExactCount)
+	}
+
+	if observation.SimilarCount >= similarTemplateRejectCount &&
+		observation.SimilarCount > observation.ExactCount &&
+		!containsMeaningfulDataSignals(bodyLower, url) {
+		return true, fmt.Sprintf("同目标相似响应模板已重复出现 %d 次且缺少有效业务数据，判定为未授权误报", observation.SimilarCount)
 	}
 
 	return false, ""
@@ -887,7 +935,7 @@ func responseSignatureTrackerCurrentCount(statusCode int, responseBody string) i
 	return responseSignatureTracker.counts[signature]
 }
 
-func assessConfidenceWithRepeatCount(statusCode int, responseBody, url string, repeatCount int) (string, string) {
+func assessConfidenceWithRepeatCount(statusCode int, responseBody, url string, observation responseRepeatObservation) (string, string) {
 	score := 100
 	reasons := []string{}
 	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
@@ -915,16 +963,23 @@ func assessConfidenceWithRepeatCount(statusCode int, responseBody, url string, r
 		reasons = append(reasons, "响应内容命中通用错误特征，疑似统一报错或访问限制提示")
 	}
 
+	repeatCount := observation.ExactCount
+	repeatLabel := "相同响应特征"
+	if observation.SimilarCount > repeatCount {
+		repeatCount = observation.SimilarCount
+		repeatLabel = "同目标相似响应特征"
+	}
+
 	switch {
 	case repeatCount >= 10:
 		score -= 45
-		reasons = append(reasons, fmt.Sprintf("相同响应特征已重复出现 %d 次，批量误报概率较高", repeatCount))
+		reasons = append(reasons, fmt.Sprintf("%s已重复出现 %d 次，批量误报概率较高", repeatLabel, repeatCount))
 	case repeatCount >= 5:
 		score -= 30
-		reasons = append(reasons, fmt.Sprintf("相同响应特征已重复出现 %d 次，结果区分度较低", repeatCount))
+		reasons = append(reasons, fmt.Sprintf("%s已重复出现 %d 次，结果区分度较低", repeatLabel, repeatCount))
 	case repeatCount >= 3:
 		score -= 15
-		reasons = append(reasons, fmt.Sprintf("相同响应特征已重复出现 %d 次，需要结合业务复核", repeatCount))
+		reasons = append(reasons, fmt.Sprintf("%s已重复出现 %d 次，需要结合业务复核", repeatLabel, repeatCount))
 	}
 
 	if containsMeaningfulDataSignals(bodyLower, url) {
@@ -954,6 +1009,26 @@ func recordResponseSignature(statusCode int, responseBody string) int {
 	defer responseSignatureTracker.Unlock()
 	responseSignatureTracker.counts[signature]++
 	return responseSignatureTracker.counts[signature]
+}
+
+func responseObservationCurrentCount(statusCode int, responseBody, rawURL string) responseRepeatObservation {
+	exactCount := responseSignatureTrackerCurrentCount(statusCode, responseBody)
+	similarCount, matchedBySimilarity := responseTemplateTrackerCurrentCount(statusCode, responseBody, rawURL)
+	return responseRepeatObservation{
+		ExactCount:          exactCount,
+		SimilarCount:        similarCount,
+		MatchedBySimilarity: matchedBySimilarity,
+	}
+}
+
+func recordResponseObservation(statusCode int, responseBody, rawURL string) responseRepeatObservation {
+	exactCount := recordResponseSignature(statusCode, responseBody)
+	similarCount, matchedBySimilarity := recordSimilarResponseTemplate(statusCode, responseBody, rawURL)
+	return responseRepeatObservation{
+		ExactCount:          exactCount,
+		SimilarCount:        similarCount,
+		MatchedBySimilarity: matchedBySimilarity,
+	}
 }
 
 func buildResponseSignature(statusCode int, responseBody string) string {
@@ -1019,4 +1094,258 @@ func containsMeaningfulDataSignals(bodyLower, url string) bool {
 
 func responseHasObjectDensity(bodyLower string) bool {
 	return strings.Count(bodyLower, "{") >= 3 && strings.Count(bodyLower, ":") >= 6
+}
+
+func responseTemplateTrackerCurrentCount(statusCode int, responseBody, rawURL string) (int, bool) {
+	scope := buildResponseTemplateScope(statusCode, rawURL)
+	signature := buildSimilarResponseSignature(responseBody)
+	if signature == "" {
+		return 0, false
+	}
+
+	tokens := tokenize(signature, 2)
+	if len(tokens) == 0 {
+		tokens = tokenize(signature, 1)
+	}
+
+	responseTemplateTracker.Lock()
+	defer responseTemplateTracker.Unlock()
+
+	clusters := responseTemplateTracker.clusters[scope]
+	bestIndex := -1
+	bestSimilarity := 0.0
+	for index := range clusters {
+		similarity := templateTokenSimilarity(tokens, clusters[index].tokens)
+		if similarity > bestSimilarity {
+			bestSimilarity = similarity
+			bestIndex = index
+		}
+	}
+
+	if bestIndex == -1 || bestSimilarity < similarTemplateJaccardMinimum {
+		return 0, false
+	}
+	return clusters[bestIndex].count, true
+}
+
+func recordSimilarResponseTemplate(statusCode int, responseBody, rawURL string) (int, bool) {
+	scope := buildResponseTemplateScope(statusCode, rawURL)
+	signature := buildSimilarResponseSignature(responseBody)
+	if signature == "" {
+		return 0, false
+	}
+
+	tokens := tokenize(signature, 2)
+	if len(tokens) == 0 {
+		tokens = tokenize(signature, 1)
+	}
+
+	responseTemplateTracker.Lock()
+	defer responseTemplateTracker.Unlock()
+
+	clusters := responseTemplateTracker.clusters[scope]
+	bestIndex := -1
+	bestSimilarity := 0.0
+	for index := range clusters {
+		cluster := &clusters[index]
+		if cluster.signature == signature {
+			cluster.count++
+			return cluster.count, false
+		}
+
+		similarity := templateTokenSimilarity(tokens, cluster.tokens)
+		if similarity > bestSimilarity {
+			bestSimilarity = similarity
+			bestIndex = index
+		}
+	}
+
+	if bestIndex != -1 && bestSimilarity >= similarTemplateJaccardMinimum {
+		clusters[bestIndex].count++
+		return clusters[bestIndex].count, true
+	}
+
+	responseTemplateTracker.clusters[scope] = append(clusters, responseTemplateCluster{
+		signature: signature,
+		tokens:    tokens,
+		count:     1,
+	})
+	return 1, false
+}
+
+func templateTokenSimilarity(left, right map[string]struct{}) float64 {
+	if len(left) == 0 || len(right) == 0 {
+		return 0
+	}
+
+	intersection := 0
+	for token := range left {
+		if _, ok := right[token]; ok {
+			intersection++
+		}
+	}
+	union := len(left) + len(right) - intersection
+	if union <= 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
+func buildResponseTemplateScope(statusCode int, rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		return fmt.Sprintf("%d:%s", statusCode, strings.ToLower(strings.TrimSpace(rawURL)))
+	}
+	return fmt.Sprintf("%d:%s", statusCode, strings.ToLower(parsed.Host))
+}
+
+func buildSimilarResponseSignature(responseBody string) string {
+	trimmed := strings.TrimSpace(responseBody)
+	if trimmed == "" {
+		return ""
+	}
+
+	var data any
+	if err := json.Unmarshal([]byte(trimmed), &data); err == nil {
+		return canonicalizeSimilarResponseValue("", data)
+	}
+
+	return normalizeSimilarResponseString(trimmed)
+}
+
+func canonicalizeSimilarResponseValue(key string, value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for item := range typed {
+			keys = append(keys, item)
+		}
+		sort.Strings(keys)
+
+		parts := make([]string, 0, len(keys))
+		for _, item := range keys {
+			normalizedKey := strings.ToLower(strings.TrimSpace(item))
+			switch {
+			case isSimilarResponseVolatileKey(normalizedKey):
+				parts = append(parts, strconv.Quote(normalizedKey)+`:"<volatile>"`)
+			case isRouteLikeKey(normalizedKey):
+				parts = append(parts, strconv.Quote(normalizedKey)+`:"<route>"`)
+			default:
+				parts = append(parts, strconv.Quote(normalizedKey)+":"+canonicalizeSimilarResponseValue(normalizedKey, typed[item]))
+			}
+		}
+		return "{" + strings.Join(parts, ",") + "}"
+	case []any:
+		if len(typed) == 0 {
+			return "[]"
+		}
+		if len(typed) > 3 {
+			typed = typed[:3]
+		}
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			parts = append(parts, canonicalizeSimilarResponseValue(key, item))
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	case string:
+		return strconv.Quote(normalizeSimilarStringValue(key, typed))
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	case nil:
+		return "null"
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func normalizeSimilarStringValue(key, value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if normalized == "" {
+		return normalized
+	}
+
+	switch {
+	case isRouteLikeKey(key), looksLikeURLValue(normalized), looksLikeRouteValue(normalized):
+		return "<route>"
+	case looksLikeOpaqueToken(normalized):
+		return "<token>"
+	default:
+		return normalizeSimilarResponseString(normalized)
+	}
+}
+
+func normalizeSimilarResponseString(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if normalized == "" {
+		return ""
+	}
+
+	replacements := []struct {
+		pattern *regexp.Regexp
+		value   string
+	}{
+		{regexp.MustCompile(`https?://[^\s"']+`), "<url>"},
+		{regexp.MustCompile(`(?:^|[\s:=,])/[a-z0-9._/\-]+`), " <route>"},
+		{regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f-]{27,}`), "<uuid>"},
+		{regexp.MustCompile(`\b[0-9]{6,}\b`), "<number>"},
+		{regexp.MustCompile(`\b[a-z0-9]{24,}\b`), "<token>"},
+	}
+	for _, replacement := range replacements {
+		normalized = replacement.pattern.ReplaceAllString(normalized, replacement.value)
+	}
+	return strings.Join(strings.Fields(normalized), " ")
+}
+
+func isSimilarResponseVolatileKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	if isRouteLikeKey(key) {
+		return false
+	}
+	return strings.Contains(key, "trace") ||
+		strings.Contains(key, "request") ||
+		strings.Contains(key, "nonce") ||
+		strings.Contains(key, "timestamp") ||
+		strings.Contains(key, "token") ||
+		strings.Contains(key, "session") ||
+		strings.Contains(key, "captcha") ||
+		strings.Contains(key, "sign") ||
+		strings.Contains(key, "rand") ||
+		strings.Contains(key, "error_hint")
+}
+
+func isRouteLikeKey(key string) bool {
+	return strings.Contains(key, "route") ||
+		strings.Contains(key, "path") ||
+		strings.Contains(key, "url") ||
+		strings.Contains(key, "uri") ||
+		strings.Contains(key, "redirect") ||
+		strings.Contains(key, "return")
+}
+
+func looksLikeURLValue(value string) bool {
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
+}
+
+func looksLikeRouteValue(value string) bool {
+	if strings.HasPrefix(value, "/") {
+		return strings.Count(value, "/") >= 1
+	}
+	return strings.Contains(value, "/api/") || strings.Contains(value, "/rest/") || strings.Contains(value, "/gateway/")
+}
+
+func looksLikeOpaqueToken(value string) bool {
+	if len(value) < 24 {
+		return false
+	}
+	tokenLike := regexp.MustCompile(`^[a-z0-9+/_=-]{24,}$`)
+	return tokenLike.MatchString(value)
 }

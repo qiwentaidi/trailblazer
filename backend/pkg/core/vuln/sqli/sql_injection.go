@@ -2,14 +2,15 @@ package sqli
 
 import (
 	"fmt"
+	"math"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 	"trailblazer/pkg/config"
 	"trailblazer/pkg/core/structs"
 	"trailblazer/pkg/core/vuln"
-
-	"github.com/go-resty/resty/v2"
 )
 
 // SQLInjectionResult 表示 SQL 注入测试结果
@@ -21,11 +22,23 @@ type SQLInjectionResult struct {
 	Type       string `json:"type"` // 注入类型：error-based, time-based, boolean-based
 }
 
+type responseSnapshot struct {
+	statusCode int
+	body       string
+	bodyLower  string
+	duration   time.Duration
+}
+
 // TestSQLInjection 测试SQL注入漏洞
 // apiReq: 原始 API 请求
 // cfg: SQL注入配置（包含payloads、匹配关键词）
 // returns: SQLInjectionResult 测试结果
 func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) (*SQLInjectionResult, error) {
+	baselineResp, err := sendSnapshot(cloneAPIRequest(apiReq))
+	if err != nil {
+		return nil, err
+	}
+
 	// 获取所有参数名
 	paramNames := make([]string, 0, len(apiReq.Params))
 	for paramName := range apiReq.Params {
@@ -40,11 +53,11 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 	// 对每个参数都进行测试
 	for _, paramName := range paramNames {
 		// 检测布尔盲注
-		vulnerable, oddBody1 := isBooleanBasedSQLInjection(apiReq, paramName)
+		vulnerable, oddBody1, boolPayload := isBooleanBasedSQLInjection(apiReq, paramName, baselineResp)
 		if vulnerable {
 			return &SQLInjectionResult{
 				Vulnerable: true,
-				Payload:    "'",
+				Payload:    boolPayload,
 				Response:   vuln.TruncateResponse(oddBody1),
 				Reason:     "检测到布尔盲注SQL注入漏洞 (参数: " + paramName + ")",
 				Type:       "boolean-based",
@@ -59,44 +72,35 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 
 			for _, payload := range payloadList {
 				// 创建修改后的请求，只修改当前测试的参数
-				modifiedReq := apiReq
-				if modifiedReq.Params == nil {
-					modifiedReq.Params = make(map[string][]string)
-				}
+				modifiedReq := cloneAPIRequest(apiReq)
 				modifiedReq.Params[paramName] = []string{payload}
 
-				resp, err := vuln.SendAPIRequest(modifiedReq, false)
+				resp, err := sendSnapshot(modifiedReq)
 				if err != nil {
 					continue // 跳过失败的请求
 				}
 
 				// 按规则先做响应体关键词校验
 
-				body := string(resp.Body())
 				ruleBodyHit := false
 				if len(rule.BodyContains) > 0 {
-					bl := strings.ToLower(body)
 					for _, kw := range rule.BodyContains {
-						if strings.Contains(bl, strings.ToLower(kw)) {
+						if strings.Contains(resp.bodyLower, strings.ToLower(kw)) && !strings.Contains(baselineResp.bodyLower, strings.ToLower(kw)) {
 							ruleBodyHit = true
 							break
 						}
-					}
-					if !ruleBodyHit {
-						continue
 					}
 				}
 
 				// 类型判定
 				vulnerable := false
-				loweredBody := strings.ToLower(body)
 				switch rule.Type {
 				case "error-based":
-					vulnerable = ruleBodyHit || isErrorBasedSQLInjection(loweredBody) || containsAny(loweredBody, cfg.MatchKeywords)
+					vulnerable = ruleBodyHit || hasNewErrorBasedSignal(resp.bodyLower, baselineResp.bodyLower) || hasNewKeywordMatch(resp.bodyLower, baselineResp.bodyLower, cfg.MatchKeywords)
 				case "time-based":
-					vulnerable = ruleBodyHit || isTimeBasedSQLInjectionWithThreshold(resp, rule.MinDelayMs)
+					vulnerable = ruleBodyHit || isTimeBasedSQLInjectionWithThreshold(resp, baselineResp, rule.MinDelayMs)
 				default:
-					vulnerable = ruleBodyHit || containsAny(loweredBody, cfg.MatchKeywords)
+					vulnerable = ruleBodyHit || hasNewKeywordMatch(resp.bodyLower, baselineResp.bodyLower, cfg.MatchKeywords)
 				}
 
 				if vulnerable {
@@ -107,7 +111,7 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 					return &SQLInjectionResult{
 						Vulnerable: true,
 						Payload:    payload,
-						Response:   vuln.TruncateResponse(body),
+						Response:   vuln.TruncateResponse(resp.body),
 						Reason:     fmt.Sprintf("检测到%s SQL注入漏洞 (参数: %s)", ruleType, paramName),
 						Type:       ruleType,
 					}, nil
@@ -130,195 +134,328 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 // evenBody2: 2个单引号的响应
 // evenBody4: 4个单引号的响应
 // 如果奇数响应组（1和3）相同，偶数响应组（2和4）相同，但两组不同，则判断为布尔盲注
-func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string) (bool, string) {
-	var oddBody1, oddBody3, evenBody2, evenBody4 string
+func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string, baseline responseSnapshot) (bool, string, string) {
+	for _, probe := range buildBooleanProbePairs(apiReq.Params[paramName]) {
+		falseResp, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.falsePayload))
+		if err != nil {
+			continue
+		}
+		trueResp, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.truePayload))
+		if err != nil {
+			continue
+		}
 
-	// 测试 1 个单引号
-	if resp, err := vuln.SendAPIRequest(buildTestRequest(apiReq, paramName, "'"), false); err == nil {
-		oddBody1 = string(resp.Body())
-	}
-	// 测试 3 个单引号
-	if resp, err := vuln.SendAPIRequest(buildTestRequest(apiReq, paramName, "'''"), false); err == nil {
-		oddBody3 = string(resp.Body())
-	}
-	// 测试 2 个单引号
-	if resp, err := vuln.SendAPIRequest(buildTestRequest(apiReq, paramName, "''"), false); err == nil {
-		evenBody2 = string(resp.Body())
-	}
-	// 测试 4 个单引号
-	if resp, err := vuln.SendAPIRequest(buildTestRequest(apiReq, paramName, "''''"), false); err == nil {
-		evenBody4 = string(resp.Body())
+		if !responsesEquivalent(baseline, trueResp) {
+			continue
+		}
+		if !responsesDifferent(baseline, falseResp) {
+			continue
+		}
+		if !responsesDifferent(falseResp, trueResp) {
+			continue
+		}
+
+		return true, falseResp.body, probe.falsePayload
 	}
 
-	if evenBody2 == evenBody4 && len(oddBody3)-len(oddBody1) <= 1 && oddBody1 != evenBody2 {
-		return true, oddBody1
-	}
-
-	return false, ""
+	return false, "", ""
 }
 
 // isErrorBasedSQLInjection 检测基于错误的SQL注入（扩展 sqlmap/常见错误签名）
-func isErrorBasedSQLInjection(bodyLower string) bool {
-	errorPatterns := []string{
-		// MySQL / MariaDB 常见
-		"you have an error in your sql syntax;",
-		"mysql_fetch",
-		"mysql_num_rows",
-		"mysql_fetch_array",
-		"mysql_fetch_assoc",
-		"mysql_fetch_object",
-		"mysql_fetch_row",
-		"mysql_error",
-		"mysql_connect",
-		"mysql_select_db",
-		"mysql_query",
-		"mysqlnd",
-		"warning: mysql",
-		"fatal error: mysql",
-		"com.mysql.jdbc.exceptions.jdbc4.msqlsyntaxerrorexception",
-		"mysqlsyntaxerrorexception",
-
-		// PostgreSQL 常见
-		"syntax error at or near",
-		"pg_query",
-		"pg_fetch_array",
-		"pg_fetch_assoc",
-		"pg_fetch_object",
-		"pg_fetch_row",
-		"psql: error",
-		"org.postgresql.util.psqlexception",
-		"postgresql error",
-		"warning: postgresql",
-		"fatal error: postgresql",
-		"postgresql",
-
-		// Microsoft SQL Server / T-SQL
-		"unclosed quotation mark after the character string",
-		"microsoft ole db",
-		"odbc sql server driver",
-		"sql server",
-		"sqlserverexception",
-		"system.data.sqlclient.sqlexception",
-		"sqlexception",
-		"microsoft sql server native client",
-		"fatal error: sqlserver",
-
-		// Oracle
-		"ora-",
-		"oracle error",
-		"oracle_query",
-		"oracle_fetch_array",
-		"oracle_fetch_assoc",
-		"oracle_fetch_object",
-		"oracle_fetch_row",
-		"warning: oracle",
-		"fatal error: oracle",
-		"oracle",
-
-		// SQLite
-		"sqlite",
-		"sqlite error",
-		"sqlite_query",
-		"sqlite_fetch_array",
-		"sqlite_fetch_assoc",
-		"sqlite_fetch_object",
-		"sqlite_fetch_row",
-		"sqlite3::sqlexception",
-		"sqliteexception",
-		"no such table",
-		"no such column",
-
-		// 通用 / 驱动 / JDBC / Java 异常
-		"sql syntax",
-		"sql error",
-		"syntax error",
-		"database error",
-		"query failed",
-		"java.sql.sqlexception",
-		"org.hibernate.exception.sqlgrammarexception",
-		"javax.persistence",
-		"sqlstate",
-		"sqlsyntaxerrorexception",
-		"data truncation",
-
-		// 常见字段/列/表错误提示
-		"unknown column",
-		"invalid column name",
-		"ambiguous column name",
-		"column count doesn't match value count",
-		"column not found",
-
-		// 权限 / 连接 / 其他
-		"permission denied",
-		"could not connect to server",
-		"connect failed",
-		"cannot open database",
-		"could not find driver",
-
-		// DB2 / Informix / Sybase / Firebird 等常见词
-		"db2",
-		"informix",
-		"sybase",
-		"adaptive server",
-		"firebird",
-		"ibm db2",
-
-		// ODBC / PDO / PHP 提示
-		"odbc",
-		"pdoexception",
-		"warning: odbc",
-		"warning: pdo",
-		"on line", // 结合其他模式可增加命中（谨慎使用）
-
-		// 其它常见识别串（来自各种 DB 驱动/库）
-		"fatal error",
-		"warning:",
-		"internal server error", // 注意：此项容易误报，按需启用/禁用
-		"sql syntax error",
-		"unterminated quoted string",
-		"quoted string not properly terminated",
-		"syntax error in string in query expression",
-	}
-
+func isErrorBasedSQLInjection(bodyLower string) []string {
+	var matches []string
 	for _, pattern := range errorPatterns {
 		if strings.Contains(bodyLower, pattern) {
+			matches = append(matches, pattern)
+		}
+	}
+	return matches
+}
+
+var errorPatterns = []string{
+	// MySQL / MariaDB 常见
+	"you have an error in your sql syntax;",
+	"mysql_fetch",
+	"mysql_num_rows",
+	"mysql_fetch_array",
+	"mysql_fetch_assoc",
+	"mysql_fetch_object",
+	"mysql_fetch_row",
+	"mysql_error",
+	"mysql_connect",
+	"mysql_select_db",
+	"mysql_query",
+	"mysqlnd",
+	"warning: mysql",
+	"fatal error: mysql",
+	"com.mysql.jdbc.exceptions.jdbc4.msqlsyntaxerrorexception",
+	"mysqlsyntaxerrorexception",
+
+	// PostgreSQL 常见
+	"syntax error at or near",
+	"pg_query",
+	"pg_fetch_array",
+	"pg_fetch_assoc",
+	"pg_fetch_object",
+	"pg_fetch_row",
+	"psql: error",
+	"org.postgresql.util.psqlexception",
+	"postgresql error",
+	"warning: postgresql",
+	"fatal error: postgresql",
+	"postgresql",
+
+	// Microsoft SQL Server / T-SQL
+	"unclosed quotation mark after the character string",
+	"microsoft ole db",
+	"odbc sql server driver",
+	"sql server",
+	"sqlserverexception",
+	"system.data.sqlclient.sqlexception",
+	"sqlexception",
+	"microsoft sql server native client",
+	"fatal error: sqlserver",
+
+	// Oracle
+	"ora-",
+	"oracle error",
+	"oracle_query",
+	"oracle_fetch_array",
+	"oracle_fetch_assoc",
+	"oracle_fetch_object",
+	"oracle_fetch_row",
+	"warning: oracle",
+	"fatal error: oracle",
+	"oracle",
+
+	// SQLite
+	"sqlite",
+	"sqlite error",
+	"sqlite_query",
+	"sqlite_fetch_array",
+	"sqlite_fetch_assoc",
+	"sqlite_fetch_object",
+	"sqlite_fetch_row",
+	"sqlite3::sqlexception",
+	"sqliteexception",
+	"no such table",
+	"no such column",
+
+	// 通用 / 驱动 / JDBC / Java 异常
+	"sql syntax",
+	"sql error",
+	"syntax error",
+	"database error",
+	"query failed",
+	"java.sql.sqlexception",
+	"org.hibernate.exception.sqlgrammarexception",
+	"javax.persistence",
+	"sqlstate",
+	"sqlsyntaxerrorexception",
+	"data truncation",
+
+	// 常见字段/列/表错误提示
+	"unknown column",
+	"invalid column name",
+	"ambiguous column name",
+	"column count doesn't match value count",
+	"column not found",
+
+	// 权限 / 连接 / 其他
+	"permission denied",
+	"could not connect to server",
+	"connect failed",
+	"cannot open database",
+	"could not find driver",
+
+	// DB2 / Informix / Sybase / Firebird 等常见词
+	"db2",
+	"informix",
+	"sybase",
+	"adaptive server",
+	"firebird",
+	"ibm db2",
+
+	// ODBC / PDO / PHP 提示
+	"odbc",
+	"pdoexception",
+	"warning: odbc",
+	"warning: pdo",
+	"on line", // 结合其他模式可增加命中（谨慎使用）
+
+	// 其它常见识别串（来自各种 DB 驱动/库）
+	"fatal error",
+	"warning:",
+	"internal server error", // 注意：此项容易误报，按需启用/禁用
+	"sql syntax error",
+	"unterminated quoted string",
+	"quoted string not properly terminated",
+	"syntax error in string in query expression",
+}
+
+// isTimeBasedSQLInjectionWithThreshold 按指定阈值（毫秒）判定 time-based 成功
+func isTimeBasedSQLInjectionWithThreshold(resp responseSnapshot, baseline responseSnapshot, minDelayMs int) bool {
+	if minDelayMs <= 0 {
+		return false
+	}
+	// 仅在服务端返回成功/可用的状态码时考虑时间阈值，以减少网络异常带来的误判
+	if resp.statusCode == 0 || resp.statusCode < http.StatusOK || resp.statusCode >= 600 {
+		return false
+	}
+	delayThreshold := time.Duration(minDelayMs) * time.Millisecond
+	return resp.duration >= baseline.duration+delayThreshold
+}
+
+func hasNewKeywordMatch(bodyLower string, baselineLower string, words []string) bool {
+	if len(words) == 0 {
+		return false
+	}
+	for _, w := range words {
+		lowerWord := strings.ToLower(w)
+		if strings.Contains(bodyLower, lowerWord) && !strings.Contains(baselineLower, lowerWord) {
 			return true
 		}
 	}
 	return false
 }
 
-// isTimeBasedSQLInjectionWithThreshold 按指定阈值（毫秒）判定 time-based 成功
-func isTimeBasedSQLInjectionWithThreshold(resp *resty.Response, minDelayMs int) bool {
-	if minDelayMs <= 0 {
-		return false
-	}
-	// 仅在服务端返回成功/可用的状态码时考虑时间阈值，以减少网络异常带来的误判
-	if resp.StatusCode() == 0 || (resp.StatusCode() < http.StatusOK || resp.StatusCode() >= 600) {
-		// 没有有效状态码信息，保守起见不据此判定
-	}
-	return resp.Time() >= time.Duration(minDelayMs)*time.Millisecond
-}
-
-func containsAny(bodyLower string, words []string) bool {
-	if len(words) == 0 {
-		return false
-	}
-	bl := strings.ToLower(bodyLower)
-	for _, w := range words {
-		if strings.Contains(bl, strings.ToLower(w)) {
+func hasNewErrorBasedSignal(bodyLower string, baselineLower string) bool {
+	for _, match := range isErrorBasedSQLInjection(bodyLower) {
+		if !strings.Contains(baselineLower, match) {
 			return true
 		}
+	}
+	return false
+}
+
+type booleanProbePair struct {
+	falsePayload string
+	truePayload  string
+}
+
+func buildBooleanProbePairs(currentValues []string) []booleanProbePair {
+	probes := []booleanProbePair{
+		{falsePayload: "'", truePayload: "''"},
+	}
+	if isLikelyNumericValue(currentValues) {
+		probes = append(probes, booleanProbePair{falsePayload: "-1", truePayload: "-0"})
+	}
+	return probes
+}
+
+func isLikelyNumericValue(values []string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		matched, _ := regexp.MatchString(`^-?\d+(\.\d+)?$`, trimmed)
+		return matched
 	}
 	return false
 }
 
 // buildTestRequest 构建测试请求
 func buildTestRequest(apiReq structs.APIRequest, paramName, testValue string) structs.APIRequest {
-	modifiedReq := apiReq
-	if modifiedReq.Params == nil {
-		modifiedReq.Params = make(map[string][]string)
-	}
+	modifiedReq := cloneAPIRequest(apiReq)
 	modifiedReq.Params[paramName] = []string{testValue}
 	return modifiedReq
+}
+
+func cloneAPIRequest(apiReq structs.APIRequest) structs.APIRequest {
+	cloned := structs.APIRequest{
+		URL:            apiReq.URL,
+		Method:         apiReq.Method,
+		Body:           apiReq.Body,
+		PayloadCarrier: apiReq.PayloadCarrier,
+		PayloadFormat:  apiReq.PayloadFormat,
+	}
+	if len(apiReq.Headers) == 0 {
+		cloned.Headers = map[string]string{}
+	} else {
+		cloned.Headers = make(map[string]string, len(apiReq.Headers))
+		for key, value := range apiReq.Headers {
+			cloned.Headers[key] = value
+		}
+	}
+	cloned.Params = make(url.Values, len(apiReq.Params))
+	for key, values := range apiReq.Params {
+		cloned.Params[key] = append([]string(nil), values...)
+	}
+	return cloned
+}
+
+func sendSnapshot(apiReq structs.APIRequest) (responseSnapshot, error) {
+	resp, err := vuln.SendAPIRequest(apiReq, false)
+	if err != nil {
+		return responseSnapshot{}, err
+	}
+	body := string(resp.Body())
+	return responseSnapshot{
+		statusCode: resp.StatusCode(),
+		body:       body,
+		bodyLower:  strings.ToLower(body),
+		duration:   resp.Time(),
+	}, nil
+}
+
+func normalizeBody(body string) string {
+	return strings.TrimSpace(body)
+}
+
+var dynamicBodyPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`),
+	regexp.MustCompile(`\b\d{10,}\b`),
+	regexp.MustCompile(`(?i)\b[0-9a-f]{16,}\b`),
+}
+
+func responsesEquivalent(left, right responseSnapshot) bool {
+	if left.statusCode != right.statusCode {
+		return false
+	}
+
+	leftCanonical := canonicalizeBody(left.body)
+	rightCanonical := canonicalizeBody(right.body)
+	if leftCanonical == rightCanonical {
+		return true
+	}
+
+	if edgeSignature(leftCanonical) != edgeSignature(rightCanonical) {
+		return false
+	}
+
+	leftLen := len(leftCanonical)
+	rightLen := len(rightCanonical)
+	diff := math.Abs(float64(leftLen - rightLen))
+	return diff <= 8 || (maxInt(leftLen, rightLen) > 0 && diff/float64(maxInt(leftLen, rightLen)) <= 0.02)
+}
+
+func responsesDifferent(left, right responseSnapshot) bool {
+	return !responsesEquivalent(left, right)
+}
+
+func canonicalizeBody(body string) string {
+	canonical := strings.ToLower(strings.TrimSpace(body))
+	for _, pattern := range dynamicBodyPatterns {
+		canonical = pattern.ReplaceAllString(canonical, "{dyn}")
+	}
+	canonical = strings.Join(strings.Fields(canonical), " ")
+	return canonical
+}
+
+func edgeSignature(body string) string {
+	if len(body) <= 160 {
+		return body
+	}
+	return body[:80] + "|" + body[len(body)-80:]
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

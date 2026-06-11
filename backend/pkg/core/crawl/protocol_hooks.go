@@ -1,6 +1,9 @@
 package crawl
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const protocolHookBindingName = "__trailblazerHookSink"
 
@@ -91,7 +94,14 @@ func (r *ProtocolTraceRecord) normalize() {
 				algorithms = append(algorithms, r.ResponseSteps[i].Algorithm)
 			}
 		}
-		r.Algorithms = algorithms
+		r.Algorithms = normalizeCapturedProtocolAlgorithms(algorithms)
+	} else {
+		r.Algorithms = normalizeCapturedProtocolAlgorithms(r.Algorithms)
+	}
+
+	if hasPlaintextOnlyCapturedProtocolEvidence(r) || !hasMeaningfulCapturedProtocolSignal(r) {
+		r.RequestSteps = nil
+		r.ResponseSteps = nil
 	}
 
 	if r.CreatedAt.IsZero() {
@@ -101,6 +111,119 @@ func (r *ProtocolTraceRecord) normalize() {
 			r.CreatedAt = time.Now()
 		}
 	}
+}
+
+func normalizeCapturedProtocolAlgorithms(algorithms []string) []string {
+	filtered := make([]string, 0, len(algorithms))
+	seen := make(map[string]bool, len(algorithms))
+	for _, algorithm := range algorithms {
+		trimmed := strings.TrimSpace(algorithm)
+		normalized := strings.ToLower(trimmed)
+		if normalized == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		filtered = append(filtered, trimmed)
+	}
+	return filtered
+}
+
+func filterMeaningfulCapturedProtocolAlgorithms(algorithms []string) []string {
+	filtered := make([]string, 0, len(algorithms))
+	for _, algorithm := range normalizeCapturedProtocolAlgorithms(algorithms) {
+		if isIgnorableCapturedProtocolAlgorithm(strings.ToLower(strings.TrimSpace(algorithm))) {
+			continue
+		}
+		filtered = append(filtered, algorithm)
+	}
+	return filtered
+}
+
+func isIgnorableCapturedProtocolAlgorithm(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "",
+		"json.parse",
+		"json.stringify",
+		"json.parse(inferred)",
+		"json.stringify(inferred)",
+		"json.parse()",
+		"json.stringify()",
+		"base64-encoded-payload",
+		"hex-encoded-payload",
+		"encrypted-field(inferred)":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasMeaningfulCapturedProtocolSignal(trace *ProtocolTraceRecord) bool {
+	if trace == nil {
+		return false
+	}
+	if len(filterMeaningfulCapturedProtocolAlgorithms(trace.Algorithms)) > 0 {
+		return true
+	}
+	for _, step := range append(append([]ProtocolCryptoStep{}, trace.RequestSteps...), trace.ResponseSteps...) {
+		if isMeaningfulCapturedProtocolStep(step) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMeaningfulCapturedProtocolStep(step ProtocolCryptoStep) bool {
+	source := strings.ToLower(strings.TrimSpace(step.Source))
+	algorithm := strings.ToLower(strings.TrimSpace(step.Algorithm))
+	if isIgnorableCapturedProtocolAlgorithm(source) && isIgnorableCapturedProtocolAlgorithm(algorithm) {
+		return false
+	}
+	if strings.Contains(source, "encrypt") || strings.Contains(source, "decrypt") || strings.Contains(source, "sign") {
+		return true
+	}
+	if strings.Contains(algorithm, "encrypt") || strings.Contains(algorithm, "decrypt") || strings.Contains(algorithm, "sign") {
+		return true
+	}
+	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5"} {
+		if strings.Contains(source, token) || strings.Contains(algorithm, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPlaintextOnlyCapturedProtocolEvidence(trace *ProtocolTraceRecord) bool {
+	if trace == nil || len(trace.SessionMaterials) == 0 {
+		return false
+	}
+
+	hasPlaintext := false
+	for key, value := range trace.SessionMaterials {
+		normalizedKey := strings.TrimSpace(key)
+		normalizedValue := strings.TrimSpace(value)
+		if normalizedValue == "" {
+			continue
+		}
+		switch normalizedKey {
+		case "latest_response_plaintext":
+			hasPlaintext = true
+		default:
+			return false
+		}
+	}
+
+	if !hasPlaintext {
+		return false
+	}
+	if len(filterMeaningfulCapturedProtocolAlgorithms(trace.Algorithms)) > 0 {
+		return false
+	}
+	for _, step := range append(append([]ProtocolCryptoStep{}, trace.RequestSteps...), trace.ResponseSteps...) {
+		if isMeaningfulCapturedProtocolStep(step) {
+			return false
+		}
+	}
+	return true
 }
 
 func protocolSessionMaterialLimit(key string) int {
@@ -971,6 +1094,205 @@ const protocolHookScript = `(function () {
     if (isLikelyRawAESKey(raw)) {
       setSessionMaterial("crypto_key_raw", raw);
     }
+  }
+
+  function normalizeDiscoveredRoutePath(value) {
+    if (value == null) {
+      return "";
+    }
+    var raw = String(value || "").trim();
+    if (!raw) {
+      return "";
+    }
+    if (raw === "*" || raw === "/*") {
+      return raw;
+    }
+    if (raw.charAt(0) === "#") {
+      raw = raw.slice(1);
+    }
+    if (raw.indexOf("/#/") >= 0) {
+      raw = raw.slice(raw.indexOf("/#/") + 2);
+    }
+    if (/^https?:\/\//i.test(raw)) {
+      try {
+        var parsed = new URL(raw, window.location.href);
+        if (parsed.hash && parsed.hash.indexOf("#/") === 0) {
+          raw = parsed.hash.slice(1);
+        } else {
+          raw = parsed.pathname || "";
+        }
+      } catch (err) {
+        return "";
+      }
+    } else if (raw.indexOf("#/") >= 0) {
+      raw = raw.slice(raw.indexOf("#/") + 1);
+    }
+    if (!raw) {
+      return "";
+    }
+    if (raw.charAt(0) !== "/") {
+      raw = "/" + raw;
+    }
+    raw = raw.split("?")[0].split("#")[0].trim();
+    if (!raw) {
+      return "";
+    }
+    return raw.replace(/\/{2,}/g, "/");
+  }
+
+  function looksLikeRouteRecord(candidate) {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+    if (typeof candidate.path === "string" && candidate.path.trim()) {
+      return true;
+    }
+    if (candidate.children && typeof candidate.children.length === "number") {
+      return true;
+    }
+    if (candidate.routes && typeof candidate.routes.length === "number") {
+      return true;
+    }
+    return false;
+  }
+
+  function emitFrontendRoute(path, name, sourceKind, source) {
+    var normalizedPath = normalizeDiscoveredRoutePath(path);
+    var normalizedName = String(name || "").trim();
+    if (!normalizedPath) {
+      return;
+    }
+    emitPayload({
+      kind: "frontend-route",
+      path: normalizedPath,
+      name: normalizedName,
+      source_kind: String(sourceKind || ""),
+      source: limitText(String(source || "")),
+      page_url: window.location.href,
+      captured_at_ms: nowMs()
+    });
+  }
+
+  function inspectRouteCandidate(candidate, sourceKind, source, depth) {
+    if (depth > 4 || candidate == null) {
+      return;
+    }
+    if (typeof candidate === "string") {
+      emitFrontendRoute(candidate, "", sourceKind, source);
+      return;
+    }
+    if (typeof candidate.length === "number" && typeof candidate !== "function" && typeof candidate !== "string") {
+      try {
+        Array.prototype.slice.call(candidate, 0, 24).forEach(function (item) {
+          inspectRouteCandidate(item, sourceKind, source, depth + 1);
+        });
+      } catch (err) {}
+      return;
+    }
+    if (typeof candidate !== "object") {
+      return;
+    }
+    if (looksLikeRouteRecord(candidate)) {
+      emitFrontendRoute(candidate.path, candidate.name, sourceKind, source);
+      if (candidate.alias) {
+        inspectRouteCandidate(candidate.alias, sourceKind, source + ".alias", depth + 1);
+      }
+      if (candidate.children) {
+        inspectRouteCandidate(candidate.children, sourceKind, source + ".children", depth + 1);
+      }
+      if (candidate.routes) {
+        inspectRouteCandidate(candidate.routes, sourceKind, source + ".routes", depth + 1);
+      }
+      return;
+    }
+    if (candidate.options && candidate.options.routes) {
+      inspectRouteCandidate(candidate.options.routes, sourceKind, source + ".options.routes", depth + 1);
+      return;
+    }
+    if (candidate.matcher && candidate.matcher.getRoutes && typeof candidate.matcher.getRoutes === "function") {
+      try {
+        inspectRouteCandidate(candidate.matcher.getRoutes(), sourceKind, source + ".matcher.getRoutes()", depth + 1);
+      } catch (err) {}
+    }
+  }
+
+  function hookArrayMutation(methodName) {
+    if (!Array.prototype[methodName] || Array.prototype[methodName].__trailblazerWrapped) {
+      return;
+    }
+    var originalMethod = Array.prototype[methodName];
+    Array.prototype[methodName] = function () {
+      var result = originalMethod.apply(this, arguments);
+      try {
+        var args = Array.prototype.slice.call(arguments);
+        if (methodName === "splice" && args.length > 2) {
+          args = args.slice(2);
+        }
+        inspectRouteCandidate(args, "array-" + methodName, "Array.prototype." + methodName, 0);
+      } catch (err) {}
+      return result;
+    };
+    Array.prototype[methodName].__trailblazerWrapped = true;
+  }
+
+  function hookHistoryRoutes() {
+    if (window.history && typeof window.history.pushState === "function" && !window.history.pushState.__trailblazerWrapped) {
+      var originalPushState = window.history.pushState;
+      window.history.pushState = function (state, title, url) {
+        var result = originalPushState.apply(this, arguments);
+        emitFrontendRoute(url || window.location.href, "", "history-push", "history.pushState");
+        return result;
+      };
+      window.history.pushState.__trailblazerWrapped = true;
+    }
+    if (window.history && typeof window.history.replaceState === "function" && !window.history.replaceState.__trailblazerWrapped) {
+      var originalReplaceState = window.history.replaceState;
+      window.history.replaceState = function (state, title, url) {
+        var result = originalReplaceState.apply(this, arguments);
+        emitFrontendRoute(url || window.location.href, "", "history-replace", "history.replaceState");
+        return result;
+      };
+      window.history.replaceState.__trailblazerWrapped = true;
+    }
+    try {
+      window.addEventListener("hashchange", function () {
+        emitFrontendRoute(window.location.href, "", "hashchange", "window.location.hash");
+      }, true);
+      window.addEventListener("popstate", function () {
+        emitFrontendRoute(window.location.href, "", "popstate", "window.location");
+      }, true);
+    } catch (err) {}
+    emitFrontendRoute(window.location.href, "", "page-load", "window.location");
+  }
+
+  function scanWindowForRoutes() {
+    var names = [];
+    try {
+      names = Object.getOwnPropertyNames(window);
+    } catch (err) {
+      return;
+    }
+    names.slice(0, 400).forEach(function (name) {
+      if (!/(route|router|menu|nav)/i.test(name)) {
+        return;
+      }
+      try {
+        inspectRouteCandidate(window[name], "window-scan", "window." + name, 0);
+      } catch (err) {}
+    });
+    if (window.__INITIAL_STATE__) {
+      inspectRouteCandidate(window.__INITIAL_STATE__, "window-scan", "window.__INITIAL_STATE__", 0);
+    }
+  }
+
+  function hookFrontendRoutes() {
+    hookArrayMutation("push");
+    hookArrayMutation("unshift");
+    hookArrayMutation("splice");
+    hookHistoryRoutes();
+    scanWindowForRoutes();
+    window.setTimeout(scanWindowForRoutes, 1200);
+    window.setTimeout(scanWindowForRoutes, 2600);
   }
 
   function shouldTreatResponseAsText(contentType) {
@@ -2127,6 +2449,7 @@ const protocolHookScript = `(function () {
   hookWebAssembly();
   hookCommonEncodingHelpers();
   hookSensitiveInputCapture();
+  hookFrontendRoutes();
   hookKnownCryptoConstructors();
   scanAndWrapSuspiciousFunctions(window, "window", 2);
   scanWebpackRuntimeCandidates();
@@ -2136,6 +2459,7 @@ const protocolHookScript = `(function () {
     attempts += 1;
     hookCryptoJS();
     hookSensitiveInputCapture();
+    scanWindowForRoutes();
     hookKnownCryptoConstructors();
     scanAndWrapSuspiciousFunctions(window, "window", 2);
     scanWebpackRuntimeCandidates();

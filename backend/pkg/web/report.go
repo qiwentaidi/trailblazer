@@ -81,20 +81,21 @@ type reportSnapshot struct {
 		GeneratedAt  string   `json:"generatedAt"`
 	} `json:"meta"`
 	Summary struct {
-		TotalRisks        int `json:"totalRisks"`
-		HighRisks         int `json:"highRisks"`
-		MediumRisks       int `json:"mediumRisks"`
-		LowRisks          int `json:"lowRisks"`
-		InfoRisks         int `json:"infoRisks"`
-		ClusteredEntries  int `json:"clusteredEntries"`
-		StandaloneEntries int `json:"standaloneEntries"`
-		TotalAssetRows    int `json:"totalAssetRows"`
-		EmailAssets       int `json:"emailAssets"`
-		PhoneAssets       int `json:"phoneAssets"`
-		IDCardAssets      int `json:"idCardAssets"`
-		IPURLAssets       int `json:"ipUrlAssets"`
-		APIRootAssets     int `json:"apiRootAssets"`
-		APIRouterAssets   int `json:"apiRouterAssets"`
+		TotalRisks          int `json:"totalRisks"`
+		HighRisks           int `json:"highRisks"`
+		MediumRisks         int `json:"mediumRisks"`
+		LowRisks            int `json:"lowRisks"`
+		InfoRisks           int `json:"infoRisks"`
+		ClusteredEntries    int `json:"clusteredEntries"`
+		StandaloneEntries   int `json:"standaloneEntries"`
+		TotalAssetRows      int `json:"totalAssetRows"`
+		EmailAssets         int `json:"emailAssets"`
+		PhoneAssets         int `json:"phoneAssets"`
+		IDCardAssets        int `json:"idCardAssets"`
+		IPURLAssets         int `json:"ipUrlAssets"`
+		FrontendRouteAssets int `json:"frontendRouteAssets"`
+		APIRootAssets       int `json:"apiRootAssets"`
+		APIRouterAssets     int `json:"apiRouterAssets"`
 	} `json:"summary"`
 	Risks struct {
 		PageSize int              `json:"pageSize"`
@@ -205,6 +206,7 @@ func buildReportSnapshot(
 		snapshot.Summary.PhoneAssets = len(assets.Phone)
 		snapshot.Summary.IDCardAssets = len(assets.IDCard)
 		snapshot.Summary.IPURLAssets = len(assets.IPURL)
+		snapshot.Summary.FrontendRouteAssets = len(assets.FrontendRoute)
 		snapshot.Summary.APIRootAssets = len(assets.APIRoot)
 		snapshot.Summary.APIRouterAssets = len(assets.APIRouter)
 	}
@@ -340,6 +342,7 @@ func buildReportAssetRows(assets *database.AssetRecord) []reportAssetRow {
 	rows = appendRows(rows, "phone", "手机号", assets.Phone)
 	rows = appendRows(rows, "idCard", "身份证", assets.IDCard)
 	rows = appendRows(rows, "ipUrl", "IP/URL", assets.IPURL)
+	rows = appendRows(rows, "frontendRoute", "前端路由", assets.FrontendRoute)
 	rows = appendRows(rows, "apiRoot", "API Root", assets.APIRoot)
 	rows = appendRows(rows, "apiRouter", "API Router", assets.APIRouter)
 	return rows
@@ -358,6 +361,7 @@ func buildReportAssetRecord(
 		result.Phone = append([]database.AssetValue(nil), base.Phone...)
 		result.IDCard = append([]database.AssetValue(nil), base.IDCard...)
 		result.IPURL = append([]database.AssetValue(nil), base.IPURL...)
+		result.FrontendRoute = append([]database.AssetValue(nil), base.FrontendRoute...)
 		result.APIRoot = append([]database.AssetValue(nil), base.APIRoot...)
 		result.APIRouter = append([]database.AssetValue(nil), base.APIRouter...)
 	}
@@ -366,6 +370,7 @@ func buildReportAssetRecord(
 	}
 
 	ipURLSources := make(map[string][]string)
+	frontendRouteSources := make(map[string][]string)
 	apiRouteSources := make(map[string][]string)
 	apiRootSources := make(map[string][]string)
 
@@ -374,11 +379,22 @@ func buildReportAssetRecord(
 		if value == "" {
 			return
 		}
-		target[value] = uniqueStrings(append(target[value], sources...))
+
+		normalizedSources := make([]string, 0, len(sources))
+		for _, source := range sources {
+			if normalized := normalizeAssetSourceReference(source); normalized != "" {
+				normalizedSources = append(normalizedSources, normalized)
+			}
+		}
+
+		target[value] = uniqueStrings(append(target[value], normalizedSources...))
 	}
 
 	for _, item := range result.IPURL {
 		appendSource(ipURLSources, item.Value, item.Source...)
+	}
+	for _, item := range result.FrontendRoute {
+		appendSource(frontendRouteSources, item.Value, item.Source...)
 	}
 	for _, item := range result.APIRouter {
 		appendSource(apiRouteSources, item.Value, item.Source...)
@@ -392,23 +408,15 @@ func buildReportAssetRecord(
 		if normalizedURL == "" {
 			continue
 		}
-		source := "站点树"
-		if strings.TrimSpace(node.Label) != "" {
-			source = "站点树 · " + node.Label
-		}
-		appendSource(ipURLSources, normalizedURL, source)
+		appendSource(ipURLSources, normalizedURL, normalizedURL)
 	}
 
 	for _, vuln := range vulns {
-		normalizedURL := normalizeAbsoluteURL(vuln.URL)
-		if normalizedURL == "" {
+		source := normalizeAssetSourceReference(vuln.URL)
+		if source == "" {
 			continue
 		}
-		source := "风险"
-		if strings.TrimSpace(vuln.Title) != "" {
-			source = "风险 · " + vuln.Title
-		}
-		appendSource(ipURLSources, normalizedURL, source)
+		appendSource(ipURLSources, source, source)
 	}
 
 	for value, sources := range ipURLSources {
@@ -424,6 +432,7 @@ func buildReportAssetRecord(
 	}
 
 	result.IPURL = sourceMapToAssetValues(ipURLSources)
+	result.FrontendRoute = sourceMapToAssetValues(frontendRouteSources)
 	result.APIRouter = sourceMapToAssetValues(apiRouteSources)
 	result.APIRoot = sourceMapToAssetValues(apiRootSources)
 	return result
@@ -451,6 +460,19 @@ func normalizeAbsoluteURL(raw string) string {
 	}
 	parsed.Fragment = ""
 	return parsed.String()
+}
+
+func normalizeAssetSourceReference(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(trimmed, "sourceMap/") {
+		return trimmed
+	}
+
+	return normalizeAbsoluteURL(trimmed)
 }
 
 func normalizeAPIRoute(absoluteURL string) string {
@@ -674,7 +696,7 @@ func buildReportHTML(snapshot reportSnapshot) (string, error) {
         <div class="card"><div class="label">聚合簇 / 单条风险</div><div class="value">%d / %d</div></div>
         <div class="card"><div class="label">资产条目数</div><div class="value">%d</div></div>
         <div class="card"><div class="label">邮箱 / 手机 / 身份证</div><div class="value">%d / %d / %d</div></div>
-        <div class="card"><div class="label">IP/URL / API Root / API Router</div><div class="value">%d / %d / %d</div></div>
+        <div class="card"><div class="label">IP/URL / 前端路由 / API Root / API Router</div><div class="value">%d / %d / %d / %d</div></div>
       </div>
     </section>
     <section class="section"><div class="panel">
@@ -886,6 +908,7 @@ func buildReportHTML(snapshot reportSnapshot) (string, error) {
 		snapshot.Summary.PhoneAssets,
 		snapshot.Summary.IDCardAssets,
 		snapshot.Summary.IPURLAssets,
+		snapshot.Summary.FrontendRouteAssets,
 		snapshot.Summary.APIRootAssets,
 		snapshot.Summary.APIRouterAssets,
 		reportJSON,

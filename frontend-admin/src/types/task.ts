@@ -191,6 +191,16 @@ export interface TreeNode {
   headers?: Record<string, string>;
 }
 
+export interface TaskTreeData {
+  data: TreeNode[];
+  nodeCount?: number;
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  keyword?: string;
+  totalNodeCount?: number;
+}
+
 export interface AssetData {
   taskId: string;
   taskName: string;
@@ -326,9 +336,27 @@ export interface StaticProtocolProfile {
   evidence?: StaticProtocolEvidence[];
 }
 
+export interface StaticAPIContext {
+  url: string;
+  method: string;
+  source_file: string;
+  snippet: string;
+  param_carrier?: string;
+  param_preview?: string;
+  params?: Array<{
+    name: string;
+    value?: string;
+  }>;
+  trace_id?: string;
+  has_protocol_trace?: boolean;
+  request_headers?: Record<string, string>;
+  request_body?: string;
+}
+
 export interface StaticProtocolAnalysis {
   task_id: string;
   js_count: number;
   generated_at?: string;
   profiles: StaticProtocolProfile[];
+  api_contexts?: StaticAPIContext[];
 }

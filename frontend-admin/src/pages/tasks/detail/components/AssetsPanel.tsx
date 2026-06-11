@@ -1,4 +1,4 @@
-import { Card, Empty, Input, Select, Space, Table, Typography } from 'antd';
+import { Card, Empty, Input, Select, Space, Table, Tooltip, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 
 import type { AssetData } from '@/types/task';
@@ -25,6 +25,7 @@ type AssetRow = {
   typeLabel: string;
   value: string;
   source: string;
+  sources: string[];
 };
 
 const DEFAULT_PAGE_SIZE = 10;
@@ -38,6 +39,7 @@ const toAssetRows = (
       type,
       typeLabel: ASSET_TYPE_LABELS[type],
       value: item.value,
+      sources: item.sources,
       source: item.sources.join('\n'),
     })),
   );
@@ -126,6 +128,8 @@ export default function AssetsPanel({ assets }: Props) {
           rowKey="key"
           size="small"
           dataSource={filteredRows}
+          tableLayout="fixed"
+          scroll={{ x: 980 }}
           pagination={{
             current: page,
             pageSize,
@@ -148,41 +152,52 @@ export default function AssetsPanel({ assets }: Props) {
             {
               title: '内容',
               dataIndex: 'value',
+              width: '48%',
               ellipsis: false,
               render: (value: string) => (
-                <Typography.Text
-                  style={{
-                    display: 'block',
-                    maxWidth: '100%',
-                    minWidth: '0',
-                    wordBreak: 'break-word',
-                    overflowWrap: 'anywhere',
-                    whiteSpace: 'normal',
-                  }}
-                >
-                  {value}
-                </Typography.Text>
+                <div style={{ minWidth: 0, width: '100%', overflow: 'hidden' }}>
+                  <Tooltip title={value}>
+                    <Typography.Text
+                      style={{
+                        display: 'block',
+                        maxWidth: '100%',
+                        minWidth: '0',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {value}
+                    </Typography.Text>
+                  </Tooltip>
+                </div>
               ),
             },
             {
               title: '来源',
               dataIndex: 'source',
-              width: 280,
+              width: '32%',
               ellipsis: false,
-              render: (value: string) =>
-                value ? (
-                  <Typography.Text
-                    style={{
-                      display: 'block',
-                      maxWidth: '100%',
-                      minWidth: '0',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      overflowWrap: 'anywhere',
-                    }}
-                  >
-                    {value}
-                  </Typography.Text>
+              render: (_: string, row) =>
+                row.sources.length ? (
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {row.sources.map((source, index) => (
+                      <Tooltip key={`${row.key}-source-${index}`} title={source}>
+                        <Typography.Text
+                          style={{
+                            display: 'block',
+                            maxWidth: '100%',
+                            minWidth: '0',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
+                        >
+                          {source}
+                        </Typography.Text>
+                      </Tooltip>
+                    ))}
+                  </div>
                 ) : (
                   <Typography.Text type="secondary">-</Typography.Text>
                 ),

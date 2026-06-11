@@ -33,6 +33,21 @@ func versionArgs(version *int) []int {
 	return []int{*version}
 }
 
+func parsePositiveIntQuery(c *gin.Context, key string, fallback int) (int, bool) {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return fallback, true
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		c.JSON(400, gin.H{"error": fmt.Sprintf("invalid %s", key)})
+		return 0, false
+	}
+
+	return value, true
+}
+
 // getTaskDetail 获取任务详情
 func getTaskDetail(c *gin.Context) {
 	taskID := c.Param("taskId")
@@ -57,18 +72,35 @@ func getTaskTree(c *gin.Context) {
 	if !ok {
 		return
 	}
+	page, ok := parsePositiveIntQuery(c, "page", 1)
+	if !ok {
+		return
+	}
+	pageSize, ok := parsePositiveIntQuery(c, "pageSize", 20)
+	if !ok {
+		return
+	}
+	keyword := strings.TrimSpace(c.Query("keyword"))
 
 	if database.ESClient == nil {
 		c.JSON(500, gin.H{"error": "ES client not initialized"})
 		return
 	}
 
-	nodes, err := database.QuerySiteTreeByTaskID(taskID, versionArgs(version)...)
+	result, err := database.QuerySiteTreePage(taskID, page, pageSize, keyword, versionArgs(version)...)
 	if err != nil {
 		// 如果是索引不存在或连接问题，返回空树而不是错误
 		if strings.Contains(err.Error(), "index_not_found_exception") ||
 			strings.Contains(err.Error(), "connection") {
-			c.JSON(200, gin.H{"data": []interface{}{}, "nodeCount": 0})
+			c.JSON(200, gin.H{
+				"data":           []interface{}{},
+				"nodeCount":      0,
+				"total":          0,
+				"page":           page,
+				"pageSize":       pageSize,
+				"keyword":        keyword,
+				"totalNodeCount": 0,
+			})
 			return
 		}
 		c.JSON(500, gin.H{"error": "failed to query tree", "detail": err.Error()})
@@ -76,9 +108,17 @@ func getTaskTree(c *gin.Context) {
 	}
 
 	// 将扁平的节点列表重建为树形结构
-	treeData := rebuildTreeWithURLs(nodes)
+	treeData := rebuildTreeWithURLs(result.Nodes)
 
-	c.JSON(200, gin.H{"data": treeData, "nodeCount": len(nodes)})
+	c.JSON(200, gin.H{
+		"data":           treeData,
+		"nodeCount":      result.TotalNodeCount,
+		"total":          result.Total,
+		"page":           result.Page,
+		"pageSize":       result.PageSize,
+		"keyword":        result.Keyword,
+		"totalNodeCount": result.TotalNodeCount,
+	})
 }
 
 // getTaskSiteMap 获取任务的统一站点树，包含网站树节点和接口请求叶子节点
@@ -229,6 +269,11 @@ func getTaskAssets(c *gin.Context) {
 		return
 	}
 
+	var taskRecord *database.TaskRecord
+	if task, taskErr := database.QueryTaskByID(taskID, versionArgs(version)...); taskErr == nil && task != nil {
+		taskRecord = task
+	}
+
 	// 从ES查询资产数据
 	assets, err := database.QueryAssetsByTaskID(taskID, versionArgs(version)...)
 	if err != nil {
@@ -238,30 +283,32 @@ func getTaskAssets(c *gin.Context) {
 			strings.Contains(err.Error(), "connection") {
 			// 返回空的资产数据
 			result := map[string]interface{}{
-				"taskId":    taskID,
-				"taskName":  "",
-				"email":     []database.AssetValue{},
-				"idCard":    []database.AssetValue{},
-				"phone":     []database.AssetValue{},
-				"ipUrl":     []database.AssetValue{},
-				"apiRoot":   []database.AssetValue{},
-				"apiRouter": []database.AssetValue{},
-				"createdAt": "",
+				"taskId":        taskID,
+				"taskName":      "",
+				"email":         []database.AssetValue{},
+				"idCard":        []database.AssetValue{},
+				"phone":         []database.AssetValue{},
+				"ipUrl":         []database.AssetValue{},
+				"frontendRoute": []database.AssetValue{},
+				"apiRoot":       []database.AssetValue{},
+				"apiRouter":     []database.AssetValue{},
+				"createdAt":     "",
 			}
 			c.JSON(200, gin.H{"data": result})
 			return
 		}
 		if strings.Contains(err.Error(), "assets not found") {
 			c.JSON(200, gin.H{"data": map[string]interface{}{
-				"taskId":    taskID,
-				"taskName":  "",
-				"email":     []database.AssetValue{},
-				"idCard":    []database.AssetValue{},
-				"phone":     []database.AssetValue{},
-				"ipUrl":     []database.AssetValue{},
-				"apiRoot":   []database.AssetValue{},
-				"apiRouter": []database.AssetValue{},
-				"createdAt": "",
+				"taskId":        taskID,
+				"taskName":      "",
+				"email":         []database.AssetValue{},
+				"idCard":        []database.AssetValue{},
+				"phone":         []database.AssetValue{},
+				"ipUrl":         []database.AssetValue{},
+				"frontendRoute": []database.AssetValue{},
+				"apiRoot":       []database.AssetValue{},
+				"apiRouter":     []database.AssetValue{},
+				"createdAt":     "",
 			}})
 			return
 		}
@@ -269,22 +316,43 @@ func getTaskAssets(c *gin.Context) {
 		return
 	}
 
+	treeNodes, treeErr := database.QuerySiteTreeByTaskID(taskID, versionArgs(version)...)
+	if treeErr != nil && !reportCanIgnoreError(treeErr) {
+		c.JSON(500, gin.H{"error": "failed to query tree", "detail": treeErr.Error()})
+		return
+	}
+	if reportCanIgnoreError(treeErr) {
+		treeNodes = nil
+	}
+
+	vulns, vulnErr := database.QueryVulnsByTaskID(taskID, versionArgs(version)...)
+	if vulnErr != nil && !reportCanIgnoreError(vulnErr) {
+		c.JSON(500, gin.H{"error": "failed to query vulns", "detail": vulnErr.Error()})
+		return
+	}
+	if reportCanIgnoreError(vulnErr) {
+		vulns = nil
+	}
+
+	assets = buildReportAssetRecord(taskRecord, assets, treeNodes, vulns)
+
 	taskName := ""
-	if task, taskErr := database.QueryTaskByID(taskID, versionArgs(version)...); taskErr == nil && task != nil {
-		taskName = task.TaskName
+	if taskRecord != nil {
+		taskName = taskRecord.TaskName
 	}
 
 	// 构建响应数据
 	result := map[string]interface{}{
-		"taskId":    taskID,
-		"taskName":  taskName,
-		"email":     assets.Email,
-		"idCard":    assets.IDCard,
-		"phone":     assets.Phone,
-		"ipUrl":     assets.IPURL,
-		"apiRoot":   assets.APIRoot,
-		"apiRouter": assets.APIRouter,
-		"createdAt": assets.CreatedAt,
+		"taskId":        taskID,
+		"taskName":      taskName,
+		"email":         assets.Email,
+		"idCard":        assets.IDCard,
+		"phone":         assets.Phone,
+		"ipUrl":         assets.IPURL,
+		"frontendRoute": assets.FrontendRoute,
+		"apiRoot":       assets.APIRoot,
+		"apiRouter":     assets.APIRouter,
+		"createdAt":     assets.CreatedAt,
 	}
 
 	c.JSON(200, gin.H{"data": result})
@@ -361,29 +429,95 @@ func rebuildTreeWithURLs(nodes []database.SiteTreeNode) []TreeNode {
 		return []TreeNode{}
 	}
 
-	// 如果只有一个URL，直接使用原来的重建逻辑
-	urlGroups := make(map[string][]database.SiteTreeNode)
-	for _, node := range nodes {
-		// 从NodeID中提取URL标识符
-		urlIdentifier := extractURLIdentifier(node.NodeID)
-		urlGroups[urlIdentifier] = append(urlGroups[urlIdentifier], node)
-	}
+	nodeMap := make(map[string]*TreeNode, len(nodes))
+	childrenMap := make(map[string][]string)
+	rootIDs := make([]string, 0)
+	rootSeen := make(map[string]struct{})
+	childSeen := make(map[string]struct{})
 
-	// 如果只有一个URL组，直接重建
-	if len(urlGroups) == 1 {
-		for urlIdentifier, urlNodes := range urlGroups {
-			return rebuildTreeForURL(urlIdentifier, urlNodes)
+	for i := range nodes {
+		node := &nodes[i]
+		nodeID := strings.TrimSpace(node.NodeID)
+		if nodeID == "" {
+			continue
+		}
+
+		nodeMap[nodeID] = &TreeNode{
+			ID:       nodeID,
+			Label:    node.Label,
+			URL:      node.URL,
+			Children: make([]TreeNode, 0),
 		}
 	}
 
-	// 多个URL时，为每个URL创建独立的树
-	var result []TreeNode
-	for urlIdentifier, urlNodes := range urlGroups {
-		// 为每个URL创建独立的树
-		tree := rebuildTreeForURL(urlIdentifier, urlNodes)
-		result = append(result, tree...)
+	for i := range nodes {
+		node := &nodes[i]
+		nodeID := strings.TrimSpace(node.NodeID)
+		if nodeID == "" {
+			continue
+		}
+
+		parentID := normalizeSiteTreeParentID(node.NodeID, node.ParentID)
+		if parentID == "" || parentID == "0" {
+			if _, ok := rootSeen[nodeID]; ok {
+				continue
+			}
+			rootSeen[nodeID] = struct{}{}
+			rootIDs = append(rootIDs, nodeID)
+			continue
+		}
+
+		edgeKey := parentID + "\x00" + nodeID
+		if _, ok := childSeen[edgeKey]; ok {
+			continue
+		}
+		childSeen[edgeKey] = struct{}{}
+		childrenMap[parentID] = append(childrenMap[parentID], nodeID)
 	}
+
+	var buildChildren func(nodeID string) []TreeNode
+	buildChildren = func(nodeID string) []TreeNode {
+		children := make([]TreeNode, 0, len(childrenMap[nodeID]))
+		for _, childID := range childrenMap[nodeID] {
+			childNode, ok := nodeMap[childID]
+			if !ok {
+				continue
+			}
+			childNode.Children = buildChildren(childID)
+			children = append(children, *childNode)
+		}
+		return children
+	}
+
+	result := make([]TreeNode, 0, len(rootIDs))
+	for _, rootID := range rootIDs {
+		root, ok := nodeMap[rootID]
+		if !ok {
+			continue
+		}
+		root.Children = buildChildren(rootID)
+		result = append(result, *root)
+	}
+
 	return result
+}
+
+func normalizeSiteTreeParentID(nodeID, parentID string) string {
+	normalizedParentID := strings.TrimSpace(parentID)
+	if normalizedParentID == "" || normalizedParentID == "0" {
+		return normalizedParentID
+	}
+
+	if strings.Contains(normalizedParentID, "_") {
+		return normalizedParentID
+	}
+
+	urlIdentifier := extractURLIdentifier(strings.TrimSpace(nodeID))
+	if urlIdentifier == "" || urlIdentifier == "unknown" {
+		return normalizedParentID
+	}
+
+	return urlIdentifier + "_" + normalizedParentID
 }
 
 // extractURLIdentifier 从NodeID中提取URL标识符
@@ -922,7 +1056,9 @@ func getTasks(c *gin.Context) {
 		versionCount = len(versions)
 
 		if latestVersion != nil {
-			highestRiskLevel = latestVersion.HighestRiskLevel
+			if strings.TrimSpace(latestVersion.HighestRiskLevel) != "" {
+				highestRiskLevel = latestVersion.HighestRiskLevel
+			}
 			latestVersionNumber = latestVersion.Version
 			latestStatus = latestVersion.Status
 			latestProgress = latestVersion.Progress

@@ -65,6 +65,49 @@ func TestExtractTraceMatchedEndpointsDeduplicatesSameMethodAndPath(t *testing.T)
 	}
 }
 
+func TestBuildStaticAPIContextsMatchesJSCapturedSnippets(t *testing.T) {
+	apiResources := []database.APIResource{
+		{
+			URL:              "https://example.com/api/poc/sync-setting",
+			Method:           "post",
+			TraceID:          "trace-1",
+			HasProtocolTrace: true,
+			RequestBody:      `{"enable":true}`,
+			RequestHeaders: map[string]string{
+				"Content-Type": "application/json",
+			},
+		},
+	}
+	jsResources := []database.JSResource{
+		{
+			URL: "https://example.com/assets/index.js",
+			Content: `
+const submit=()=>request.post("/api/poc/sync-setting",{enable:true,scope:"all"});
+`,
+		},
+	}
+
+	contexts := buildStaticAPIContexts(apiResources, jsResources)
+	if len(contexts) != 1 {
+		t.Fatalf("expected 1 matched context, got %#v", contexts)
+	}
+	if contexts[0].Method != "POST" {
+		t.Fatalf("expected method to normalize to POST, got %q", contexts[0].Method)
+	}
+	if contexts[0].SourceFile != "https://example.com/assets/index.js" {
+		t.Fatalf("unexpected source file: %q", contexts[0].SourceFile)
+	}
+	if !strings.Contains(contexts[0].Snippet, "/api/poc/sync-setting") {
+		t.Fatalf("expected snippet to contain matched path, got %q", contexts[0].Snippet)
+	}
+	if contexts[0].RequestBody != `{"enable":true}` {
+		t.Fatalf("expected request body to be preserved, got %q", contexts[0].RequestBody)
+	}
+	if contexts[0].RequestHeaders["Content-Type"] != "application/json" {
+		t.Fatalf("expected request headers to be preserved, got %#v", contexts[0].RequestHeaders)
+	}
+}
+
 func TestSelectPrimaryTraceEndpointPrefersMostCompleteTrace(t *testing.T) {
 	endpoints := []StaticProtocolEndpoint{
 		{

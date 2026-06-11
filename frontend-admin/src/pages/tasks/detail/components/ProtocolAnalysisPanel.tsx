@@ -22,6 +22,7 @@ import remarkGfm from 'remark-gfm';
 import { explainProtocolTraceStream } from '@/services/tasks';
 import type {
   ProtocolTrace,
+  StaticAPIContext,
   StaticProtocolAnalysis,
   StaticProtocolEndpoint,
   StaticProtocolProfile,
@@ -731,6 +732,40 @@ const renderStaticProfile = (profile: StaticProtocolProfile) => (
   </div>
 );
 
+const renderAPIContext = (context: StaticAPIContext) => (
+  <div style={{ display: 'grid', gap: 16 }}>
+    <Descriptions bordered size="small" column={1}>
+      <Descriptions.Item label="请求地址">
+        {renderWrappingText(context.url, '-')}
+      </Descriptions.Item>
+      <Descriptions.Item label="来源文件">
+        {renderWrappingText(context.source_file, '-')}
+      </Descriptions.Item>
+      {context.trace_id ? (
+        <Descriptions.Item label="轨迹 ID">
+          {context.trace_id}
+        </Descriptions.Item>
+      ) : null}
+      {context.param_preview || context.request_body ? (
+        <Descriptions.Item label="参数内容">
+          {renderSnippet(context.param_preview || context.request_body)}
+        </Descriptions.Item>
+      ) : null}
+      {context.request_headers &&
+      Object.keys(context.request_headers).length > 0 ? (
+        <Descriptions.Item label="运行时请求头">
+          {renderKeyValueTags(context.request_headers, {
+            maxHeight: 160,
+          })}
+        </Descriptions.Item>
+      ) : null}
+      <Descriptions.Item label="JS 命中片段">
+        {renderSnippet(context.snippet)}
+      </Descriptions.Item>
+    </Descriptions>
+  </div>
+);
+
 export default function ProtocolAnalysisPanel({
   taskId,
   version,
@@ -808,6 +843,7 @@ export default function ProtocolAnalysisPanel({
   }
 
   const staticProfiles = staticAnalysis?.profiles || [];
+  const apiContexts = staticAnalysis?.api_contexts || [];
   const hiddenPlaintextOnlyCount = Math.max(0, traces.length - filteredTraces.length);
   const traceGroups = groupProtocolTracesByAlgorithms(filteredTraces);
   const selectedTrace =
@@ -908,7 +944,7 @@ export default function ProtocolAnalysisPanel({
     }
   };
 
-  if (!traces.length && !staticProfiles.length) {
+  if (!traces.length && !staticProfiles.length && !apiContexts.length) {
     return (
       <Card>
         <Empty description="当前任务暂无协议链路或静态分析结果" />
@@ -1063,6 +1099,37 @@ export default function ProtocolAnalysisPanel({
           />
         ) : (
           <Empty description="暂无协议轨迹" />
+        )}
+      </Card>
+
+      <Card
+        title="JS 接口上下文"
+        extra={
+          <Space>
+            <Tag>{`命中 ${apiContexts.length}`}</Tag>
+          </Space>
+        }
+      >
+        {apiContexts.length ? (
+          <Collapse
+            items={apiContexts.map((context, index) => ({
+              key: `${context.method}-${context.url}-${context.source_file}-${index}`,
+              label: (
+                <Space wrap>
+                  <Tag color="blue">{context.method || 'GET'}</Tag>
+                  <Typography.Text strong>
+                    {context.url || '未命名接口'}
+                  </Typography.Text>
+                  {context.trace_id || context.has_protocol_trace ? (
+                    <Tag color="gold">已关联轨迹</Tag>
+                  ) : null}
+                </Space>
+              ),
+              children: renderAPIContext(context),
+            }))}
+          />
+        ) : (
+          <Empty description="暂无 JS 接口上下文命中" />
         )}
       </Card>
 

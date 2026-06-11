@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,9 @@ import (
 const (
 	maxCapturedRequestBodySize  = 16 * 1024
 	maxCapturedResponseBodySize = 128 * 1024
+	defaultScanInitialWait      = 10 * time.Second
+	defaultScanPostWait         = 8 * time.Second
+	defaultScanTimeout          = 120 * time.Second
 )
 
 // NetworkRecord 表示浏览器运行时捕获到的接口请求/响应记录
@@ -27,6 +31,7 @@ type NetworkRecord struct {
 	URL              string            `json:"url"`
 	Method           string            `json:"method"`
 	ResourceType     string            `json:"resource_type"`
+	PageURL          string            `json:"page_url,omitempty"`
 	TraceID          string            `json:"trace_id,omitempty"`
 	HasProtocolTrace bool              `json:"has_protocol_trace,omitempty"`
 	RequestHeaders   map[string]string `json:"request_headers,omitempty"`
@@ -38,11 +43,22 @@ type NetworkRecord struct {
 	FetchedAt        time.Time         `json:"fetched_at"`
 }
 
+// FrontendRouteRecord 表示浏览器运行时捕获到的前端页面路由记录。
+type FrontendRouteRecord struct {
+	Path         string    `json:"path"`
+	Name         string    `json:"name,omitempty"`
+	SourceKind   string    `json:"source_kind,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	PageURL      string    `json:"page_url,omitempty"`
+	DiscoveredAt time.Time `json:"discovered_at"`
+}
+
 // CaptureSnapshot 表示动态采集过程中的一次增量快照。
 type CaptureSnapshot struct {
 	NetworkURLs    []string              `json:"network_urls"`
 	APIRecords     []NetworkRecord       `json:"api_records"`
 	ProtocolTraces []ProtocolTraceRecord `json:"protocol_traces"`
+	FrontendRoutes []FrontendRouteRecord `json:"frontend_routes"`
 	CapturedAt     time.Time             `json:"captured_at"`
 }
 
@@ -57,6 +73,10 @@ type CaptureOptions struct {
 	AutoTriggerForms      bool
 	AutoTriggerAttempts   int
 	AutoTriggerRetryDelay time.Duration
+	AutoExploreRoutes     bool
+	MaxExploreRoutes      int
+	MaxRouteClicks        int
+	RouteInteractionWait  time.Duration
 	NativeFormTrigger     bool
 	UsernameSelector      string
 	PasswordSelector      string
@@ -68,22 +88,37 @@ type CaptureOptions struct {
 
 // 动态捕获网站访问时加载的所有链接
 func CaptureNetworkURLs(url string) []string {
-	networks, _, _ := CaptureNetworkActivity(url)
+	networks, _, _, _ := CaptureNetworkActivity(url)
 	return networks
 }
 
-// CaptureNetworkActivity 捕获页面加载过程中的网络链接和接口请求/响应记录
-func CaptureNetworkActivity(url string) ([]string, []NetworkRecord, []ProtocolTraceRecord) {
-	return CaptureNetworkActivityWithOptions(url, CaptureOptions{})
+func defaultScanCaptureOptions() CaptureOptions {
+	return CaptureOptions{
+		Timeout:              defaultScanTimeout,
+		InitialWait:          defaultScanInitialWait,
+		PostInteractionWait:  defaultScanPostWait,
+		AutoExploreRoutes:    true,
+		MaxExploreRoutes:     8,
+		MaxRouteClicks:       8,
+		RouteInteractionWait: 2 * time.Second,
+	}
+}
+
+// CaptureNetworkActivity 捕获页面加载过程中的网络链接和接口请求/响应记录。
+// 该默认入口用于常规扫描，会在有限时间内自动结束；需要手动控制会话生命周期时
+// 应直接调用 CaptureNetworkActivityWithOptions 并显式传入 options。
+func CaptureNetworkActivity(url string) ([]string, []NetworkRecord, []ProtocolTraceRecord, []FrontendRouteRecord) {
+	return CaptureNetworkActivityWithOptions(url, defaultScanCaptureOptions())
 }
 
 // CaptureNetworkActivityWithOptions 捕获页面加载和可选交互过程中的网络链接、接口请求/响应记录。
-func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]string, []NetworkRecord, []ProtocolTraceRecord) {
+func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]string, []NetworkRecord, []ProtocolTraceRecord, []FrontendRouteRecord) {
 	options = normalizeCaptureOptions(options)
 
 	var networks []string
 	var apiRecords []NetworkRecord
 	var protocolTraces []ProtocolTraceRecord
+	var frontendRoutes []FrontendRouteRecord
 	allocOpts := buildExecAllocatorOptions(options)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)
 	defer allocCancel()
@@ -99,6 +134,7 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 	linkSet := make(map[string]bool)
 	apiRecordSet := make(map[string]bool)
 	protocolTraceIndex := make(map[string]int)
+	frontendRouteIndex := make(map[string]int)
 	requestMap := make(map[network.RequestID]*NetworkRecord)
 	finalizedRequest := make(map[network.RequestID]bool)
 	var mu sync.Mutex
@@ -114,17 +150,22 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 			var payload struct {
 				Kind string `json:"kind"`
 				ProtocolTraceRecord
+				FrontendRouteRecord
 			}
 			if err := json.Unmarshal([]byte(ev.Payload), &payload); err != nil {
 				return
 			}
-			if payload.Kind != "request-trace" && payload.Kind != "response-trace" && payload.Kind != "trace-update" {
+			if payload.Kind != "request-trace" && payload.Kind != "response-trace" && payload.Kind != "trace-update" && payload.Kind != "frontend-route" {
 				return
 			}
 
 			mu.Lock()
-			upsertProtocolTraceRecord(protocolTraceIndex, &protocolTraces, payload.ProtocolTraceRecord)
-			emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
+			if payload.Kind == "frontend-route" {
+				upsertFrontendRouteRecord(frontendRouteIndex, &frontendRoutes, payload.FrontendRouteRecord)
+			} else {
+				upsertProtocolTraceRecord(protocolTraceIndex, &protocolTraces, payload.ProtocolTraceRecord)
+			}
+			emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces, frontendRoutes)
 			mu.Unlock()
 
 		case *network.EventRequestWillBeSent:
@@ -137,6 +178,7 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 				URL:            ev.Request.URL,
 				Method:         ev.Request.Method,
 				ResourceType:   string(ev.Type),
+				PageURL:        ev.DocumentURL,
 				RequestHeaders: stringifyHeaders(ev.Request.Headers),
 				FetchedAt:      time.Now(),
 			}
@@ -163,6 +205,9 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 			}
 			record.URL = ev.Response.URL
 			record.ResourceType = ev.Type.String()
+			if strings.TrimSpace(record.PageURL) == "" {
+				record.PageURL = ev.Response.URL
+			}
 			record.ResponseCode = int(ev.Response.Status)
 			record.ResponseHeaders = stringifyHeaders(ev.Response.Headers)
 			record.MIMEType = ev.Response.MimeType
@@ -214,7 +259,7 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 
 				appendAPIRecord(apiRecordSet, &apiRecords, record)
 				finalizedRequest[requestID] = true
-				emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
+				emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces, frontendRoutes)
 			}(ev.RequestID)
 
 		case *network.EventLoadingFailed:
@@ -228,7 +273,7 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 
 			appendAPIRecord(apiRecordSet, &apiRecords, record)
 			finalizedRequest[ev.RequestID] = true
-			emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
+			emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces, frontendRoutes)
 		}
 	})
 
@@ -248,6 +293,13 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 	} else if options.AutoTriggerForms {
 		actions = append(actions, autoTriggerFormsAction(options))
 	}
+	if options.AutoExploreRoutes {
+		actions = append(actions, frontendRouteInteractionAction(url, options, func() []FrontendRouteRecord {
+			mu.Lock()
+			defer mu.Unlock()
+			return cloneFrontendRouteRecords(frontendRoutes)
+		}))
+	}
 	if options.PostInteractionWait > 0 {
 		actions = append(actions, chromedp.Sleep(options.PostInteractionWait))
 	} else {
@@ -258,18 +310,18 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 	wg.Wait()
 	backfillProtocolTraceResponsesFromAPIRecords(protocolTraces, apiRecords)
 	linkAPIRecordsToProtocolTraces(apiRecords, protocolTraces)
-	emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces)
+	emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces, frontendRoutes)
 
 	if err != nil {
 		if isExpectedCaptureCancellation(err) {
-			fmt.Printf("[INFO] %s 动态捕获已结束，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹, 结束原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), err)
-			return networks, apiRecords, protocolTraces
+			fmt.Printf("[INFO] %s 动态捕获已结束，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹、%d 条前端路由, 结束原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes), err)
+			return networks, apiRecords, protocolTraces, frontendRoutes
 		}
-		fmt.Printf("[ERROR] %s 动态捕获网络请求失败，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹, 错误原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), err)
-		return networks, apiRecords, protocolTraces
+		fmt.Printf("[ERROR] %s 动态捕获网络请求失败，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹、%d 条前端路由, 错误原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes), err)
+		return networks, apiRecords, protocolTraces, frontendRoutes
 	}
-	fmt.Printf("[INFO] %s 成功捕获 %d 个网络请求，提取 %d 条接口记录、%d 条协议轨迹\n", url, len(networks), len(apiRecords), len(protocolTraces))
-	return networks, apiRecords, protocolTraces
+	fmt.Printf("[INFO] %s 成功捕获 %d 个网络请求，提取 %d 条接口记录、%d 条协议轨迹、%d 条前端路由\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes))
+	return networks, apiRecords, protocolTraces, frontendRoutes
 }
 
 func isExpectedCaptureCancellation(err error) bool {
@@ -279,7 +331,7 @@ func isExpectedCaptureCancellation(err error) bool {
 	return errors.Is(err, context.Canceled) || strings.Contains(strings.ToLower(err.Error()), "context canceled")
 }
 
-func emitCaptureUpdateLocked(callback func(CaptureSnapshot), networks []string, apiRecords []NetworkRecord, protocolTraces []ProtocolTraceRecord) {
+func emitCaptureUpdateLocked(callback func(CaptureSnapshot), networks []string, apiRecords []NetworkRecord, protocolTraces []ProtocolTraceRecord, frontendRoutes []FrontendRouteRecord) {
 	if callback == nil {
 		return
 	}
@@ -288,6 +340,7 @@ func emitCaptureUpdateLocked(callback func(CaptureSnapshot), networks []string, 
 		NetworkURLs:    append([]string(nil), networks...),
 		APIRecords:     cloneNetworkRecords(apiRecords),
 		ProtocolTraces: cloneProtocolTraceRecords(protocolTraces),
+		FrontendRoutes: cloneFrontendRouteRecords(frontendRoutes),
 		CapturedAt:     time.Now(),
 	}
 	callback(snapshot)
@@ -316,6 +369,14 @@ func cloneProtocolTraceRecords(records []ProtocolTraceRecord) []ProtocolTraceRec
 		next.ResponseSteps = append([]ProtocolCryptoStep(nil), record.ResponseSteps...)
 		next.Algorithms = append([]string(nil), record.Algorithms...)
 		cloned = append(cloned, next)
+	}
+	return cloned
+}
+
+func cloneFrontendRouteRecords(records []FrontendRouteRecord) []FrontendRouteRecord {
+	cloned := make([]FrontendRouteRecord, 0, len(records))
+	for _, record := range records {
+		cloned = append(cloned, record)
 	}
 	return cloned
 }
@@ -381,9 +442,18 @@ func normalizeCaptureOptions(options CaptureOptions) CaptureOptions {
 		}
 		return options
 	}
+	if options.MaxExploreRoutes <= 0 {
+		options.MaxExploreRoutes = 8
+	}
+	if options.MaxRouteClicks <= 0 {
+		options.MaxRouteClicks = 8
+	}
+	if options.RouteInteractionWait <= 0 {
+		options.RouteInteractionWait = 2 * time.Second
+	}
 
 	if options.InitialWait <= 0 {
-		options.InitialWait = 10 * time.Second
+		options.InitialWait = defaultScanInitialWait
 	}
 	if options.PostInteractionWait < 0 {
 		options.PostInteractionWait = 0
@@ -449,6 +519,126 @@ func nativeFormTriggerAction(options CaptureOptions) chromedp.Action {
 		)
 		return nil
 	})
+}
+
+type routeInteractionResult struct {
+	PageURL        string   `json:"pageURL"`
+	FilledCount    int      `json:"filledCount"`
+	ClickedCount   int      `json:"clickedCount"`
+	SkippedCount   int      `json:"skippedCount"`
+	ButtonTexts    []string `json:"buttonTexts"`
+	SkippedButtons []string `json:"skippedButtons"`
+}
+
+func frontendRouteInteractionAction(entryURL string, options CaptureOptions, routeProvider func() []FrontendRouteRecord) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		if routeProvider == nil {
+			return nil
+		}
+
+		routes := buildFrontendRouteExploreURLs(entryURL, routeProvider(), options.MaxExploreRoutes)
+		if len(routes) == 0 {
+			return nil
+		}
+
+		fmt.Printf("[INFO] 前端路由动态采集开始 entry=%s routes=%d max_clicks=%d\n", entryURL, len(routes), options.MaxRouteClicks)
+		for _, routeURL := range routes {
+			if err := chromedp.Run(ctx, chromedp.Navigate(routeURL), chromedp.Sleep(options.RouteInteractionWait)); err != nil {
+				fmt.Printf("[WARN] 前端路由动态采集导航失败 route=%s err=%v\n", routeURL, err)
+				continue
+			}
+
+			var result routeInteractionResult
+			if err := chromedp.Evaluate(fmt.Sprintf(routeInteractionScript, options.MaxRouteClicks), &result).Do(ctx); err != nil {
+				fmt.Printf("[WARN] 前端路由动态采集交互失败 route=%s err=%v\n", routeURL, err)
+				continue
+			}
+			if result.PageURL == "" {
+				result.PageURL = routeURL
+			}
+			fmt.Printf(
+				"[INFO] 前端路由动态采集 route=%s page=%s filled=%d clicked=%d skipped=%d buttons=%s skipped_buttons=%s\n",
+				routeURL,
+				result.PageURL,
+				result.FilledCount,
+				result.ClickedCount,
+				result.SkippedCount,
+				strings.Join(result.ButtonTexts, "|"),
+				strings.Join(result.SkippedButtons, "|"),
+			)
+
+			if options.RouteInteractionWait > 0 {
+				if err := chromedp.Run(ctx, chromedp.Sleep(options.RouteInteractionWait)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+func buildFrontendRouteExploreURLs(entryURL string, records []FrontendRouteRecord, maxRoutes int) []string {
+	if maxRoutes <= 0 {
+		maxRoutes = 8
+	}
+	base := stripURLFragment(strings.TrimSpace(entryURL))
+	if base == "" {
+		return nil
+	}
+
+	seen := map[string]bool{entryURL: true, base: true}
+	var routes []string
+	for _, record := range records {
+		for _, candidate := range frontendRouteURLCandidates(base, record.Path) {
+			if seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			routes = append(routes, candidate)
+			if len(routes) >= maxRoutes {
+				return routes
+			}
+		}
+	}
+	return routes
+}
+
+func frontendRouteURLCandidates(base, rawPath string) []string {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return nil
+	}
+	if parsed, err := url.Parse(path); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return []string{path}
+	}
+
+	if strings.HasPrefix(path, "#") {
+		return []string{base + path}
+	}
+
+	if strings.HasPrefix(path, "/#") {
+		return []string{base + strings.TrimPrefix(path, "/")}
+	}
+
+	if strings.HasPrefix(path, "/") {
+		candidates := []string{base + "#" + path}
+		if parsedBase, err := url.Parse(base); err == nil && parsedBase.Scheme != "" && parsedBase.Host != "" {
+			parsedBase.Path = path
+			parsedBase.RawQuery = ""
+			parsedBase.Fragment = ""
+			candidates = append(candidates, parsedBase.String())
+		}
+		return candidates
+	}
+
+	return []string{base + "#/" + strings.TrimLeft(path, "/")}
+}
+
+func stripURLFragment(value string) string {
+	if idx := strings.Index(value, "#"); idx >= 0 {
+		return value[:idx]
+	}
+	return value
 }
 
 type autoTriggerResult struct {
@@ -760,6 +950,111 @@ const autoTriggerFormsScript = `(function () {
   };
 })()`
 
+const routeInteractionScript = `(function () {
+  var maxClicks = %d;
+  function isVisible(el) {
+    if (!el) return false;
+    var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return false;
+    var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (!rect) return false;
+    return (rect.width > 0 && rect.height > 0) || !!(el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length));
+  }
+  function dispatchInputEvents(el) {
+    ["input", "change", "blur"].forEach(function (name) {
+      try { el.dispatchEvent(new Event(name, { bubbles: true })); } catch (err) {}
+    });
+  }
+  function fieldLabel(el) {
+    return String(el.name || el.id || el.placeholder || el.getAttribute("aria-label") || el.type || "").toLowerCase();
+  }
+  function buildValue(el, index) {
+    var label = fieldLabel(el);
+    var type = String(el.type || "").toLowerCase();
+    if (type === "url" || label.indexOf("url") >= 0 || label.indexOf("endpoint") >= 0 || label.indexOf("link") >= 0 || label.indexOf("地址") >= 0) return "http://example.com";
+    if (label.indexOf("target") >= 0 || label.indexOf("host") >= 0 || label.indexOf("ip") >= 0 || label.indexOf("目标") >= 0) return "127.0.0.1";
+    if (type === "email" || label.indexOf("mail") >= 0 || label.indexOf("邮箱") >= 0) return "test@example.com";
+    if (type === "password" || label.indexOf("pass") >= 0 || label.indexOf("pwd") >= 0 || label.indexOf("密码") >= 0) return "Test@123456";
+    if (type === "tel" || label.indexOf("phone") >= 0 || label.indexOf("mobile") >= 0 || label.indexOf("手机") >= 0) return "13800138000";
+    if (type === "number" || /\b(id|count|page|size|num)\b/.test(label)) return String(index || 1);
+    if (type === "date") return "2026-01-01";
+    if (label.indexOf("keyword") >= 0 || label.indexOf("search") >= 0 || label.indexOf("query") >= 0 || label.indexOf("关键词") >= 0) return "test";
+    return "trailblazer_test_" + String(index || 1);
+  }
+  function fillFields() {
+    var fields = Array.prototype.slice.call(document.querySelectorAll("input, textarea, select")).filter(function (el) {
+      var type = String(el.type || "").toLowerCase();
+      return !el.disabled && !el.readOnly && ["hidden", "submit", "button", "reset", "file", "image"].indexOf(type) < 0 && isVisible(el);
+    });
+    var filled = 0;
+    fields.forEach(function (el, index) {
+      var tag = String(el.tagName || "").toLowerCase();
+      var type = String(el.type || "").toLowerCase();
+      if (tag === "select") {
+        var option = Array.prototype.slice.call(el.options || []).find(function (item) {
+          return !item.disabled && String(item.value || "").trim() !== "";
+        });
+        if (option) {
+          el.value = option.value;
+          dispatchInputEvents(el);
+          filled += 1;
+        }
+        return;
+      }
+      if (type === "checkbox" || type === "radio") {
+        el.checked = true;
+        dispatchInputEvents(el);
+        filled += 1;
+        return;
+      }
+      try { el.focus(); } catch (err) {}
+      el.value = buildValue(el, index + 1);
+      dispatchInputEvents(el);
+      filled += 1;
+    });
+    return filled;
+  }
+  function buttonText(el) {
+    return String(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.title || "").replace(/\s+/g, " ").trim();
+  }
+  function isDangerousButton(text) {
+    return /(delete|remove|reset|clear|drop|disable|shutdown|logout|log out|run|execute|exec|poc|attack|exploit|upload|import|删除|移除|重置|清空|禁用|退出|运行|执行|攻击|利用|上传|导入)/i.test(text);
+  }
+  function isUsefulButton(text) {
+    if (!text) return false;
+    return /(search|query|filter|submit|confirm|ok|next|get|list|load|refresh|查询|搜索|筛选|提交|确定|下一步|获取|列表|加载|刷新)/i.test(text);
+  }
+  var filled = fillFields();
+  var buttons = Array.prototype.slice.call(document.querySelectorAll("button, input[type='submit'], input[type='button'], [role='button'], .el-button, .ant-btn"))
+    .filter(function (el) {
+      return !el.disabled && el.getAttribute("aria-disabled") !== "true" && isVisible(el);
+    });
+  var clicked = [];
+  var skipped = [];
+  buttons.forEach(function (el) {
+    var text = buttonText(el);
+    if (clicked.length >= maxClicks) return;
+    if (isDangerousButton(text) || !isUsefulButton(text)) {
+      if (text) skipped.push(text);
+      return;
+    }
+    try {
+      el.click();
+      clicked.push(text || String(el.className || "button"));
+    } catch (err) {
+      if (text) skipped.push(text);
+    }
+  });
+  return {
+    pageURL: String(window.location.href || ""),
+    filledCount: filled,
+    clickedCount: clicked.length,
+    skippedCount: skipped.length,
+    buttonTexts: clicked.slice(0, 20),
+    skippedButtons: skipped.slice(0, 20)
+  };
+})()`
+
 func appendAPIRecord(apiRecordSet map[string]bool, apiRecords *[]NetworkRecord, record *NetworkRecord) {
 	if record == nil || !isAPIResource(record) {
 		return
@@ -771,6 +1066,54 @@ func appendAPIRecord(apiRecordSet map[string]bool, apiRecords *[]NetworkRecord, 
 	}
 	apiRecordSet[key] = true
 	*apiRecords = append(*apiRecords, *record)
+	logRouteCapturedAPIRecord(record)
+}
+
+func logRouteCapturedAPIRecord(record *NetworkRecord) {
+	if record == nil {
+		return
+	}
+	pageURL := strings.TrimSpace(record.PageURL)
+	if pageURL == "" || !looksLikeFrontendRoutePage(pageURL) {
+		return
+	}
+
+	fmt.Printf(
+		"[INFO] 前端路由接口采集 route=%s method=%s api=%s params=%s body=%s\n",
+		pageURL,
+		strings.TrimSpace(record.Method),
+		strings.TrimSpace(record.URL),
+		formatCapturedQueryParams(record.URL),
+		formatCapturedBodyPreview(record.RequestBody),
+	)
+}
+
+func looksLikeFrontendRoutePage(pageURL string) bool {
+	if strings.Contains(pageURL, "#/") || strings.Contains(pageURL, "#!") {
+		return true
+	}
+	parsed, err := url.Parse(pageURL)
+	if err != nil {
+		return false
+	}
+	path := strings.Trim(parsed.Path, "/")
+	return path != "" && !strings.Contains(path, ".")
+}
+
+func formatCapturedQueryParams(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.RawQuery == "" {
+		return "-"
+	}
+	return limitCapturedBody(parsed.RawQuery, 512, "查询参数过长，已截断")
+}
+
+func formatCapturedBodyPreview(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "-"
+	}
+	return limitCapturedBody(body, 1024, "请求体过长，已截断")
 }
 
 func upsertProtocolTraceRecord(traceIndex map[string]int, traces *[]ProtocolTraceRecord, record ProtocolTraceRecord) {
@@ -783,6 +1126,48 @@ func upsertProtocolTraceRecord(traceIndex map[string]int, traces *[]ProtocolTrac
 
 	traceIndex[traceKey] = len(*traces)
 	*traces = append(*traces, record)
+}
+
+func upsertFrontendRouteRecord(routeIndex map[string]int, routes *[]FrontendRouteRecord, record FrontendRouteRecord) {
+	record.Path = strings.TrimSpace(record.Path)
+	record.Name = strings.TrimSpace(record.Name)
+	record.SourceKind = strings.TrimSpace(record.SourceKind)
+	record.Source = strings.TrimSpace(record.Source)
+	record.PageURL = strings.TrimSpace(record.PageURL)
+	if record.Path == "" {
+		return
+	}
+	if record.DiscoveredAt.IsZero() {
+		record.DiscoveredAt = time.Now()
+	}
+
+	key := frontendRouteKey(record)
+	if idx, ok := routeIndex[key]; ok {
+		existing := &(*routes)[idx]
+		if existing.Name == "" {
+			existing.Name = record.Name
+		}
+		if existing.SourceKind == "" {
+			existing.SourceKind = record.SourceKind
+		}
+		if existing.Source == "" {
+			existing.Source = record.Source
+		}
+		if existing.PageURL == "" {
+			existing.PageURL = record.PageURL
+		}
+		if record.DiscoveredAt.After(existing.DiscoveredAt) {
+			existing.DiscoveredAt = record.DiscoveredAt
+		}
+		return
+	}
+
+	routeIndex[key] = len(*routes)
+	*routes = append(*routes, record)
+}
+
+func frontendRouteKey(record FrontendRouteRecord) string {
+	return record.Path + "|" + record.Name + "|" + record.SourceKind
 }
 
 func protocolTraceKey(record ProtocolTraceRecord) string {

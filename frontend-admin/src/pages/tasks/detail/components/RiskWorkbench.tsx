@@ -6,6 +6,7 @@ import {
   Card,
   Drawer,
   Empty,
+  Grid,
   Input,
   List,
   Pagination,
@@ -486,6 +487,8 @@ export default function RiskWorkbench({
   onDeleted,
   onUpdated,
 }: Props) {
+  const screens = Grid.useBreakpoint();
+  const isCompact = !screens.xl;
   const { openCodecWorkbench } = useCodecWorkbench();
   const [keyword, setKeyword] = useState('');
   const [level, setLevel] = useState<Risk['level'] | undefined>();
@@ -941,28 +944,31 @@ export default function RiskWorkbench({
       <Card
         title="风险发现"
         extra={
-          <Space>
+          <Space wrap>
             {polling ? <Tag color="processing">自动刷新中</Tag> : null}
             <Button onClick={onRefresh}>刷新</Button>
           </Space>
         }
         styles={{ body: { paddingTop: 16 } }}
       >
-        <Space
-          wrap
+        <div
           style={{
             marginBottom: 16,
             width: '100%',
+            display: 'flex',
+            gap: 12,
+            flexWrap: 'wrap',
+            alignItems: 'flex-start',
             justifyContent: 'space-between',
           }}
         >
-          <Space wrap>
+          <Space wrap size={[12, 12]} style={{ flex: 1 }}>
             <Input
               allowClear
               value={keyword}
               onChange={(event) => setKeyword(event.target.value)}
               placeholder="搜索风险标题、类型或 URL"
-              style={{ width: 320 }}
+              style={{ width: isCompact ? '100%' : 320, minWidth: 220 }}
             />
             <Select
               allowClear
@@ -1008,10 +1014,13 @@ export default function RiskWorkbench({
               style={{ width: 200 }}
             />
           </Space>
-          <Typography.Text type="secondary">
+          <Typography.Text
+            type="secondary"
+            style={{ whiteSpace: 'nowrap', paddingTop: 6 }}
+          >
             共 {filteredRisks.length} 条风险
           </Typography.Text>
-        </Space>
+        </div>
 
         <List
           loading={loading}
@@ -1140,12 +1149,13 @@ export default function RiskWorkbench({
                                   justifyContent: 'space-between',
                                   gap: 12,
                                   alignItems: 'flex-start',
+                                  flexWrap: 'wrap',
                                 }}
                               >
                                 <Space
                                   direction="vertical"
                                   size={2}
-                                  style={{ flex: 1 }}
+                                  style={{ flex: 1, minWidth: 260 }}
                                 >
                                   <Space wrap size={[4, 4]}>
                                     <Tag color={levelColorMap[risk.level]}>
@@ -1199,7 +1209,16 @@ export default function RiskWorkbench({
                                     </Space>
                                   ) : null}
                                 </Space>
-                                <Space>
+                                <Space
+                                  wrap
+                                  size={[8, 8]}
+                                  style={{
+                                    justifyContent: isCompact
+                                      ? 'flex-start'
+                                      : 'flex-end',
+                                    width: isCompact ? '100%' : 'auto',
+                                  }}
+                                >
                                   <Select
                                     data-testid={`risk-status-select-${risk.id}`}
                                     size="small"
@@ -1275,54 +1294,20 @@ export default function RiskWorkbench({
                 key={risk.id}
                 onClick={() => setSelected(risk)}
                 style={{ cursor: 'pointer' }}
-                actions={[
-                  <Select
-                    key="status"
-                    data-testid={`risk-status-select-${risk.id}`}
-                    size="small"
-                    value={normalizeRiskStatus(risk.status)}
-                    options={riskStatusOptions}
-                    style={{ width: 110 }}
-                    loading={updatingRiskId === risk.id}
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(value) => void handleUpdateStatus(risk, value)}
-                  />,
-                  <Button
-                    key="detail"
-                    type="link"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelected(risk);
-                    }}
-                  >
-                    查看详情
-                  </Button>,
-                  <Popconfirm
-                    key="delete"
-                    title="确认删除该漏洞记录吗？"
-                    description="删除后将无法恢复。"
-                    disabled={deleting}
-                    onConfirm={(event) => {
-                      event?.stopPropagation?.();
-                      void handleDelete(risk);
-                    }}
-                    okButtonProps={{ danger: true, loading: deleting }}
-                    onCancel={(event) => event?.stopPropagation?.()}
-                  >
-                    <Button
-                      danger
-                      type="link"
-                      disabled={deleting}
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      删除
-                    </Button>
-                  </Popconfirm>,
-                ]}
               >
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 16,
+                    justifyContent: 'space-between',
+                    alignItems: 'flex-start',
+                    width: '100%',
+                    flexWrap: 'wrap',
+                  }}
+                >
                 <List.Item.Meta
                   title={
-                    <Space wrap>
+                    <Space wrap size={[8, 8]}>
                       <Typography.Text strong>{risk.title}</Typography.Text>
                       <Tag color={levelColorMap[risk.level]}>
                         {levelLabelMap[risk.level]}
@@ -1344,7 +1329,11 @@ export default function RiskWorkbench({
                     </Space>
                   }
                   description={
-                    <Space direction="vertical" size={4}>
+                    <Space
+                      direction="vertical"
+                      size={4}
+                      style={{ width: '100%', minWidth: 0 }}
+                    >
                       <Typography.Text type="secondary">
                         {buildRiskMetaLine(risk)}
                       </Typography.Text>
@@ -1374,6 +1363,60 @@ export default function RiskWorkbench({
                     </Space>
                   }
                 />
+                  <Space
+                    wrap
+                    size={[8, 8]}
+                    onClick={(event) => event.stopPropagation()}
+                    style={{
+                      justifyContent: isCompact ? 'flex-start' : 'flex-end',
+                      width: isCompact ? '100%' : 'auto',
+                      marginLeft: isCompact ? 0 : 8,
+                    }}
+                  >
+                    <Select
+                      key="status"
+                      data-testid={`risk-status-select-${risk.id}`}
+                      size="small"
+                      value={normalizeRiskStatus(risk.status)}
+                      options={riskStatusOptions}
+                      style={{ width: 116 }}
+                      loading={updatingRiskId === risk.id}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(value) => void handleUpdateStatus(risk, value)}
+                    />
+                    <Button
+                      key="detail"
+                      type="link"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSelected(risk);
+                      }}
+                    >
+                      查看详情
+                    </Button>
+                    <Popconfirm
+                      key="delete"
+                      title="确认删除该漏洞记录吗？"
+                      description="删除后将无法恢复。"
+                      disabled={deleting}
+                      onConfirm={(event) => {
+                        event?.stopPropagation?.();
+                        void handleDelete(risk);
+                      }}
+                      okButtonProps={{ danger: true, loading: deleting }}
+                      onCancel={(event) => event?.stopPropagation?.()}
+                    >
+                      <Button
+                        danger
+                        type="link"
+                        disabled={deleting}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  </Space>
+                </div>
               </List.Item>
             );
           }}

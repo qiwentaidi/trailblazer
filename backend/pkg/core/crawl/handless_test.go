@@ -86,6 +86,34 @@ func TestBuildCaptureChromeFlagsIncludesProxySettings(t *testing.T) {
 	}
 }
 
+func TestDefaultScanCaptureOptionsUseFiniteWait(t *testing.T) {
+	options := defaultScanCaptureOptions()
+
+	if got := options.Timeout; got != defaultScanTimeout {
+		t.Fatalf("Timeout = %v, want %v", got, defaultScanTimeout)
+	}
+	if got := options.InitialWait; got != defaultScanInitialWait {
+		t.Fatalf("InitialWait = %v, want %v", got, defaultScanInitialWait)
+	}
+	if got := options.PostInteractionWait; got != defaultScanPostWait {
+		t.Fatalf("PostInteractionWait = %v, want %v", got, defaultScanPostWait)
+	}
+}
+
+func TestNormalizeCaptureOptionsZeroValuesRemainManualForControlledSessions(t *testing.T) {
+	options := normalizeCaptureOptions(CaptureOptions{})
+
+	if got := options.InitialWait; got != defaultScanInitialWait {
+		t.Fatalf("InitialWait = %v, want %v", got, defaultScanInitialWait)
+	}
+	if got := options.PostInteractionWait; got != 0 {
+		t.Fatalf("PostInteractionWait = %v, want 0", got)
+	}
+	if got := options.Timeout; got != 0 {
+		t.Fatalf("Timeout = %v, want 0", got)
+	}
+}
+
 func TestIsExpectedCaptureCancellation(t *testing.T) {
 	if !isExpectedCaptureCancellation(context.Canceled) {
 		t.Fatal("expected context.Canceled to be treated as expected cancellation")
@@ -108,6 +136,38 @@ func TestProtocolTraceNormalizePreservesLargeResponseCiphertext(t *testing.T) {
 
 	if got := trace.SessionMaterials["latest_response_ciphertext"]; got != largeCiphertext {
 		t.Fatalf("expected response ciphertext to survive normalization, got length %d want %d", len(got), len(largeCiphertext))
+	}
+}
+
+func TestProtocolTraceNormalizeSkipsPlaintextOnlyResponseEvidence(t *testing.T) {
+	trace := ProtocolTraceRecord{
+		TraceID: "trace-plaintext-only",
+		SessionMaterials: map[string]string{
+			"latest_response_plaintext": `{"msg":"操作成功","img":"data:image/png;base64,iVBORw0KGgo="}`,
+		},
+		Algorithms: []string{"base64-encoded-payload"},
+	}
+
+	trace.normalize()
+
+	if got := trace.Algorithms; len(got) != 1 || got[0] != "base64-encoded-payload" {
+		t.Fatalf("expected weak algorithm label to be preserved, got %#v", got)
+	}
+	if len(trace.RequestSteps) != 0 || len(trace.ResponseSteps) != 0 {
+		t.Fatalf("expected protocol steps to be cleared, got request=%#v response=%#v", trace.RequestSteps, trace.ResponseSteps)
+	}
+}
+
+func TestProtocolTraceNormalizeDropsWeakInferredAlgorithms(t *testing.T) {
+	trace := ProtocolTraceRecord{
+		TraceID:    "trace-weak-inference",
+		Algorithms: []string{"base64-encoded-payload", "encrypted-field(inferred)"},
+	}
+
+	trace.normalize()
+
+	if got := trace.Algorithms; len(got) != 2 {
+		t.Fatalf("expected weak inferred algorithms to be preserved, got %#v", got)
 	}
 }
 
@@ -359,6 +419,23 @@ func TestProtocolHookScriptSynthesizesFieldRSAEncryptionSteps(t *testing.T) {
 	}
 }
 
+func TestProtocolHookScriptIncludesFrontendRouteHooks(t *testing.T) {
+	requiredSnippets := []string{
+		`function hookFrontendRoutes()`,
+		`function scanWindowForRoutes()`,
+		`emitPayload({`,
+		`kind: "frontend-route",`,
+		`history.pushState`,
+		`hookArrayMutation("push")`,
+	}
+
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(protocolHookScript, snippet) {
+			t.Fatalf("expected protocol hook script to include %q", snippet)
+		}
+	}
+}
+
 func TestAutoTriggerFormsScriptIncludesCommonLoginHeuristics(t *testing.T) {
 	requiredSnippets := []string{
 		`"form.login-form"`,
@@ -377,6 +454,44 @@ func TestAutoTriggerFormsScriptIncludesCommonLoginHeuristics(t *testing.T) {
 		if !strings.Contains(autoTriggerFormsScript, snippet) {
 			t.Fatalf("expected auto trigger form script to include %q", snippet)
 		}
+	}
+}
+
+func TestRouteInteractionScriptIncludesFormFillAndSafeButtonFilters(t *testing.T) {
+	rendered := fmt.Sprintf(routeInteractionScript, 3)
+	requiredSnippets := []string{
+		`querySelectorAll("input, textarea, select")`,
+		`http://example.com`,
+		`127.0.0.1`,
+		`Test@123456`,
+		`isDangerousButton`,
+		`run|execute|exec|poc`,
+		`isUsefulButton`,
+		`buttonTexts`,
+	}
+
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(rendered, snippet) {
+			t.Fatalf("expected route interaction script to include %q", snippet)
+		}
+	}
+}
+
+func TestBuildFrontendRouteExploreURLsBuildsHashRouteCandidates(t *testing.T) {
+	routes := buildFrontendRouteExploreURLs("http://192.168.2.101:3000/#/", []FrontendRouteRecord{
+		{Path: "/PocAudit"},
+		{Path: "#/System"},
+		{Path: "http://example.com/#/External"},
+	}, 4)
+
+	expected := []string{
+		"http://192.168.2.101:3000/#/PocAudit",
+		"http://192.168.2.101:3000/PocAudit",
+		"http://192.168.2.101:3000/#/System",
+		"http://example.com/#/External",
+	}
+	if strings.Join(routes, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected route candidates:\n got: %#v\nwant: %#v", routes, expected)
 	}
 }
 
@@ -424,7 +539,7 @@ func TestCaptureNetworkActivityWithOptionsAutoTriggersVisibleForm(t *testing.T) 
 	}))
 	defer server.Close()
 
-	_, records, traces := CaptureNetworkActivityWithOptions(server.URL, CaptureOptions{
+	_, records, traces, _ := CaptureNetworkActivityWithOptions(server.URL, CaptureOptions{
 		AutoTriggerForms:    true,
 		InitialWait:         1200 * time.Millisecond,
 		PostInteractionWait: 2500 * time.Millisecond,
@@ -508,7 +623,7 @@ func TestCaptureNetworkActivityHooksJSEncryptPrototype(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, records, traces := CaptureNetworkActivityWithOptions(server.URL, CaptureOptions{
+	_, records, traces, _ := CaptureNetworkActivityWithOptions(server.URL, CaptureOptions{
 		InitialWait:         500 * time.Millisecond,
 		PostInteractionWait: 3500 * time.Millisecond,
 		Timeout:             20 * time.Second,
@@ -586,7 +701,7 @@ func TestCaptureNetworkActivityDoesNotCarryRSAStepsIntoFollowingGET(t *testing.T
 	}))
 	defer server.Close()
 
-	_, records, traces := CaptureNetworkActivityWithOptions(server.URL, CaptureOptions{
+	_, records, traces, _ := CaptureNetworkActivityWithOptions(server.URL, CaptureOptions{
 		InitialWait:         500 * time.Millisecond,
 		PostInteractionWait: 4500 * time.Millisecond,
 		Timeout:             20 * time.Second,

@@ -17,6 +17,7 @@ import {
   Space,
   Table,
   Tag,
+  type TableColumnsType,
   Typography,
   message,
 } from 'antd';
@@ -382,26 +383,32 @@ export default function TasksPage() {
     }
   };
 
-  const columns = [
+  const columns: TableColumnsType<TaskSummary> = [
     {
       title: '任务名称',
       dataIndex: 'name',
+      key: 'name',
+      fixed: 'left',
+      width: 360,
       render: (value: string, record: TaskSummary) => (
-        <Button
-          type="link"
-          style={{ paddingInline: 0 }}
-          onClick={() => {
-            persistTaskDetailSeed(record);
-            history.push(buildTaskDetailPath(record.id));
-          }}
-        >
-          {value || '-'}
-        </Button>
+        <Typography.Text ellipsis style={{ maxWidth: 320, display: 'block' }}>
+          <Button
+            type="link"
+            style={{ paddingInline: 0 }}
+            onClick={() => {
+              persistTaskDetailSeed(record);
+              history.push(buildTaskDetailPath(record.id));
+            }}
+          >
+            {value || '-'}
+          </Button>
+        </Typography.Text>
       ),
     },
     {
       title: '执行状态',
       key: 'executionStatus',
+      width: 120,
       render: (_: unknown, record: TaskSummary) => {
         const status = resolveTaskExecutionStatus(record);
         return (
@@ -414,7 +421,7 @@ export default function TasksPage() {
     {
       title: '当前进度',
       key: 'executionProgress',
-      width: 180,
+      width: 160,
       render: (_: unknown, record: TaskSummary) => (
         <Progress percent={resolveTaskExecutionProgress(record)} size="small" />
       ),
@@ -448,22 +455,29 @@ export default function TasksPage() {
     {
       title: '创建时间',
       dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: 180,
       render: (value: string | undefined) => formatDateTime(value),
     },
     {
       title: '操作',
       key: 'actions',
-      width: 280,
+      fixed: 'right',
+      width: 260,
       render: (_: unknown, record: TaskSummary) =>
-        renderTaskActions(
-          record,
-          loading,
-          () => void handleTaskExecution(record),
-          () => {
-            persistTaskDetailSeed(record);
-            history.push(buildTaskDetailPath(record.id));
-          },
-          () => void handleDeleteTask(record),
+        (
+          <div style={{ whiteSpace: 'nowrap' }}>
+            {renderTaskActions(
+              record,
+              loading,
+              () => void handleTaskExecution(record),
+              () => {
+                persistTaskDetailSeed(record);
+                history.push(buildTaskDetailPath(record.id));
+              },
+              () => void handleDeleteTask(record),
+            )}
+          </div>
         ),
     },
   ];
@@ -543,6 +557,7 @@ export default function TasksPage() {
         loading={loading}
         columns={columns}
         dataSource={tasks}
+        scroll={{ x: 1280 }}
         pagination={{
           current: page,
           pageSize,

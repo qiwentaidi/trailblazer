@@ -44,12 +44,13 @@ type ScanResult struct {
 
 // AssetInfo 资产信息
 type AssetInfo struct {
-	Email     []SensitiveItem `json:"email"`
-	IDCard    []SensitiveItem `json:"idCard"`
-	Phone     []SensitiveItem `json:"phone"`
-	IPURL     []SensitiveItem `json:"ipUrl"`
-	Sensitive []SensitiveItem `json:"sensitive"`
-	APIRoutes []string        `json:"apiRoutes"`
+	Email          []SensitiveItem `json:"email"`
+	IDCard         []SensitiveItem `json:"idCard"`
+	Phone          []SensitiveItem `json:"phone"`
+	IPURL          []SensitiveItem `json:"ipUrl"`
+	Sensitive      []SensitiveItem `json:"sensitive"`
+	FrontendRoutes []string        `json:"frontendRoutes"`
+	APIRoutes      []string        `json:"apiRoutes"`
 }
 
 type SensitiveItem struct {
@@ -139,6 +140,7 @@ func convertSharedRisks(items []scanexec.RiskItem) []RiskItem {
 			Type:        item.Type,
 			URL:         item.URL,
 			Description: item.Description,
+			AIVerified:  item.AIVerified,
 			CreatedAt:   item.CreatedAt,
 		})
 	}
@@ -152,6 +154,7 @@ type RiskItem struct {
 	Type        string `json:"type"`
 	URL         string `json:"url"`
 	Description string `json:"description"`
+	AIVerified  bool   `json:"aiVerified,omitempty"`
 	CreatedAt   string `json:"createdAt"`
 }
 
@@ -262,6 +265,7 @@ func performAsyncScan(urls []string, taskId string) {
 
 	// 用于收集所有URL的资产数据
 	var allIPURLAssets []database.AssetValue
+	var allFrontendRouteAssets []database.AssetValue
 	var allAPIRouterAssets []database.AssetValue
 	var allAPIRootAssets []database.AssetValue
 
@@ -401,10 +405,12 @@ func performAsyncScan(urls []string, taskId string) {
 		result.Assets.Phone = convertSharedSensitiveItems(targetScanResult.Assets.Phone)
 		result.Assets.IPURL = convertSharedSensitiveItems(targetScanResult.Assets.IPURL)
 		result.Assets.Sensitive = convertSharedSensitiveItems(targetScanResult.Assets.Sensitive)
+		result.Assets.FrontendRoutes = targetScanResult.Assets.FrontendRoutes
 		result.Assets.APIRoutes = targetScanResult.Assets.APIRoutes
 		result.APIRoots = targetScanResult.Assets.APIRoots
 
 		currentIPURLAssets := assetValuesFromSensitiveItems(result.Assets.IPURL)
+		currentFrontendRouteAssets := assetValuesFromStrings(result.Assets.FrontendRoutes, targetURL)
 		currentAPIRouterAssets := assetValuesFromStrings(result.Assets.APIRoutes, targetURL)
 		currentAPIRootAssets := buildAPIRootAssetValues(result.APIRoots, result.Assets.APIRoutes, targetURL)
 
@@ -415,6 +421,9 @@ func performAsyncScan(urls []string, taskId string) {
 		for _, item := range currentAPIRootAssets {
 			allAPIRootAssets = append(allAPIRootAssets, item)
 			allAPIRoots = append(allAPIRoots, item.Value)
+		}
+		for _, item := range currentFrontendRouteAssets {
+			allFrontendRouteAssets = append(allFrontendRouteAssets, item)
 		}
 		for _, item := range currentAPIRouterAssets {
 			allAPIRouterAssets = append(allAPIRouterAssets, item)
@@ -428,15 +437,16 @@ func performAsyncScan(urls []string, taskId string) {
 			currentAssetSavedAt := time.Now()
 			// 创建当前URL的资产记录
 			currentAssetRecord := database.AssetRecord{
-				TaskID:    taskId,
-				Version:   version,
-				Email:     assetValuesFromSensitiveItems(result.Assets.Email),
-				IDCard:    assetValuesFromSensitiveItems(result.Assets.IDCard),
-				Phone:     assetValuesFromSensitiveItems(result.Assets.Phone),
-				IPURL:     currentIPURLAssets,
-				APIRoot:   currentAPIRootAssets,
-				APIRouter: currentAPIRouterAssets,
-				CreatedAt: currentAssetSavedAt,
+				TaskID:        taskId,
+				Version:       version,
+				Email:         assetValuesFromSensitiveItems(result.Assets.Email),
+				IDCard:        assetValuesFromSensitiveItems(result.Assets.IDCard),
+				Phone:         assetValuesFromSensitiveItems(result.Assets.Phone),
+				IPURL:         currentIPURLAssets,
+				FrontendRoute: currentFrontendRouteAssets,
+				APIRoot:       currentAPIRootAssets,
+				APIRouter:     currentAPIRouterAssets,
+				CreatedAt:     currentAssetSavedAt,
 			}
 
 			if err := database.SaveAsset(currentAssetRecord); err != nil {
@@ -467,7 +477,7 @@ func performAsyncScan(urls []string, taskId string) {
 					Type:        risk.Type,
 					URL:         risk.URL,
 					Description: risk.Description,
-					AIVerified:  false,
+					AIVerified:  risk.AIVerified,
 					CreatedAt:   now,
 				})
 			}
@@ -483,6 +493,7 @@ func performAsyncScan(urls []string, taskId string) {
 		allAssets.Phone = append(allAssets.Phone, result.Assets.Phone...)
 		allAssets.IPURL = append(allAssets.IPURL, result.Assets.IPURL...)
 		allAssets.Sensitive = append(allAssets.Sensitive, result.Assets.Sensitive...)
+		allAssets.FrontendRoutes = append(allAssets.FrontendRoutes, result.Assets.FrontendRoutes...)
 		allAssets.APIRoutes = append(allAssets.APIRoutes, result.Assets.APIRoutes...)
 
 		// 合并风险数据
@@ -515,11 +526,13 @@ func performAsyncScan(urls []string, taskId string) {
 	allAssets.Phone = arrayutil.RemoveDuplicates(allAssets.Phone)
 	allAssets.IPURL = arrayutil.RemoveDuplicates(allAssets.IPURL)
 	allAssets.Sensitive = arrayutil.RemoveDuplicates(allAssets.Sensitive)
+	allAssets.FrontendRoutes = arrayutil.RemoveDuplicates(allAssets.FrontendRoutes)
 	allAssets.APIRoutes = arrayutil.RemoveDuplicates(allAssets.APIRoutes)
 	allAPIRoots = arrayutil.RemoveDuplicates(allAPIRoots)
 
 	// 去重收集的资产数据
 	allIPURLAssets = database.MergeAssetValues(allIPURLAssets)
+	allFrontendRouteAssets = database.MergeAssetValues(allFrontendRouteAssets)
 	allAPIRootAssets = database.MergeAssetValues(allAPIRootAssets)
 	allAPIRouterAssets = database.MergeAssetValues(allAPIRouterAssets)
 
@@ -528,15 +541,16 @@ func performAsyncScan(urls []string, taskId string) {
 		unifiedAssetSavedAt := time.Now()
 		// 创建统一的资产记录
 		assetRecord := database.AssetRecord{
-			TaskID:    taskId,
-			Version:   version,
-			Email:     assetValuesFromSensitiveItems(allAssets.Email),
-			IDCard:    assetValuesFromSensitiveItems(allAssets.IDCard),
-			Phone:     assetValuesFromSensitiveItems(allAssets.Phone),
-			IPURL:     allIPURLAssets,
-			APIRoot:   allAPIRootAssets,
-			APIRouter: allAPIRouterAssets,
-			CreatedAt: unifiedAssetSavedAt,
+			TaskID:        taskId,
+			Version:       version,
+			Email:         assetValuesFromSensitiveItems(allAssets.Email),
+			IDCard:        assetValuesFromSensitiveItems(allAssets.IDCard),
+			Phone:         assetValuesFromSensitiveItems(allAssets.Phone),
+			IPURL:         allIPURLAssets,
+			FrontendRoute: allFrontendRouteAssets,
+			APIRoot:       allAPIRootAssets,
+			APIRouter:     allAPIRouterAssets,
+			CreatedAt:     unifiedAssetSavedAt,
 		}
 
 		if err := database.SaveAsset(assetRecord); err != nil {

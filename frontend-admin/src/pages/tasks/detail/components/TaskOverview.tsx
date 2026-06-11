@@ -15,17 +15,15 @@ import type {
   Risk,
   TaskSummary,
   TaskVersionSummary,
-  TreeNode,
 } from '@/types/task';
 import {
-  countTreeNodes,
   normalizeAssetBuckets,
   normalizeRiskLevel,
 } from './taskDetailUtils';
 
 interface Props {
   task: TaskSummary | null;
-  treeData: TreeNode[];
+  treeNodeCount: number;
   risks: Risk[];
   assets: AssetData | null;
   executionStatus: string;
@@ -64,7 +62,7 @@ const DEFAULT_TARGET_TAG_LIMIT = 12;
 
 export default function TaskOverview({
   task,
-  treeData,
+  treeNodeCount,
   risks,
   assets,
   executionStatus,
@@ -142,7 +140,7 @@ export default function TaskOverview({
           </Descriptions.Item>
           <Descriptions.Item label="风险总数">{risks.length}</Descriptions.Item>
           <Descriptions.Item label="站点节点">
-            {countTreeNodes(treeData)}
+            {treeNodeCount}
           </Descriptions.Item>
           <Descriptions.Item label="当前视图">
             <Tag color="blue">{currentScanLabel}</Tag>

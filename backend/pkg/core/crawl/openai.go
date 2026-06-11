@@ -275,6 +275,7 @@ func (c *SensitiveInfoChecker) Check(fieldContent string) (bool, error) {
    - 包含真实的邮箱地址、手机号码、身份证号码
    - 包含真实的服务器地址、数据库地址
    - 包含真实的用户凭据、认证信息
+   - 包含硬编码账号密码、默认口令、弱口令、测试环境但可直接使用的登录凭据（如：username:"admin"、password:"admin123"）
 
 2. FALSE（不是敏感信息泄露）的情况：
    - 只是变量名、函数名、参数名（如：password, username, apiKey）
@@ -282,6 +283,13 @@ func (c *SensitiveInfoChecker) Check(fieldContent string) (bool, error) {
    - 代码注释、文档说明
    - 配置模板、默认值
    - 测试数据、模拟数据
+   - 代码表达式、函数调用、比较表达式、布尔表达式、对象属性片段、压缩后的JS片段
+   - 值中出现明显代码特征时一律判定为 false，例如：De(c)、S===void、foo(bar)、a+b、x?y:z、[{required:!0}]
+
+补充规则：
+- 对于 username/password 这类字段，重点判断右侧“值”是否是可直接使用的字面量凭据。
+- 如果右侧值看起来像代码，而不是字面量字符串、token、URL、邮箱、手机号、证书、密钥，则返回 false。
+- 只要你不能明确确认它是可直接利用的敏感数据，就返回 false。
 
 请仔细分析提供的文本内容，判断是否包含真实的敏感信息。只回答 true 或 false，不要输出其他任何内容。`
 

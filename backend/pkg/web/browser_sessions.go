@@ -245,11 +245,12 @@ func runLaunchedBrowserSession(record *database.BrowserSessionRecord, options cr
 	options.OnUpdate = func(snapshot crawl.CaptureSnapshot) {
 		persistBrowserSessionSnapshot(record, startedAt, snapshot, "running", time.Time{})
 	}
-	_, apiRecords, traces := captureBrowserSessionNetworkActivity(record.EntryURL, options)
+	_, apiRecords, traces, frontendRoutes := captureBrowserSessionNetworkActivity(record.EntryURL, options)
 	finishedAt := time.Now()
 	persistBrowserSessionSnapshot(record, startedAt, crawl.CaptureSnapshot{
 		APIRecords:     apiRecords,
 		ProtocolTraces: traces,
+		FrontendRoutes: frontendRoutes,
 		CapturedAt:     finishedAt,
 	}, "completed", finishedAt)
 }
@@ -279,7 +280,7 @@ func persistBrowserSessionSnapshot(record *database.BrowserSessionRecord, starte
 		record.SessionID,
 		1,
 		len(snapshot.APIRecords),
-		countSuspiciousTraceSignals(snapshot.ProtocolTraces),
+		countSuspiciousTraceSignals(snapshot.ProtocolTraces, snapshot.APIRecords),
 		status,
 		snapshot.CapturedAt,
 		endedAt,
@@ -302,10 +303,10 @@ func inferProxyType(proxyServer string) string {
 	}
 }
 
-func countSuspiciousTraceSignals(traces []crawl.ProtocolTraceRecord) int {
+func countSuspiciousTraceSignals(traces []crawl.ProtocolTraceRecord, apiRecords []crawl.NetworkRecord) int {
 	count := 0
 	for _, trace := range traces {
-		if hasMeaningfulBrowserSessionTraceSignal(trace) {
+		if hasMeaningfulBrowserSessionTraceSignal(trace, apiRecords) {
 			count++
 		}
 	}
@@ -316,7 +317,7 @@ func buildSuspiciousBrowserSessionTraces(sessionID string, traces []crawl.Protoc
 	rsaPublicKey, rsaPublicKeySource := findBrowserSessionRSAPublicKey(traces, apiRecords)
 	result := make([]database.BrowserSessionTraceRecord, 0)
 	for _, trace := range traces {
-		if !hasMeaningfulBrowserSessionTraceSignal(trace) {
+		if !hasMeaningfulBrowserSessionTraceSignal(trace, apiRecords) {
 			continue
 		}
 
@@ -409,7 +410,13 @@ func findBrowserSessionSuspiciousTraceForRequest(record crawl.NetworkRecord, sus
 	return fallback
 }
 
-func hasMeaningfulBrowserSessionTraceSignal(trace crawl.ProtocolTraceRecord) bool {
+func hasMeaningfulBrowserSessionTraceSignal(trace crawl.ProtocolTraceRecord, apiRecords []crawl.NetworkRecord) bool {
+	if hasPlaintextOnlyBrowserSessionMaterials(trace) && !hasExplicitBrowserSessionCryptoSignal(trace) {
+		return false
+	}
+	if isPlaintextOnlyBrowserSessionResponse(trace, apiRecords) && !hasExplicitBrowserSessionCryptoSignal(trace) {
+		return false
+	}
 	if len(filterMeaningfulBrowserSessionAlgorithms(trace.Algorithms)) > 0 {
 		return true
 	}
@@ -447,7 +454,7 @@ func isMeaningfulBrowserSessionStep(step crawl.ProtocolCryptoStep) bool {
 	if strings.Contains(algorithm, "encrypt") || strings.Contains(algorithm, "decrypt") || strings.Contains(algorithm, "sign") {
 		return true
 	}
-	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5", "base64-encoded-payload", "hex-encoded-payload"} {
+	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5"} {
 		if strings.Contains(source, token) || strings.Contains(algorithm, token) {
 			return true
 		}
@@ -457,11 +464,61 @@ func isMeaningfulBrowserSessionStep(step crawl.ProtocolCryptoStep) bool {
 
 func isIgnorableBrowserSessionAlgorithm(value string) bool {
 	switch strings.TrimSpace(value) {
-	case "", "json.parse", "json.stringify", "json.parse(inferred)", "json.stringify(inferred)", "json.parse()", "json.stringify()":
+	case "",
+		"json.parse",
+		"json.stringify",
+		"json.parse(inferred)",
+		"json.stringify(inferred)",
+		"json.parse()",
+		"json.stringify()",
+		"base64-encoded-payload",
+		"hex-encoded-payload",
+		"encrypted-field(inferred)":
 		return true
 	default:
 		return false
 	}
+}
+
+func hasExplicitBrowserSessionCryptoSignal(trace crawl.ProtocolTraceRecord) bool {
+	if len(filterMeaningfulBrowserSessionAlgorithms(trace.Algorithms)) > 0 {
+		return true
+	}
+	for _, step := range append(append([]crawl.ProtocolCryptoStep{}, trace.RequestSteps...), trace.ResponseSteps...) {
+		if isMeaningfulBrowserSessionStep(step) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPlaintextOnlyBrowserSessionMaterials(trace crawl.ProtocolTraceRecord) bool {
+	if len(trace.SessionMaterials) == 0 {
+		return false
+	}
+	hasPlaintext := false
+	for key, value := range trace.SessionMaterials {
+		normalizedKey := strings.TrimSpace(key)
+		normalizedValue := strings.TrimSpace(value)
+		if normalizedValue == "" {
+			continue
+		}
+		switch normalizedKey {
+		case "latest_response_plaintext":
+			hasPlaintext = true
+		default:
+			return false
+		}
+	}
+	return hasPlaintext
+}
+
+func isPlaintextOnlyBrowserSessionResponse(trace crawl.ProtocolTraceRecord, apiRecords []crawl.NetworkRecord) bool {
+	responsePlaintext, responseCiphertext := resolveBrowserSessionTraceResponse(trace, apiRecords)
+	if strings.TrimSpace(responsePlaintext) == "" || strings.TrimSpace(responseCiphertext) != "" {
+		return false
+	}
+	return len(trace.ResponseSteps) == 0
 }
 
 func resolveBrowserSessionTraceResponse(trace crawl.ProtocolTraceRecord, apiRecords []crawl.NetworkRecord) (string, string) {

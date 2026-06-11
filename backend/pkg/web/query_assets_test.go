@@ -87,6 +87,18 @@ func TestGetTaskAssetsNormalizesLegacyStringArrays(t *testing.T) {
 				"created_at": "2026-04-13T13:00:00Z",
 			},
 		},
+		database.IndexSiteTree: {
+			{
+				"task_id":    "legacy-task",
+				"version":    1,
+				"node_id":    "root/0",
+				"parent_id":  "0",
+				"label":      "首页接口",
+				"url":        "https://legacy.example.com/api/demo",
+				"level":      1,
+				"created_at": "2026-04-13T13:00:00Z",
+			},
+		},
 	})
 	defer restoreES()
 
@@ -120,6 +132,9 @@ func TestGetTaskAssetsNormalizesLegacyStringArrays(t *testing.T) {
 	}
 	if len(response.Data.IPURL) != 1 || response.Data.IPURL[0].Value != "https://legacy.example.com/api/demo" {
 		t.Fatalf("ipUrl = %#v, want legacy string value normalized", response.Data.IPURL)
+	}
+	if len(response.Data.IPURL[0].Source) != 1 || response.Data.IPURL[0].Source[0] != "https://legacy.example.com/api/demo" {
+		t.Fatalf("ipUrl source = %#v, want backfilled absolute URL source", response.Data.IPURL[0].Source)
 	}
 }
 
@@ -191,8 +206,8 @@ func TestGetTaskAssetsMergesMultipleAssetDocumentsForSameTaskVersion(t *testing.
 	if len(response.Data.IPURL) != 2 {
 		t.Fatalf("ipUrl len = %d, want 2 merged assets; values=%#v", len(response.Data.IPURL), response.Data.IPURL)
 	}
-	if len(response.Data.APIRoot) != 2 {
-		t.Fatalf("apiRoot len = %d, want 2 merged assets; values=%#v", len(response.Data.APIRoot), response.Data.APIRoot)
+	if len(response.Data.APIRoot) != 3 {
+		t.Fatalf("apiRoot len = %d, want 3 merged assets including derived /api root; values=%#v", len(response.Data.APIRoot), response.Data.APIRoot)
 	}
 	if len(response.Data.APIRouter) != 2 {
 		t.Fatalf("apiRouter len = %d, want 2 merged assets; values=%#v", len(response.Data.APIRouter), response.Data.APIRouter)

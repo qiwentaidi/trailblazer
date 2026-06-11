@@ -200,6 +200,7 @@ func TestNewTargetResultFromCapturedActivityIncludesCapturedRecords(t *testing.T
 		[]string{"https://example.com/api/music"},
 		apiRecords,
 		protocolTraces,
+		nil,
 	)
 
 	if len(result.APIRecords) != 1 {
@@ -272,6 +273,7 @@ func TestNewTargetResultFromCapturedActivityNormalizesProtocolTraceForView(t *te
 				CreatedAt: timestamp,
 			},
 		},
+		nil,
 	)
 
 	if len(result.ProtocolTraces) != 1 {

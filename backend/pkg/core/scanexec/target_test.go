@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"trailblazer/pkg/core/crawl"
 	"trailblazer/pkg/core/database"
 	"trailblazer/pkg/core/structs"
 )
@@ -61,6 +62,105 @@ func TestBuildAssetInfoPreservesAIVerifiedFlag(t *testing.T) {
 	}
 	if !assets.Sensitive[0].AIVerified {
 		t.Fatal("expected sensitive asset to preserve aiVerified")
+	}
+}
+
+func TestBuildRisksPreservesAIVerifiedFlag(t *testing.T) {
+	risks := buildRisks(AssetInfo{
+		Sensitive: []SensitiveItem{
+			{Value: `password:"adminTest"`, Source: "https://example.com/app.js", AIVerified: true},
+		},
+	}, true)
+
+	if len(risks) != 1 {
+		t.Fatalf("expected 1 risk, got %d", len(risks))
+	}
+	if !risks[0].AIVerified {
+		t.Fatal("expected sensitive risk to preserve aiVerified")
+	}
+}
+
+func TestBuildFrontendRoutesNormalizesHashAndFiltersAPI(t *testing.T) {
+	routes := buildFrontendRoutes([]crawl.FrontendRouteRecord{
+		{Path: "https://example.com/#/admin/users"},
+		{Path: "/admin/users?tab=1"},
+		{Path: "/api/users"},
+		{Path: "/assets/logo.svg"},
+	})
+
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 frontend route after filtering, got %#v", routes)
+	}
+	if routes[0] != "/admin/users" {
+		t.Fatalf("expected normalized frontend route, got %#v", routes)
+	}
+}
+
+func TestBuildStaticAPIRoutesFiltersAndDedupes(t *testing.T) {
+	routes := buildStaticAPIRoutes(
+		structs.FindSomething{
+			APIRoute: []structs.InfoSource{
+				{Filed: "/api/users"},
+				{Filed: "/api/users[id]"},
+				{Filed: " https://example.com/api/users "},
+			},
+		},
+		func() crawl.NetworkLinks {
+			var links crawl.NetworkLinks
+			links.Classification.APIRoute = []string{"/api/users", "/api/roles"}
+			return links
+		}(),
+		crawl.Filter{},
+	)
+
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 static routes, got %#v", routes)
+	}
+	if routes[0] != "https://example.com/api/users" || routes[1] != "/api/roles" {
+		t.Fatalf("unexpected static routes: %#v", routes)
+	}
+}
+
+func TestBuildFrontendRouteDeltasUsesVisibleRoutesOnly(t *testing.T) {
+	deltas := buildFrontendRouteDeltas(
+		[]string{"/admin/users"},
+		[]crawl.FrontendRouteRecord{
+			{Path: "https://example.com/#/admin/users", SourceKind: "history-push", Source: "history.pushState", PageURL: "https://example.com/#/login"},
+			{Path: "/api/users", SourceKind: "history-push", Source: "history.pushState", PageURL: "https://example.com/#/login"},
+		},
+	)
+
+	if len(deltas) != 1 {
+		t.Fatalf("expected 1 frontend delta, got %#v", deltas)
+	}
+	if deltas[0].Path != "/admin/users" {
+		t.Fatalf("unexpected frontend delta path: %#v", deltas)
+	}
+	if deltas[0].SourceKind != "history-push" {
+		t.Fatalf("unexpected source kind: %#v", deltas)
+	}
+}
+
+func TestDiffStringSliceReturnsRuntimeOnlyRoutes(t *testing.T) {
+	diff := diffStringSlice(
+		[]string{"https://example.com/api/users", "/api/roles", "/api/roles"},
+		[]string{"/api/roles"},
+	)
+
+	if len(diff) != 1 || diff[0] != "https://example.com/api/users" {
+		t.Fatalf("unexpected diff: %#v", diff)
+	}
+}
+
+func TestClassifyRuntimeAPIRouteSourcePrefersProtocolTrace(t *testing.T) {
+	source := classifyRuntimeAPIRouteSource(
+		"https://example.com/api/users",
+		[]crawl.NetworkRecord{{URL: "https://example.com/api/users"}},
+		[]crawl.ProtocolTraceRecord{{RequestURL: "https://example.com/api/users?id=1"}},
+	)
+
+	if source != "protocol-trace" {
+		t.Fatalf("expected protocol-trace source, got %s", source)
 	}
 }
 

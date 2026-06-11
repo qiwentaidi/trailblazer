@@ -25,6 +25,11 @@ type StaticProtocolParam struct {
 	Source string `json:"source,omitempty"`
 }
 
+type StaticAPIContextParam struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
+}
+
 type StaticProtocolEndpoint struct {
 	Path                   string                        `json:"path"`
 	Method                 string                        `json:"method"`
@@ -70,11 +75,26 @@ type StaticProtocolProfile struct {
 	Evidence              []StaticProtocolEvidence `json:"evidence,omitempty"`
 }
 
+type StaticAPIContext struct {
+	URL              string                  `json:"url"`
+	Method           string                  `json:"method"`
+	SourceFile       string                  `json:"source_file"`
+	Snippet          string                  `json:"snippet"`
+	ParamCarrier     string                  `json:"param_carrier,omitempty"`
+	ParamPreview     string                  `json:"param_preview,omitempty"`
+	Params           []StaticAPIContextParam `json:"params,omitempty"`
+	TraceID          string                  `json:"trace_id,omitempty"`
+	HasProtocolTrace bool                    `json:"has_protocol_trace,omitempty"`
+	RequestHeaders   map[string]string       `json:"request_headers,omitempty"`
+	RequestBody      string                  `json:"request_body,omitempty"`
+}
+
 type StaticProtocolAnalysisResult struct {
 	TaskID      string                  `json:"task_id"`
 	JSCount     int                     `json:"js_count"`
 	GeneratedAt time.Time               `json:"generated_at"`
 	Profiles    []StaticProtocolProfile `json:"profiles"`
+	APIContexts []StaticAPIContext      `json:"api_contexts,omitempty"`
 }
 
 var (
@@ -133,6 +153,7 @@ func AnalyzeStoredJSProtocolsWithStore(taskID string, store database.ScanDataSto
 		JSCount:     len(jsResources),
 		GeneratedAt: time.Now(),
 		Profiles:    []StaticProtocolProfile{},
+		APIContexts: buildStaticAPIContexts(apiResources, jsResources),
 	}
 
 	if len(jsResources) == 0 {
@@ -348,6 +369,144 @@ func AnalyzeStoredJSProtocolsWithStore(taskID string, store database.ScanDataSto
 
 	result.Profiles = append(result.Profiles, profile)
 	return result, nil
+}
+
+func buildStaticAPIContexts(apiResources []database.APIResource, jsResources []database.JSResource) []StaticAPIContext {
+	if len(apiResources) == 0 || len(jsResources) == 0 {
+		return nil
+	}
+
+	contexts := make([]StaticAPIContext, 0, minInt(len(apiResources), 64))
+	seen := make(map[string]struct{})
+	for _, api := range apiResources {
+		needles := buildStaticContextNeedlesForURL(api.URL)
+		if len(needles) == 0 {
+			continue
+		}
+
+		for _, resource := range jsResources {
+			content := strings.TrimSpace(resource.Content)
+			if content == "" {
+				continue
+			}
+
+			snippet := buildStaticContextSnippet(content, needles)
+			if snippet == "" {
+				continue
+			}
+
+			key := strings.ToUpper(strings.TrimSpace(api.Method)) + "|" +
+				strings.TrimSpace(api.URL) + "|" +
+				strings.TrimSpace(resource.URL) + "|" +
+				snippet
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+
+			contexts = append(contexts, StaticAPIContext{
+				URL:              strings.TrimSpace(api.URL),
+				Method:           normalizeStaticContextMethod(api.Method),
+				SourceFile:       strings.TrimSpace(resource.URL),
+				Snippet:          snippet,
+				TraceID:          strings.TrimSpace(api.TraceID),
+				HasProtocolTrace: api.HasProtocolTrace,
+				RequestHeaders:   cloneStaticContextHeaders(api.RequestHeaders),
+				RequestBody:      strings.TrimSpace(api.RequestBody),
+			})
+			if len(contexts) >= 64 {
+				return contexts
+			}
+		}
+	}
+
+	return contexts
+}
+
+func buildStaticContextNeedlesForURL(rawURL string) []string {
+	normalized := strings.TrimSpace(rawURL)
+	if normalized == "" {
+		return nil
+	}
+
+	needles := make([]string, 0, 4)
+	appendNeedle := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range needles {
+			if existing == value {
+				return
+			}
+		}
+		needles = append(needles, value)
+	}
+
+	appendNeedle(normalized)
+	if parsed, err := url.Parse(normalized); err == nil {
+		appendNeedle(parsed.Path + parsed.RawQuery)
+		if parsed.RawQuery != "" {
+			appendNeedle(parsed.Path + "?" + parsed.RawQuery)
+		}
+		appendNeedle(parsed.Path)
+	}
+
+	sort.SliceStable(needles, func(i, j int) bool {
+		return len(needles[i]) > len(needles[j])
+	})
+	return needles
+}
+
+func buildStaticContextSnippet(content string, needles []string) string {
+	if len(needles) == 0 {
+		return ""
+	}
+
+	lowerContent := strings.ToLower(content)
+	for _, needle := range needles {
+		lowerNeedle := strings.ToLower(strings.TrimSpace(needle))
+		if lowerNeedle == "" {
+			continue
+		}
+		start := strings.Index(lowerContent, lowerNeedle)
+		if start < 0 {
+			continue
+		}
+		snippetStart := maxInt(0, start-120)
+		snippetEnd := minInt(len(content), start+len(needle)+120)
+		prefix := ""
+		suffix := ""
+		if snippetStart > 0 {
+			prefix = "..."
+		}
+		if snippetEnd < len(content) {
+			suffix = "..."
+		}
+		return prefix + content[snippetStart:snippetEnd] + suffix
+	}
+
+	return ""
+}
+
+func cloneStaticContextHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(headers))
+	for key, value := range headers {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func normalizeStaticContextMethod(method string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(method))
+	if normalized == "" {
+		return http.MethodGet
+	}
+	return normalized
 }
 
 func BuildStaticConstantParamHints(jsResources []database.JSResource) map[string]url.Values {
@@ -2743,4 +2902,18 @@ func mergeStaticClientLabels(items ...string) string {
 		}
 	}
 	return strings.Join(merged, " | ")
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }

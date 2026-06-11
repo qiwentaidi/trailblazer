@@ -2,8 +2,8 @@ package scanexec
 
 import (
 	"crypto/sha1"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -42,13 +42,14 @@ type SensitiveItem struct {
 }
 
 type AssetInfo struct {
-	Email     []SensitiveItem
-	IDCard    []SensitiveItem
-	Phone     []SensitiveItem
-	IPURL     []SensitiveItem
-	Sensitive []SensitiveItem
-	APIRoutes []string
-	APIRoots  []string
+	Email          []SensitiveItem
+	IDCard         []SensitiveItem
+	Phone          []SensitiveItem
+	IPURL          []SensitiveItem
+	Sensitive      []SensitiveItem
+	FrontendRoutes []string
+	APIRoutes      []string
+	APIRoots       []string
 }
 
 type RiskItem struct {
@@ -58,6 +59,7 @@ type RiskItem struct {
 	Type        string
 	URL         string
 	Description string
+	AIVerified  bool
 	CreatedAt   string
 }
 
@@ -187,7 +189,7 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	e := crawl.Extract{}
 	filter := crawl.Filter{}
 
-	allNetworkURLs, capturedAPIRecords, capturedProtocolTraces := crawl.CaptureNetworkActivity(targetURL)
+	allNetworkURLs, capturedAPIRecords, capturedProtocolTraces, capturedFrontendRoutes := crawl.CaptureNetworkActivity(targetURL)
 	for i := range capturedProtocolTraces {
 		if strings.TrimSpace(capturedProtocolTraces[i].TaskID) == "" {
 			capturedProtocolTraces[i].TaskID = options.TaskID
@@ -217,10 +219,13 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 
 	findSomething := crawl.Scan(targetURL, allJS, aiChecker)
 	result.Assets = buildAssetInfo(findSomething)
+	result.Assets.FrontendRoutes = buildFrontendRoutes(capturedFrontendRoutes)
 
+	staticAPIRoutes := buildStaticAPIRoutes(findSomething, classified, filter)
 	apiRouter := buildAPIRoutes(findSomething, classified, mergedAPIRecords, capturedProtocolTraces, filter)
 	result.Assets.APIRoutes = apiRouter
 	result.Assets.APIRoots = buildAPIRoots(targetURL, apiRouter, classified, filter)
+	logJSHookCaptureDelta(targetURL, result.Assets.FrontendRoutes, capturedFrontendRoutes, staticAPIRoutes, apiRouter, mergedAPIRecords, capturedProtocolTraces)
 
 	workingStore := buildWorkingDataStore(options, targetURL, result.JSResources, mergedAPIRecords, capturedProtocolTraces)
 	collector := &vulnSliceCollector{}
@@ -506,6 +511,47 @@ func buildAssetInfo(found structs.FindSomething) AssetInfo {
 	return result
 }
 
+func buildFrontendRoutes(records []crawl.FrontendRouteRecord) []string {
+	if len(records) == 0 {
+		return nil
+	}
+
+	routes := make([]string, 0, len(records))
+	for _, record := range records {
+		path := normalizeFrontendRoutePath(record.Path)
+		if path == "" || !shouldKeepFrontendRoute(path) {
+			continue
+		}
+		routes = append(routes, path)
+	}
+
+	return arrayutil.RemoveDuplicates(routes)
+}
+
+func buildStaticAPIRoutes(
+	found structs.FindSomething,
+	classified crawl.NetworkLinks,
+	filter crawl.Filter,
+) []string {
+	var routes []string
+	for _, item := range found.APIRoute {
+		if strings.Contains(item.Filed, "[") || strings.Contains(item.Filed, "]") {
+			continue
+		}
+		route := strings.TrimSpace(item.Filed)
+		if route != "" {
+			routes = append(routes, route)
+		}
+	}
+	for _, route := range classified.Classification.APIRoute {
+		trimmedRoute := strings.TrimSpace(route)
+		if trimmedRoute != "" {
+			routes = append(routes, trimmedRoute)
+		}
+	}
+	return finalizeAPIRoutes(routes, filter)
+}
+
 func buildAPIRoutes(
 	found structs.FindSomething,
 	classified crawl.NetworkLinks,
@@ -513,41 +559,29 @@ func buildAPIRoutes(
 	protocolTraces []crawl.ProtocolTraceRecord,
 	filter crawl.Filter,
 ) []string {
-	var apiRouter []string
-	for _, item := range found.APIRoute {
-		if strings.Contains(item.Filed, "[") || strings.Contains(item.Filed, "]") {
-			continue
-		}
-		route := strings.TrimSpace(item.Filed)
-		if route != "" {
-			apiRouter = append(apiRouter, route)
-		}
-	}
-	for _, route := range classified.Classification.APIRoute {
-		trimmedRoute := strings.TrimSpace(route)
-		if trimmedRoute != "" {
-			apiRouter = append(apiRouter, trimmedRoute)
-		}
-	}
-
+	apiRouter := buildStaticAPIRoutes(found, classified, filter)
 	apiRouter = mergeRuntimeAPIRoutes(apiRouter, apiRecords, protocolTraces)
-	apiRouter = preferAbsoluteRuntimeRoutes(apiRouter)
-	apiRouter = arrayutil.RemoveDuplicates(apiRouter)
-	apiRouter = filter.FilterAPIRoutes(apiRouter)
+	return finalizeAPIRoutes(apiRouter, filter)
+}
 
-	sort.Slice(apiRouter, func(i, j int) bool {
-		iIsFullURL := strings.HasPrefix(apiRouter[i], "http://") || strings.HasPrefix(apiRouter[i], "https://")
-		jIsFullURL := strings.HasPrefix(apiRouter[j], "http://") || strings.HasPrefix(apiRouter[j], "https://")
+func finalizeAPIRoutes(routes []string, filter crawl.Filter) []string {
+	routes = preferAbsoluteRuntimeRoutes(routes)
+	routes = arrayutil.RemoveDuplicates(routes)
+	routes = filter.FilterAPIRoutes(routes)
+
+	sort.Slice(routes, func(i, j int) bool {
+		iIsFullURL := strings.HasPrefix(routes[i], "http://") || strings.HasPrefix(routes[i], "https://")
+		jIsFullURL := strings.HasPrefix(routes[j], "http://") || strings.HasPrefix(routes[j], "https://")
 		if iIsFullURL && !jIsFullURL {
 			return true
 		}
 		if !iIsFullURL && jIsFullURL {
 			return false
 		}
-		return false
+		return routes[i] < routes[j]
 	})
 
-	return apiRouter
+	return routes
 }
 
 func buildAPIRoots(targetURL string, apiRouter []string, classified crawl.NetworkLinks, filter crawl.Filter) []string {
@@ -591,6 +625,7 @@ func buildRisks(assets AssetInfo, aiEnabled bool) []RiskItem {
 				Type:        riskType,
 				URL:         item.Source,
 				Description: fmt.Sprintf("发现%s: %s", title, item.Value),
+				AIVerified:  item.AIVerified,
 				CreatedAt:   timestamp,
 			})
 		}
@@ -616,8 +651,72 @@ func dedupeAssets(assets *AssetInfo) {
 	assets.Phone = dedupeSensitiveItems(assets.Phone)
 	assets.IPURL = dedupeSensitiveItems(assets.IPURL)
 	assets.Sensitive = dedupeSensitiveItems(assets.Sensitive)
+	assets.FrontendRoutes = arrayutil.RemoveDuplicates(assets.FrontendRoutes)
 	assets.APIRoutes = arrayutil.RemoveDuplicates(assets.APIRoutes)
 	assets.APIRoots = arrayutil.RemoveDuplicates(assets.APIRoots)
+}
+
+func normalizeFrontendRoutePath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if trimmed == "*" || trimmed == "/*" {
+		return trimmed
+	}
+
+	if strings.Contains(trimmed, "/#/") {
+		trimmed = trimmed[strings.Index(trimmed, "/#/")+2:]
+	}
+	if strings.HasPrefix(trimmed, "#") {
+		trimmed = strings.TrimPrefix(trimmed, "#")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err == nil {
+		switch {
+		case parsed.Fragment != "" && strings.HasPrefix(parsed.Fragment, "/"):
+			trimmed = parsed.Fragment
+		case parsed.Path != "":
+			trimmed = parsed.Path
+		}
+	}
+
+	if idx := strings.Index(trimmed, "#/"); idx >= 0 {
+		trimmed = trimmed[idx+1:]
+	}
+	if idx := strings.IndexAny(trimmed, "?#"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	trimmed = strings.ReplaceAll(trimmed, "//", "/")
+	return strings.TrimSpace(trimmed)
+}
+
+func shouldKeepFrontendRoute(route string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(route))
+	if normalized == "" || normalized == "/" {
+		return false
+	}
+	if strings.HasPrefix(normalized, "/api") {
+		return false
+	}
+	for _, ext := range []string{".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map"} {
+		if strings.HasSuffix(normalized, ext) {
+			return false
+		}
+	}
+	for _, keyword := range []string{"/static/", "/assets/", "/images/", "/img/", "/fonts/"} {
+		if strings.Contains(normalized, keyword) {
+			return false
+		}
+	}
+	return strings.Count(normalized, "/") <= 12
 }
 
 func dedupeSensitiveItems(items []SensitiveItem) []SensitiveItem {
@@ -1042,6 +1141,187 @@ func mergeRuntimeAPIRoutes(routes []string, apiRecords []crawl.NetworkRecord, pr
 		}
 	}
 	return arrayutil.RemoveDuplicates(merged)
+}
+
+type jsHookFrontendRouteDelta struct {
+	Path       string
+	SourceKind string
+	Source     string
+	PageURL    string
+}
+
+func logJSHookCaptureDelta(
+	targetURL string,
+	frontendRoutes []string,
+	frontendRecords []crawl.FrontendRouteRecord,
+	staticAPIRoutes []string,
+	finalAPIRoutes []string,
+	apiRecords []crawl.NetworkRecord,
+	protocolTraces []crawl.ProtocolTraceRecord,
+) {
+	if !jsHookDebugEnabled() {
+		return
+	}
+
+	frontendDeltas := buildFrontendRouteDeltas(frontendRoutes, frontendRecords)
+	runtimeOnlyAPIRoutes := diffStringSlice(finalAPIRoutes, staticAPIRoutes)
+
+	fmt.Printf(
+		"[INFO] JS Hook增量概览 target=%s frontend_routes=%d runtime_api_routes=%d static_api_routes=%d final_api_routes=%d\n",
+		targetURL,
+		len(frontendDeltas),
+		len(runtimeOnlyAPIRoutes),
+		len(staticAPIRoutes),
+		len(finalAPIRoutes),
+	)
+
+	for _, item := range frontendDeltas {
+		fmt.Printf(
+			"[INFO] JS Hook新增前端路由 target=%s path=%s source_kind=%s source=%s page=%s\n",
+			targetURL,
+			item.Path,
+			item.SourceKind,
+			item.Source,
+			item.PageURL,
+		)
+	}
+
+	for _, route := range runtimeOnlyAPIRoutes {
+		fmt.Printf(
+			"[INFO] JS Hook新增接口路由 target=%s route=%s source=%s\n",
+			targetURL,
+			route,
+			classifyRuntimeAPIRouteSource(route, apiRecords, protocolTraces),
+		)
+	}
+}
+
+func buildFrontendRouteDeltas(routes []string, records []crawl.FrontendRouteRecord) []jsHookFrontendRouteDelta {
+	if len(routes) == 0 || len(records) == 0 {
+		return nil
+	}
+
+	allowed := make(map[string]struct{}, len(routes))
+	for _, route := range routes {
+		trimmed := strings.TrimSpace(route)
+		if trimmed == "" {
+			continue
+		}
+		allowed[trimmed] = struct{}{}
+	}
+
+	deltas := make([]jsHookFrontendRouteDelta, 0, len(allowed))
+	seen := make(map[string]struct{}, len(allowed))
+	for _, record := range records {
+		path := normalizeFrontendRoutePath(record.Path)
+		if path == "" {
+			continue
+		}
+		if _, ok := allowed[path]; !ok {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		deltas = append(deltas, jsHookFrontendRouteDelta{
+			Path:       path,
+			SourceKind: strings.TrimSpace(record.SourceKind),
+			Source:     strings.TrimSpace(record.Source),
+			PageURL:    strings.TrimSpace(record.PageURL),
+		})
+	}
+
+	sort.Slice(deltas, func(i, j int) bool {
+		return deltas[i].Path < deltas[j].Path
+	})
+	return deltas
+}
+
+func diffStringSlice(values []string, baseline []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	base := make(map[string]struct{}, len(baseline))
+	for _, item := range baseline {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		base[trimmed] = struct{}{}
+	}
+
+	var diff []string
+	for _, item := range values {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := base[trimmed]; ok {
+			continue
+		}
+		diff = append(diff, trimmed)
+	}
+	return arrayutil.RemoveDuplicates(diff)
+}
+
+func classifyRuntimeAPIRouteSource(route string, apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord) string {
+	trimmedRoute := strings.TrimSpace(route)
+	if trimmedRoute == "" {
+		return "unknown"
+	}
+
+	recordMatched := false
+	for _, trace := range protocolTraces {
+		if apiRouteMatchesRuntimeURL(trimmedRoute, trace.RequestURL) {
+			return "protocol-trace"
+		}
+	}
+	for _, record := range apiRecords {
+		if apiRouteMatchesRuntimeURL(trimmedRoute, record.URL) {
+			recordMatched = true
+			break
+		}
+	}
+	if recordMatched {
+		return "network-record"
+	}
+	return "runtime"
+}
+
+func apiRouteMatchesRuntimeURL(route string, runtimeURL string) bool {
+	route = strings.TrimSpace(route)
+	runtimeURL = strings.TrimSpace(runtimeURL)
+	if route == "" || runtimeURL == "" {
+		return false
+	}
+	if route == runtimeURL {
+		return true
+	}
+
+	routeParsed, routeErr := url.Parse(route)
+	runtimeParsed, runtimeErr := url.Parse(runtimeURL)
+	if routeErr == nil && runtimeErr == nil {
+		routePath := strings.TrimSpace(routeParsed.Path)
+		runtimePath := strings.TrimSpace(runtimeParsed.Path)
+		if routePath != "" && routePath == runtimePath {
+			return true
+		}
+	}
+	return false
+}
+
+func jsHookDebugEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("TRAILBLAZER_DEBUG_JS_HOOK"))
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err == nil {
+		return enabled
+	}
+	return raw == "1"
 }
 
 func preferAbsoluteRuntimeRoutes(routes []string) []string {
