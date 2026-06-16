@@ -64,6 +64,8 @@ type UnauthorizedAssessment struct {
 	RiskLevel        string
 	Confidence       string
 	ConfidenceReason string
+	DataExposure     string
+	ExposureReason   string
 	ResponseType     string
 }
 
@@ -137,11 +139,15 @@ func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 
 	// 5. 评估风险等级
 	riskLevel := assessRiskLevel(body, apiReq.URL)
+	dataExposure, exposureReason := classifyUnauthorizedExposure(body, apiReq.URL)
+	riskLevel = adjustUnauthorizedRiskLevel(riskLevel, dataExposure)
 	confidence, confidenceReason := evaluateUnauthorizedConfidence(resp.StatusCode(), body, apiReq.URL)
 	return true, body, UnauthorizedAssessment{
 		RiskLevel:        riskLevel,
 		Confidence:       confidence,
 		ConfidenceReason: confidenceReason,
+		DataExposure:     dataExposure,
+		ExposureReason:   exposureReason,
 		ResponseType:     responseType,
 	}, nil
 }
@@ -890,6 +896,149 @@ func assessRiskLevel(responseBody, url string) string {
 	}
 }
 
+func classifyUnauthorizedExposure(responseBody, url string) (string, string) {
+	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
+	urlLower := strings.ToLower(strings.TrimSpace(url))
+	if bodyLower == "" {
+		return "internal_business", "响应内容为空，默认按内部业务数据处理"
+	}
+
+	sensitiveScore := countUniqueIndicators(bodyLower, []string{
+		`"phone"`, `"mobile"`, `"email"`, `"idcard"`, `"id_card"`, `"身份证"`,
+		`"password"`, `"passwd"`, `"token"`, `"secret"`, `"apikey"`, `"api_key"`,
+		`"accesskey"`, `"access_key"`, `"role"`, `"permission"`, `"user"`, `"username"`,
+		`"account"`, `"customer"`, `"employee"`, `"staff"`, `"order"`, `"invoice"`,
+		`"amount"`, `"balance"`, `"salary"`, `"bank"`, `"address"`,
+	})
+	if containsSensitiveTextPatterns(bodyLower) {
+		sensitiveScore += 2
+	}
+
+	internalBusinessScore := countUniqueIndicators(bodyLower, []string{
+		`"department"`, `"project"`, `"task"`, `"workflow"`, `"notice"`, `"record"`,
+		`"detail"`, `"content"`, `"title"`, `"status"`, `"comment"`, `"creator"`,
+		`"owner"`, `"member"`, `"tenant"`, `"org"`, `"organization"`, `"company"`,
+		`"channel"`, `"source"`, `"business"`, `"审批"`, `"工单"`, `"客户"`, `"员工"`,
+		`"部门"`, `"项目"`, `"任务"`, `"流程"`, `"租户"`, `"企业"`, `"组织"`,
+	})
+	if containsMeaningfulDataSignals(bodyLower, url) {
+		internalBusinessScore += 2
+	}
+
+	dictFieldScore := countUniqueIndicators(bodyLower, []string{
+		`"label"`, `"value"`, `"text"`, `"name"`, `"code"`, `"id"`,
+		`"parentid"`, `"parent_id"`, `"sort"`, `"children"`, `"dictlabel"`, `"dictvalue"`,
+		`"dict_label"`, `"dict_value"`, `"displayname"`, `"display_name"`,
+	})
+	geoScore := countUniqueIndicators(bodyLower, []string{
+		`"city"`, `"province"`, `"district"`, `"county"`, `"region"`, `"street"`,
+		`"town"`, `"village"`, `"zipcode"`, `"postal"`, `"lng"`, `"lat"`,
+		`"城市"`, `"省"`, `"区"`, `"县"`, `"区域"`, `"街道"`, `"乡镇"`, `"经度"`, `"纬度"`,
+	})
+
+	publicPathScore := countUniqueIndicators(urlLower, []string{
+		"/public", "/open", "/common", "/region", "/area", "/city", "/province",
+		"/district", "/county", "/street", "/geo", "/metadata", "/meta",
+	})
+	basicPathScore := countUniqueIndicators(urlLower, []string{
+		"/config", "/setting", "/lookup", "/list", "/tree", "/category", "/type",
+		"/code", "/dictionary", "/dict", "/enum", "/option", "/select",
+	})
+
+	hasDictionaryShape := dictFieldScore >= 3 && strings.Count(bodyLower, "{") >= 2
+	hasGeoDictionaryShape := (hasDictionaryShape || geoScore >= 3) && strings.Count(bodyLower, "{") >= 2
+	publicScore := publicPathScore + geoScore
+	basicScore := basicPathScore + dictFieldScore
+	if hasDictionaryShape {
+		publicScore += 2
+		basicScore += 2
+	}
+
+	switch {
+	case sensitiveScore >= 2:
+		return "sensitive_data", "响应命中用户、凭据、资金或权限等敏感字段，按高价值数据暴露处理"
+	case publicScore >= 4 && hasGeoDictionaryShape && sensitiveScore == 0:
+		return "public_data", "响应更像公开基础地理或公共枚举数据，按公开数据暴露处理"
+	case basicScore >= 6 && sensitiveScore == 0 && internalBusinessScore <= 2:
+		return "basic_reference", "响应主要由字典、枚举或通用配置字段组成，按基础参考数据处理"
+	case internalBusinessScore >= 2 || containsMeaningfulDataSignals(bodyLower, url):
+		return "internal_business", "响应包含有效业务结构或内部业务字段，按内部业务数据暴露处理"
+	default:
+		return "internal_business", "接口返回有效内容但未命中公开数据特征，默认按内部业务数据处理"
+	}
+}
+
+func adjustUnauthorizedRiskLevel(currentLevel, dataExposure string) string {
+	switch strings.TrimSpace(dataExposure) {
+	case "public_data":
+		return "info"
+	case "basic_reference":
+		return lowerRiskLevel(currentLevel, "low")
+	case "internal_business":
+		return raiseRiskLevel(currentLevel, "medium")
+	case "sensitive_data":
+		return raiseRiskLevel(currentLevel, "high")
+	default:
+		return normalizeUnauthorizedRiskLevel(currentLevel)
+	}
+}
+
+func raiseRiskLevel(currentLevel, minimumLevel string) string {
+	if unauthorizedRiskLevelRank(currentLevel) >= unauthorizedRiskLevelRank(minimumLevel) {
+		return normalizeUnauthorizedRiskLevel(currentLevel)
+	}
+	return normalizeUnauthorizedRiskLevel(minimumLevel)
+}
+
+func lowerRiskLevel(currentLevel, maximumLevel string) string {
+	if unauthorizedRiskLevelRank(currentLevel) <= unauthorizedRiskLevelRank(maximumLevel) {
+		return normalizeUnauthorizedRiskLevel(currentLevel)
+	}
+	return normalizeUnauthorizedRiskLevel(maximumLevel)
+}
+
+func normalizeUnauthorizedRiskLevel(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "high", "medium", "low", "info":
+		return strings.ToLower(strings.TrimSpace(level))
+	default:
+		return "low"
+	}
+}
+
+func unauthorizedRiskLevelRank(level string) int {
+	switch normalizeUnauthorizedRiskLevel(level) {
+	case "info":
+		return 0
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	default:
+		return 1
+	}
+}
+
+func countUniqueIndicators(content string, indicators []string) int {
+	count := 0
+	seen := make(map[string]struct{}, len(indicators))
+	for _, indicator := range indicators {
+		if indicator == "" {
+			continue
+		}
+		if _, exists := seen[indicator]; exists {
+			continue
+		}
+		seen[indicator] = struct{}{}
+		if strings.Contains(content, indicator) {
+			count++
+		}
+	}
+	return count
+}
+
 func assessConfidence(statusCode int, responseBody, url string) (string, string) {
 	observation := recordResponseObservation(statusCode, responseBody, url)
 	return assessConfidenceWithRepeatCount(statusCode, responseBody, url, observation)
@@ -937,54 +1086,43 @@ func responseSignatureTrackerCurrentCount(statusCode int, responseBody string) i
 
 func assessConfidenceWithRepeatCount(statusCode int, responseBody, url string, observation responseRepeatObservation) (string, string) {
 	score := 100
-	reasons := []string{}
 	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
 	responseLength := len(responseBody)
 
 	if responseLength <= 0 {
-		return "low", "响应内容为空"
+		return "low", buildUnauthorizedConfidenceStatement("low")
 	}
 
 	if responseLength < 120 {
 		score -= 20
-		reasons = append(reasons, "响应体很短，可利用信息有限")
 	} else if responseLength < 300 {
 		score -= 10
-		reasons = append(reasons, "响应体偏短，结果可能更像统一提示")
 	}
 
 	if statusCode == 500 {
 		score -= 20
-		reasons = append(reasons, "响应状态为 500，接口可能只是暴露通用异常")
 	}
 
 	if isLikelyGenericErrorResponse(bodyLower) {
 		score -= 45
-		reasons = append(reasons, "响应内容命中通用错误特征，疑似统一报错或访问限制提示")
 	}
 
 	repeatCount := observation.ExactCount
-	repeatLabel := "相同响应特征"
 	if observation.SimilarCount > repeatCount {
 		repeatCount = observation.SimilarCount
-		repeatLabel = "同目标相似响应特征"
 	}
 
 	switch {
 	case repeatCount >= 10:
 		score -= 45
-		reasons = append(reasons, fmt.Sprintf("%s已重复出现 %d 次，批量误报概率较高", repeatLabel, repeatCount))
 	case repeatCount >= 5:
 		score -= 30
-		reasons = append(reasons, fmt.Sprintf("%s已重复出现 %d 次，结果区分度较低", repeatLabel, repeatCount))
 	case repeatCount >= 3:
 		score -= 15
-		reasons = append(reasons, fmt.Sprintf("%s已重复出现 %d 次，需要结合业务复核", repeatLabel, repeatCount))
 	}
 
 	if containsMeaningfulDataSignals(bodyLower, url) {
 		score += 10
-		reasons = append(reasons, "响应中包含结构化业务字段，存在真实数据返回迹象")
 	}
 
 	if score < 0 {
@@ -995,11 +1133,22 @@ func assessConfidenceWithRepeatCount(statusCode int, responseBody, url string, o
 
 	switch {
 	case score >= 75:
-		return "high", strings.Join(reasons, "；")
+		return "high", buildUnauthorizedConfidenceStatement("high")
 	case score >= 45:
-		return "medium", strings.Join(reasons, "；")
+		return "medium", buildUnauthorizedConfidenceStatement("medium")
 	default:
-		return "low", strings.Join(reasons, "；")
+		return "low", buildUnauthorizedConfidenceStatement("low")
+	}
+}
+
+func buildUnauthorizedConfidenceStatement(confidence string) string {
+	switch normalizeUnauthorizedRiskLevel(confidence) {
+	case "high":
+		return "高置信：响应包含明确业务数据返回"
+	case "medium":
+		return "中置信：存在数据返回，但与公开接口仍需区分"
+	default:
+		return "低置信：结果更像相似拒绝模板或通用错误响应"
 	}
 }
 

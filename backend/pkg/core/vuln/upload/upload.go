@@ -62,7 +62,7 @@ func TestFileUpload(apiReq structs.APIRequest, cfg config.UploadConfig, aiChecke
 		}, nil
 	}
 
-	fmt.Printf("[DEBUG] 开始文件上传检测: %s\n", apiReq.URL)
+	fmt.Printf("[调试] 开始文件上传检测: %s\n", apiReq.URL)
 
 	// 使用配置的测试内容
 	testContent := cfg.TestContent

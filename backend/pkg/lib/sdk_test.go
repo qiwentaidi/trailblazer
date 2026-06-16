@@ -226,6 +226,60 @@ func TestNewTargetResultFromCapturedActivityIncludesCapturedRecords(t *testing.T
 	}
 }
 
+func TestBuildSDKTargetOverviewFocusesOnVulnerabilities(t *testing.T) {
+	target := TargetResult{
+		APIRecords: []APIRecord{
+			{URL: "https://example.com/api/orders", Method: "GET"},
+			{URL: "https://example.com/api/orders", Method: "POST"},
+		},
+		ProtocolTraces: []ProtocolTrace{{TraceID: "trace-1"}},
+		Assets: AssetInfo{
+			APIRoutes: []string{"/api/orders", "/api/profile"},
+			APIRoots:  []string{"/api"},
+		},
+		Vulnerabilities: []VulnerabilityItem{
+			{
+				Title:            "未授权访问漏洞",
+				Level:            "high",
+				Type:             "unauthorized",
+				URL:              "https://example.com/api/orders?id=1",
+				Method:           "GET",
+				Confidence:       "high",
+				DataExposure:     "internal_business",
+				HasProtocolTrace: true,
+			},
+			{
+				Title:      "SQL注入漏洞",
+				Level:      "medium",
+				Type:       "sql_injection",
+				URL:        "https://example.com/api/orders?id=2",
+				Method:     "GET",
+				Confidence: "medium",
+			},
+		},
+	}
+
+	overview := buildSDKTargetOverview(target)
+	if overview.VulnerabilityCount != 2 {
+		t.Fatalf("expected vulnerability count 2, got %d", overview.VulnerabilityCount)
+	}
+	if overview.VulnerableEndpoints != 1 {
+		t.Fatalf("expected deduped vulnerable endpoints 1, got %d", overview.VulnerableEndpoints)
+	}
+	if overview.Severity.High != 1 || overview.Severity.Medium != 1 {
+		t.Fatalf("unexpected severity summary: %+v", overview.Severity)
+	}
+	if overview.VulnerabilityTypes["unauthorized"] != 1 || overview.VulnerabilityTypes["sql_injection"] != 1 {
+		t.Fatalf("unexpected vulnerability types: %+v", overview.VulnerabilityTypes)
+	}
+	if overview.Auxiliary.APIRecords != 2 || overview.Auxiliary.ProtocolTraces != 1 {
+		t.Fatalf("unexpected auxiliary counts: %+v", overview.Auxiliary)
+	}
+	if len(overview.KeyFindings) != 2 {
+		t.Fatalf("expected 2 key findings, got %d", len(overview.KeyFindings))
+	}
+}
+
 func TestNewTargetResultFromCapturedActivityNormalizesProtocolTraceForView(t *testing.T) {
 	timestamp := time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC)
 

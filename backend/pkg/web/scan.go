@@ -34,12 +34,12 @@ func resolveWebVulnDetection(options config.VulnDetection) config.VulnDetection 
 
 // ScanResult 扫描结果
 type ScanResult struct {
-	TaskID   string             `json:"taskId"`
-	Target   string             `json:"target"`
-	TreeData []crawl.ElTreeNode `json:"treeData"`
-	Assets   AssetInfo          `json:"assets"`
-	Risks    []RiskItem         `json:"risks"`
-	APIRoots []string           `json:"apiRoots"`
+	TaskID          string                `json:"taskId"`
+	Target          string                `json:"target"`
+	TreeData        []crawl.ElTreeNode    `json:"treeData"`
+	Assets          AssetInfo             `json:"assets"`
+	Vulnerabilities []database.VulnRecord `json:"vulnerabilities"`
+	APIRoots        []string              `json:"apiRoots"`
 }
 
 // AssetInfo 资产信息
@@ -130,34 +130,6 @@ func convertSharedSensitiveItems(items []scanexec.SensitiveItem) []SensitiveItem
 	return result
 }
 
-func convertSharedRisks(items []scanexec.RiskItem) []RiskItem {
-	result := make([]RiskItem, 0, len(items))
-	for _, item := range items {
-		result = append(result, RiskItem{
-			ID:          item.ID,
-			Title:       item.Title,
-			Level:       item.Level,
-			Type:        item.Type,
-			URL:         item.URL,
-			Description: item.Description,
-			AIVerified:  item.AIVerified,
-			CreatedAt:   item.CreatedAt,
-		})
-	}
-	return result
-}
-
-type RiskItem struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Level       string `json:"level"` // high, medium, low, info
-	Type        string `json:"type"`
-	URL         string `json:"url"`
-	Description string `json:"description"`
-	AIVerified  bool   `json:"aiVerified,omitempty"`
-	CreatedAt   string `json:"createdAt"`
-}
-
 // startScan 启动完整扫描（异步模式）
 func startScan(c *gin.Context) {
 	var body struct {
@@ -180,9 +152,9 @@ func startScan(c *gin.Context) {
 		task := database.Task{ID: body.TaskId}
 		_, err := task.UpdateStatus("running", 0)
 		if err != nil {
-			fmt.Printf("[ERROR] Failed to update task status to running: %v\n", err)
+			fmt.Printf("[错误] 更新任务状态为运行中失败: %v\n", err)
 		} else {
-			fmt.Printf("[INFO] Updated task %s status to running\n", body.TaskId)
+			fmt.Printf("[信息] 任务 %s 状态已更新为运行中\n", body.TaskId)
 		}
 	}
 
@@ -200,19 +172,19 @@ func performAsyncScan(urls []string, taskId string) {
 	// 添加defer函数处理扫描失败的情况
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("[ERROR] Scan panic recovered: %v\n", r)
+			fmt.Printf("[错误] 扫描过程中捕获到异常: %v\n", r)
 			if taskId != "" {
 				if version > 0 {
 					if err := database.UpdateTaskVersionStatus(taskId, version, "failed", 0); err != nil {
-						fmt.Printf("[ERROR] Failed to update task version status to failed: %v\n", err)
+						fmt.Printf("[错误] 更新任务版本状态为失败失败: %v\n", err)
 					}
 				}
 				task := database.Task{ID: taskId}
 				_, err := task.UpdateStatus("failed", 0)
 				if err != nil {
-					fmt.Printf("[ERROR] Failed to update task status to failed: %v\n", err)
+					fmt.Printf("[错误] 更新任务状态为失败失败: %v\n", err)
 				} else {
-					fmt.Printf("[INFO] Updated task %s status to failed\n", taskId)
+					fmt.Printf("[信息] 任务 %s 状态已更新为失败\n", taskId)
 				}
 			}
 		}
@@ -221,7 +193,7 @@ func performAsyncScan(urls []string, taskId string) {
 	// 加载配置
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to load config: %v\n", err)
+		fmt.Printf("[错误] 加载配置失败: %v\n", err)
 		if taskId != "" {
 			task := database.Task{ID: taskId}
 			task.UpdateStatus("failed", 0)
@@ -230,7 +202,7 @@ func performAsyncScan(urls []string, taskId string) {
 	}
 	var config Config
 	if err := yaml.Unmarshal(configData, &config); err != nil {
-		fmt.Printf("[ERROR] Failed to parse config: %v\n", err)
+		fmt.Printf("[错误] 解析配置失败: %v\n", err)
 		if taskId != "" {
 			task := database.Task{ID: taskId}
 			task.UpdateStatus("failed", 0)
@@ -244,22 +216,22 @@ func performAsyncScan(urls []string, taskId string) {
 	if taskId != "" {
 		taskVersion, err := database.CreateTaskVersion(taskId, urls, configData, "manual")
 		if err != nil {
-			fmt.Printf("[ERROR] Failed to create task version for task %s: %v\n", taskId, err)
+			fmt.Printf("[错误] 为任务 %s 创建任务版本失败: %v\n", taskId, err)
 			task := database.Task{ID: taskId}
 			task.UpdateStatus("failed", 0)
 			return
 		}
 		version = taskVersion.Version
 		if err := database.UpdateTaskVersionStatus(taskId, version, "running", 0); err != nil {
-			fmt.Printf("[ERROR] Failed to update task version %d status to running: %v\n", version, err)
+			fmt.Printf("[错误] 更新任务 %s 的版本 %d 为运行中失败: %v\n", taskId, version, err)
 		}
-		fmt.Printf("[INFO] Created task version %d for task %s\n", version, taskId)
+		fmt.Printf("[信息] 已为任务 %s 创建版本 %d\n", taskId, version)
 	}
 
 	// 存储所有URL的扫描结果
 	var allResults []ScanResult
 	var allAssets AssetInfo
-	var allRisks []RiskItem
+	var allVulnerabilities []database.VulnRecord
 	var allAPIRoots []string
 	var allTreeData []crawl.ElTreeNode
 
@@ -271,13 +243,13 @@ func performAsyncScan(urls []string, taskId string) {
 
 	// 循环处理每个URL
 	for i, targetURL := range urls {
-		fmt.Printf("[INFO] Processing URL %d/%d: %s\n", i+1, len(urls), targetURL)
+		fmt.Printf("[信息] 正在处理目标 %d/%d: %s\n", i+1, len(urls), targetURL)
 
 		result := ScanResult{
-			TaskID: taskId,
-			Target: targetURL,
-			Assets: AssetInfo{},
-			Risks:  []RiskItem{},
+			TaskID:          taskId,
+			Target:          targetURL,
+			Assets:          AssetInfo{},
+			Vulnerabilities: []database.VulnRecord{},
 		}
 
 		targetScanResult, err := scanexec.RunTarget(targetURL, scanexec.Options{
@@ -292,16 +264,16 @@ func performAsyncScan(urls []string, taskId string) {
 			DataStore:      database.GetScanDataStore(),
 		})
 		if err != nil {
-			fmt.Printf("[WARNING] Target %s is not accessible: %v\n", targetURL, err)
+			fmt.Printf("[警告] 目标无法访问，已跳过: %s，原因: %v\n", targetURL, err)
 			continue
 		}
 
 		result.TreeData = targetScanResult.TreeData
 		if database.ESClient != nil {
 			saveTreeToESWithURL(taskId, version, targetURL, result.TreeData, now)
-			fmt.Printf("[DEBUG] Saved %d tree nodes to ES for task %s (URL: %s)\n", countTreeNodes(result.TreeData), taskId, targetURL)
+			fmt.Printf("[调试] 已为任务 %s 保存 %d 个站点树节点（目标: %s）\n", taskId, countTreeNodes(result.TreeData), targetURL)
 		} else {
-			fmt.Printf("[DEBUG] ES client is nil, tree not saved\n")
+			fmt.Printf("[调试] ES 客户端未初始化，跳过保存站点树\n")
 		}
 
 		if database.ESClient != nil {
@@ -313,11 +285,11 @@ func performAsyncScan(urls []string, taskId string) {
 				savedCount++
 				go func(resource database.JSResource) {
 					if err := database.SaveJSResource(resource); err != nil {
-						fmt.Printf("[ERROR] Failed to save JS %s: %v\n", resource.URL, err)
+						fmt.Printf("[错误] 保存 JS 资源失败: %s，原因: %v\n", resource.URL, err)
 					}
 				}(jsResource)
 			}
-			fmt.Printf("[DEBUG] Scheduled %d JS files for saving (out of %d total)\n", savedCount, len(targetScanResult.JSResources))
+			fmt.Printf("[调试] 已安排保存 %d/%d 个 JS 文件\n", savedCount, len(targetScanResult.JSResources))
 
 			savedAPIRecordCount := 0
 			for _, apiRecord := range targetScanResult.APIRecords {
@@ -338,11 +310,11 @@ func performAsyncScan(urls []string, taskId string) {
 						FetchedAt:        record.FetchedAt,
 					})
 					if err != nil {
-						fmt.Printf("[ERROR] Failed to save API record %s %s: %v\n", record.Method, record.URL, err)
+						fmt.Printf("[错误] 保存接口记录失败: %s %s，原因: %v\n", record.Method, record.URL, err)
 					}
 				}(apiRecord)
 			}
-			fmt.Printf("[DEBUG] Scheduled %d API records for saving\n", savedAPIRecordCount)
+			fmt.Printf("[调试] 已安排保存 %d 条接口记录\n", savedAPIRecordCount)
 
 			savedProtocolTraceCount := 0
 			for _, trace := range targetScanResult.ProtocolTraces {
@@ -393,11 +365,11 @@ func performAsyncScan(urls []string, taskId string) {
 						CreatedAt:              record.CreatedAt,
 					})
 					if err != nil {
-						fmt.Printf("[ERROR] Failed to save protocol trace %s %s: %v\n", record.Method, record.RequestURL, err)
+						fmt.Printf("[错误] 保存协议轨迹失败: %s %s，原因: %v\n", record.Method, record.RequestURL, err)
 					}
 				}(trace)
 			}
-			fmt.Printf("[DEBUG] Scheduled %d protocol traces for saving\n", savedProtocolTraceCount)
+			fmt.Printf("[调试] 已安排保存 %d 条协议轨迹\n", savedProtocolTraceCount)
 		}
 
 		result.Assets.Email = convertSharedSensitiveItems(targetScanResult.Assets.Email)
@@ -429,7 +401,7 @@ func performAsyncScan(urls []string, taskId string) {
 			allAPIRouterAssets = append(allAPIRouterAssets, item)
 		}
 
-		fmt.Printf("[DEBUG] Collected assets for URL %s: %d IP/URLs, %d API roots, %d API routes\n",
+		fmt.Printf("[调试] 目标 %s 资产汇总: %d 条 IP/URL，%d 个 API 根路径，%d 条 API 路由\n",
 			targetURL, len(result.Assets.IPURL), len(result.APIRoots), len(result.Assets.APIRoutes))
 
 		// 立即保存当前URL的资产数据到ES（在漏洞检测之前）
@@ -450,36 +422,19 @@ func performAsyncScan(urls []string, taskId string) {
 			}
 
 			if err := database.SaveAsset(currentAssetRecord); err != nil {
-				fmt.Printf("[ERROR] Failed to save assets for task %s (URL: %s): %v\n", taskId, targetURL, err)
+				fmt.Printf("[错误] 保存任务 %s 的资产失败（目标: %s）: %v\n", taskId, targetURL, err)
 			} else {
-				fmt.Printf("[DEBUG] Saved assets to ES for task %s (URL: %s): %d emails, %d phones, %d idcards, %d IP/URLs, %d API roots, %d API routes\n",
+				fmt.Printf("[调试] 已为任务 %s 保存资产（目标: %s）: %d 个邮箱，%d 个手机号，%d 个身份证，%d 条 IP/URL，%d 个 API 根路径，%d 条 API 路由\n",
 					taskId, targetURL, len(currentAssetRecord.Email), len(currentAssetRecord.Phone), len(currentAssetRecord.IDCard), len(currentAssetRecord.IPURL), len(currentAssetRecord.APIRoot), len(currentAssetRecord.APIRouter))
 			}
 		}
 
+		result.Vulnerabilities = append(result.Vulnerabilities, targetScanResult.Vulnerabilities...)
 		if database.ESClient != nil {
-			for _, vulnRecord := range targetScanResult.Vulnerabilities {
+			for _, vulnRecord := range result.Vulnerabilities {
 				if err := database.SaveVuln(vulnRecord); err != nil {
-					fmt.Printf("[ERROR] Failed to save vulnerability %s %s: %v\n", vulnRecord.Method, vulnRecord.URL, err)
+					fmt.Printf("[错误] 保存漏洞失败: %s %s，原因: %v\n", vulnRecord.Method, vulnRecord.URL, err)
 				}
-			}
-		}
-
-		result.Risks = convertSharedRisks(targetScanResult.Risks)
-		for _, risk := range result.Risks {
-			if database.ESClient != nil {
-				database.SaveVuln(database.VulnRecord{
-					TaskID:      taskId,
-					Version:     version,
-					VulnID:      risk.ID,
-					Title:       risk.Title,
-					Level:       risk.Level,
-					Type:        risk.Type,
-					URL:         risk.URL,
-					Description: risk.Description,
-					AIVerified:  risk.AIVerified,
-					CreatedAt:   now,
-				})
 			}
 		}
 
@@ -496,8 +451,8 @@ func performAsyncScan(urls []string, taskId string) {
 		allAssets.FrontendRoutes = append(allAssets.FrontendRoutes, result.Assets.FrontendRoutes...)
 		allAssets.APIRoutes = append(allAssets.APIRoutes, result.Assets.APIRoutes...)
 
-		// 合并风险数据
-		allRisks = append(allRisks, result.Risks...)
+		// 合并漏洞数据
+		allVulnerabilities = append(allVulnerabilities, result.Vulnerabilities...)
 
 		// 合并API根路径
 		allAPIRoots = append(allAPIRoots, result.APIRoots...)
@@ -507,15 +462,15 @@ func performAsyncScan(urls []string, taskId string) {
 			progress := int(float64(i+1) / float64(len(urls)) * 100)
 			if version > 0 {
 				if err := database.UpdateTaskVersionStatus(taskId, version, "running", progress); err != nil {
-					fmt.Printf("[ERROR] Failed to update task version progress: %v\n", err)
+					fmt.Printf("[错误] 更新任务版本进度失败: %v\n", err)
 				}
 			}
 			task := database.Task{ID: taskId}
 			_, err := task.UpdateStatus("running", progress)
 			if err != nil {
-				fmt.Printf("[ERROR] Failed to update task progress: %v\n", err)
+				fmt.Printf("[错误] 更新任务进度失败: %v\n", err)
 			} else {
-				fmt.Printf("[INFO] Updated task %s progress to %d%% (URL %d/%d completed)\n", taskId, progress, i+1, len(urls))
+				fmt.Printf("[信息] 任务 %s 进度已更新为 %d%%（已完成 %d/%d 个目标）\n", taskId, progress, i+1, len(urls))
 			}
 		}
 	}
@@ -554,16 +509,16 @@ func performAsyncScan(urls []string, taskId string) {
 		}
 
 		if err := database.SaveAsset(assetRecord); err != nil {
-			fmt.Printf("[ERROR] Failed to save unified assets for task %s: %v\n", taskId, err)
+			fmt.Printf("[错误] 保存任务 %s 的汇总资产失败: %v\n", taskId, err)
 		} else {
-			fmt.Printf("[DEBUG] Saved unified assets to ES for task %s: %d emails, %d phones, %d idcards, %d IP/URLs, %d API roots, %d API routes\n",
+			fmt.Printf("[调试] 已为任务 %s 保存汇总资产: %d 个邮箱，%d 个手机号，%d 个身份证，%d 条 IP/URL，%d 个 API 根路径，%d 条 API 路由\n",
 				taskId, len(assetRecord.Email), len(assetRecord.Phone), len(assetRecord.IDCard), len(assetRecord.IPURL), len(assetRecord.APIRoot), len(assetRecord.APIRouter))
 		}
 	}
 
 	// 扫描完成，记录结果统计
-	fmt.Printf("[INFO] Scan completed for task %s: %d URLs processed, %d tree nodes, %d risks found\n",
-		taskId, len(urls), len(allTreeData), len(allRisks))
+	fmt.Printf("[信息] 任务 %s 扫描完成: 共处理 %d 个目标，生成 %d 个站点树节点，发现 %d 个漏洞\n",
+		taskId, len(urls), len(allTreeData), len(allVulnerabilities))
 
 	// 清理任务的测试记录，避免内存泄漏
 	crawl.ClearTestedURLs(taskId)
@@ -575,20 +530,20 @@ func performAsyncScan(urls []string, taskId string) {
 
 		if version > 0 {
 			if err := database.UpdateTaskVersionStatus(taskId, version, "completed", 100); err != nil {
-				fmt.Printf("[WARNING] Failed to update task version status to completed for task %s version %d: %v\n", taskId, version, err)
+				fmt.Printf("[警告] 更新任务 %s 的版本 %d 为已完成失败: %v\n", taskId, version, err)
 			}
 		}
 
 		if err := database.UpdateTaskHighestRiskLevel(taskId); err != nil {
-			fmt.Printf("[WARNING] Failed to update highest risk level for task %s: %v\n", taskId, err)
+			fmt.Printf("[警告] 更新任务 %s 的最高风险等级失败: %v\n", taskId, err)
 		}
 
 		task := database.Task{ID: taskId}
 		_, err := task.UpdateStatus("completed", 100)
 		if err != nil {
-			fmt.Printf("[ERROR] Failed to update task status to completed: %v\n", err)
+			fmt.Printf("[错误] 更新任务状态为已完成失败: %v\n", err)
 		} else {
-			fmt.Printf("[INFO] Updated task %s status to completed\n", taskId)
+			fmt.Printf("[信息] 任务 %s 状态已更新为已完成\n", taskId)
 		}
 	}
 }
@@ -660,7 +615,7 @@ func saveTreeToESWithPathAndURL(taskID string, version int, targetURL string, no
 		// 检查节点是否已存在，避免重复保存
 		if !nodeExists(taskID, version, uniqueNodeID) {
 			if err := database.SaveSiteTreeNode(treeNode); err != nil {
-				fmt.Printf("[ERROR] Failed to save tree node %s: %v\n", uniqueNodeID, err)
+				fmt.Printf("[错误] 保存站点树节点失败: %s，原因: %v\n", uniqueNodeID, err)
 			}
 		}
 
@@ -708,7 +663,7 @@ func saveTreeToESWithPath(taskID string, version int, nodes []crawl.ElTreeNode, 
 		}
 
 		if err := database.SaveSiteTreeNode(treeNode); err != nil {
-			fmt.Printf("[ERROR] Failed to save tree node %s: %v\n", node.ID, err)
+			fmt.Printf("[错误] 保存站点树节点失败: %s，原因: %v\n", node.ID, err)
 		}
 
 		// 递归保存子节点，传递当前完整路径
@@ -805,11 +760,11 @@ func stopScan(c *gin.Context) {
 	task := database.Task{ID: body.TaskId}
 	_, err := task.UpdateStatus("stopped", 0)
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to update task status to stopped: %v\n", err)
+		fmt.Printf("[错误] 更新任务状态为已停止失败: %v\n", err)
 		c.JSON(500, gin.H{"error": "failed to update task status"})
 		return
 	}
 
-	fmt.Printf("[INFO] Task %s scan stopped\n", body.TaskId)
+	fmt.Printf("[信息] 任务 %s 已停止扫描\n", body.TaskId)
 	c.JSON(200, gin.H{"message": "scan stopped successfully", "taskId": body.TaskId})
 }

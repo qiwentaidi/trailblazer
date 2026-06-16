@@ -3,11 +3,9 @@ package sqli
 import (
 	"fmt"
 	"math"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 	"trailblazer/pkg/config"
 	"trailblazer/pkg/core/structs"
 	"trailblazer/pkg/core/vuln"
@@ -19,14 +17,13 @@ type SQLInjectionResult struct {
 	Payload    string `json:"payload"`
 	Response   string `json:"response"`
 	Reason     string `json:"reason"`
-	Type       string `json:"type"` // 注入类型：error-based, time-based, boolean-based
+	Type       string `json:"type"` // 注入类型：error-based, boolean-based
 }
 
 type responseSnapshot struct {
 	statusCode int
 	body       string
 	bodyLower  string
-	duration   time.Duration
 }
 
 // TestSQLInjection 测试SQL注入漏洞
@@ -97,8 +94,6 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 				switch rule.Type {
 				case "error-based":
 					vulnerable = ruleBodyHit || hasNewErrorBasedSignal(resp.bodyLower, baselineResp.bodyLower) || hasNewKeywordMatch(resp.bodyLower, baselineResp.bodyLower, cfg.MatchKeywords)
-				case "time-based":
-					vulnerable = ruleBodyHit || isTimeBasedSQLInjectionWithThreshold(resp, baselineResp, rule.MinDelayMs)
 				default:
 					vulnerable = ruleBodyHit || hasNewKeywordMatch(resp.bodyLower, baselineResp.bodyLower, cfg.MatchKeywords)
 				}
@@ -293,19 +288,6 @@ var errorPatterns = []string{
 	"syntax error in string in query expression",
 }
 
-// isTimeBasedSQLInjectionWithThreshold 按指定阈值（毫秒）判定 time-based 成功
-func isTimeBasedSQLInjectionWithThreshold(resp responseSnapshot, baseline responseSnapshot, minDelayMs int) bool {
-	if minDelayMs <= 0 {
-		return false
-	}
-	// 仅在服务端返回成功/可用的状态码时考虑时间阈值，以减少网络异常带来的误判
-	if resp.statusCode == 0 || resp.statusCode < http.StatusOK || resp.statusCode >= 600 {
-		return false
-	}
-	delayThreshold := time.Duration(minDelayMs) * time.Millisecond
-	return resp.duration >= baseline.duration+delayThreshold
-}
-
 func hasNewKeywordMatch(bodyLower string, baselineLower string, words []string) bool {
 	if len(words) == 0 {
 		return false
@@ -398,7 +380,6 @@ func sendSnapshot(apiReq structs.APIRequest) (responseSnapshot, error) {
 		statusCode: resp.StatusCode(),
 		body:       body,
 		bodyLower:  strings.ToLower(body),
-		duration:   resp.Time(),
 	}, nil
 }
 

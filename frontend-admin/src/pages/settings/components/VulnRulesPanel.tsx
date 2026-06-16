@@ -1,7 +1,7 @@
 import { Button, Card, Col, Collapse, Form, Input, InputNumber, Radio, Row, Select, Space, Switch, Tag, Typography } from 'antd'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import type { ReactNode } from 'react'
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import type {
   LFIPayloadRule,
@@ -23,10 +23,45 @@ const fromLines = (text: string) =>
     .map((item) => item.trim())
     .filter((item) => item.length > 0)
 
+function LineListTextArea({
+  items,
+  rows,
+  placeholder,
+  onCommit,
+}: {
+  items: string[]
+  rows: number
+  placeholder?: string
+  onCommit: (items: string[]) => void
+}) {
+  const serialized = useMemo(() => toLines(items), [items])
+  const [draft, setDraft] = useState(serialized)
+  const [focused, setFocused] = useState(false)
+
+  useEffect(() => {
+    if (!focused) {
+      setDraft(serialized)
+    }
+  }, [focused, serialized])
+
+  return (
+    <Input.TextArea
+      value={draft}
+      onFocus={() => setFocused(true)}
+      onBlur={() => {
+        setFocused(false)
+        onCommit(fromLines(draft))
+      }}
+      onChange={(event) => setDraft(event.target.value)}
+      rows={rows}
+      placeholder={placeholder}
+    />
+  )
+}
+
 const createSqlRule = (): SQLiPayloadRule => ({
   payloads: [],
   type: 'error-based',
-  minDelayMs: 0,
   bodyContains: [],
 })
 
@@ -185,7 +220,7 @@ export default function VulnRulesPanel({ value, onChange }: VulnRulesPanelProps)
                       enabled: checked,
                     })
                   }
-                  description="支持错误注入、时间注入等规则。"
+                  description="支持错误注入与布尔注入规则。"
                 >
                   <Space direction="vertical" size={12} style={{ width: '100%' }}>
                     <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -214,12 +249,12 @@ export default function VulnRulesPanel({ value, onChange }: VulnRulesPanelProps)
                             <Col span={24}>
                               <Form layout="vertical">
                                 <Form.Item label="Payload 列表">
-                                  <Input.TextArea
-                                    value={toLines(rule.payloads)}
-                                    onChange={(event) =>
+                                  <LineListTextArea
+                                    items={rule.payloads}
+                                    onCommit={(payloads) =>
                                       updateSqlRule(index, {
                                         ...rule,
-                                        payloads: fromLines(event.target.value),
+                                        payloads,
                                       })
                                     }
                                     rows={4}
@@ -237,33 +272,17 @@ export default function VulnRulesPanel({ value, onChange }: VulnRulesPanelProps)
                                     }
                                     options={[
                                       { label: 'Error-based', value: 'error-based' },
-                                      { label: 'Time-based', value: 'time-based' },
                                       { label: 'Boolean-based', value: 'boolean-based' },
                                     ]}
                                   />
                                 </Form.Item>
-                                {rule.type === 'time-based' ? (
-                                  <Form.Item label="最小延时（毫秒）">
-                                    <InputNumber
-                                      min={0}
-                                      value={rule.minDelayMs}
-                                      onChange={(nextDelay) =>
-                                        updateSqlRule(index, {
-                                          ...rule,
-                                          minDelayMs: typeof nextDelay === 'number' ? nextDelay : 0,
-                                        })
-                                      }
-                                      style={{ width: '100%' }}
-                                    />
-                                  </Form.Item>
-                                ) : null}
                                 <Form.Item label="响应体包含">
-                                  <Input.TextArea
-                                    value={toLines(rule.bodyContains)}
-                                    onChange={(event) =>
+                                  <LineListTextArea
+                                    items={rule.bodyContains}
+                                    onCommit={(bodyContains) =>
                                       updateSqlRule(index, {
                                         ...rule,
-                                        bodyContains: fromLines(event.target.value),
+                                        bodyContains,
                                       })
                                     }
                                     rows={3}
@@ -368,12 +387,12 @@ export default function VulnRulesPanel({ value, onChange }: VulnRulesPanelProps)
                 >
                   <Form layout="vertical">
                     <Form.Item label="Payload 列表">
-                      <Input.TextArea
-                        value={toLines(rule.payloads)}
-                        onChange={(event) =>
+                      <LineListTextArea
+                        items={rule.payloads}
+                        onCommit={(payloads) =>
                           updateLfiRule(index, {
                             ...rule,
-                            payloads: fromLines(event.target.value),
+                            payloads,
                           })
                         }
                         rows={4}
@@ -396,12 +415,12 @@ export default function VulnRulesPanel({ value, onChange }: VulnRulesPanelProps)
                     </Form.Item>
                     {rule.matchType === 'regex' ? (
                       <Form.Item label="正则表达式">
-                        <Input.TextArea
-                          value={toLines(rule.regex)}
-                          onChange={(event) =>
+                        <LineListTextArea
+                          items={rule.regex}
+                          onCommit={(regex) =>
                             updateLfiRule(index, {
                               ...rule,
-                              regex: fromLines(event.target.value),
+                              regex,
                             })
                           }
                           rows={3}
@@ -411,12 +430,12 @@ export default function VulnRulesPanel({ value, onChange }: VulnRulesPanelProps)
                     {rule.matchType === 'word' ? (
                       <>
                         <Form.Item label="关键词">
-                          <Input.TextArea
-                            value={toLines(rule.words)}
-                            onChange={(event) =>
+                          <LineListTextArea
+                            items={rule.words}
+                            onCommit={(words) =>
                               updateLfiRule(index, {
                                 ...rule,
-                                words: fromLines(event.target.value),
+                                words,
                               })
                             }
                             rows={3}
@@ -600,12 +619,12 @@ export default function VulnRulesPanel({ value, onChange }: VulnRulesPanelProps)
                 >
                   <Form layout="vertical">
                     <Form.Item label="Payload 列表">
-                      <Input.TextArea
-                        value={toLines(rule.payloads)}
-                        onChange={(event) =>
+                      <LineListTextArea
+                        items={rule.payloads}
+                        onCommit={(payloads) =>
                           updateXssRule(index, {
                             ...rule,
-                            payloads: fromLines(event.target.value),
+                            payloads,
                           })
                         }
                         rows={4}

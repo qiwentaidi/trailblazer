@@ -30,7 +30,7 @@ func InitESClient(db config.Elasticsearch) {
 		},
 	})
 	if err != nil {
-		log.Fatalf("Failed to create ES client: %v", err)
+		log.Fatalf("创建 ES 客户端失败: %v", err)
 	}
 
 	// 确保所有必要的索引存在
@@ -55,7 +55,7 @@ func ensureIndex(indexName string) error {
 		if createRes.IsError() {
 			return fmt.Errorf("failed to create index %s: %s", indexName, createRes.String())
 		}
-		log.Printf("Index created: %s", indexName)
+		log.Printf("已创建索引: %s", indexName)
 	}
 	return nil
 }
@@ -63,18 +63,18 @@ func ensureIndex(indexName string) error {
 // ensureAllIndices 确保所有必要的索引都存在
 func ensureAllIndices() {
 	indices := []string{
-		IndexSiteTree, // trailblazer-sitetree
-		IndexJS,       // trailblazer-js
-		IndexAPI,      // trailblazer-api
-		IndexProtocol, // trailblazer-protocol
+		IndexSiteTree,               // trailblazer-sitetree
+		IndexJS,                     // trailblazer-js
+		IndexAPI,                    // trailblazer-api
+		IndexProtocol,               // trailblazer-protocol
 		IndexStaticProtocolAnalysis, // trailblazer-static-protocol
-		IndexVuln,     // trailblazer-vuln
-		IndexAsset,    // trailblazer-asset
+		IndexVuln,                   // trailblazer-vuln
+		IndexAsset,                  // trailblazer-asset
 	}
 
 	for _, indexName := range indices {
 		if err := ensureIndex(indexName); err != nil {
-			log.Printf("Failed to ensure index %s: %v", indexName, err)
+			log.Printf("确保索引 %s 存在失败: %v", indexName, err)
 		}
 	}
 }

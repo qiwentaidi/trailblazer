@@ -52,17 +52,6 @@ type AssetInfo struct {
 	APIRoots       []string
 }
 
-type RiskItem struct {
-	ID          string
-	Title       string
-	Level       string
-	Type        string
-	URL         string
-	Description string
-	AIVerified  bool
-	CreatedAt   string
-}
-
 type TargetResult struct {
 	Target           string
 	TreeData         []crawl.ElTreeNode
@@ -72,7 +61,6 @@ type TargetResult struct {
 	JSResources      []database.JSResource
 	StaticHintBundle crawl.StaticEndpointHintBundle
 	Assets           AssetInfo
-	Risks            []RiskItem
 	Vulnerabilities  []database.VulnRecord
 }
 
@@ -182,7 +170,6 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	result := &TargetResult{
 		Target:          targetURL,
 		Assets:          AssetInfo{},
-		Risks:           []RiskItem{},
 		Vulnerabilities: []database.VulnRecord{},
 	}
 
@@ -235,7 +222,7 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	result.Vulnerabilities = dedupeVulnerabilities(collector.items)
 	bindStaticContexts(result.Vulnerabilities, result.JSResources)
 	result.Vulnerabilities = annotateUnauthorizedNoise(result.Vulnerabilities, aiChecker)
-	result.Risks = buildRisks(result.Assets, aiChecker != nil)
+	result.Vulnerabilities = append(result.Vulnerabilities, buildAssetVulnerabilities(result.Assets)...)
 	dedupeAssets(&result.Assets)
 
 	return result, nil
@@ -518,6 +505,9 @@ func buildFrontendRoutes(records []crawl.FrontendRouteRecord) []string {
 
 	routes := make([]string, 0, len(records))
 	for _, record := range records {
+		if !isConfirmedFrontendRouteSourceKind(record.SourceKind) {
+			continue
+		}
 		path := normalizeFrontendRoutePath(record.Path)
 		if path == "" || !shouldKeepFrontendRoute(path) {
 			continue
@@ -526,6 +516,31 @@ func buildFrontendRoutes(records []crawl.FrontendRouteRecord) []string {
 	}
 
 	return arrayutil.RemoveDuplicates(routes)
+}
+
+func isConfirmedFrontendRouteSourceKind(sourceKind string) bool {
+	switch strings.TrimSpace(sourceKind) {
+	case "router-get-routes",
+		"router-options",
+		"router-matcher",
+		"router-current-matched",
+		"router-add-routes",
+		"router-add-route",
+		"react-router-provider",
+		"react-routes-props",
+		"react-jsx-routes",
+		"router-push",
+		"router-replace",
+		"history-push",
+		"history-replace",
+		"hashchange",
+		"popstate",
+		"guard-target",
+		"guard-bypass":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildStaticAPIRoutes(
@@ -612,34 +627,30 @@ func buildAPIRoots(targetURL string, apiRouter []string, classified crawl.Networ
 	return preferAbsoluteAPIRoots(allApiRoots)
 }
 
-func buildRisks(assets AssetInfo, aiEnabled bool) []RiskItem {
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	var risks []RiskItem
+func buildAssetVulnerabilities(assets AssetInfo) []database.VulnRecord {
+	now := time.Now()
+	var vulns []database.VulnRecord
 
-	appendRisk := func(level, title, riskType string, items []SensitiveItem) {
+	appendVulnerability := func(level, title, vulnType string, items []SensitiveItem) {
 		for _, item := range items {
-			risks = append(risks, RiskItem{
-				ID:          uuid.New().String(),
+			vulns = append(vulns, database.VulnRecord{
+				VulnID:      uuid.New().String(),
 				Title:       title,
 				Level:       level,
-				Type:        riskType,
+				Type:        vulnType,
 				URL:         item.Source,
 				Description: fmt.Sprintf("发现%s: %s", title, item.Value),
 				AIVerified:  item.AIVerified,
-				CreatedAt:   timestamp,
+				CreatedAt:   now,
 			})
 		}
 	}
 
-	appendRisk("low", "身份证号码泄露", "敏感信息泄露", assets.IDCard)
-	appendRisk("low", "手机号码泄露", "敏感信息泄露", assets.Phone)
-	if aiEnabled {
-		appendRisk("medium", "敏感关键词泄露", "敏感信息泄露", assets.Sensitive)
-	} else {
-		appendRisk("medium", "敏感关键词泄露", "敏感信息泄露", assets.Sensitive)
-	}
+	appendVulnerability("low", "身份证号码泄露", "敏感信息泄露", assets.IDCard)
+	appendVulnerability("low", "手机号码泄露", "敏感信息泄露", assets.Phone)
+	appendVulnerability("medium", "敏感关键词泄露", "敏感信息泄露", assets.Sensitive)
 
-	return risks
+	return vulns
 }
 
 func dedupeAssets(assets *AssetInfo) {
@@ -787,16 +798,7 @@ func annotateUnauthorizedNoise(vulns []database.VulnRecord, reviewer denyTemplat
 			vuln.DenyTemplateLabel = cluster.label
 			vuln.DenyTemplateCount = len(cluster.items)
 			vuln.Confidence = "low"
-
-			reason := strings.TrimSpace(vuln.ConfidenceReason)
-			clusterReason := fmt.Sprintf("%s，当前模板命中 %d 个接口", cluster.label, len(cluster.items))
-			if reason == "" {
-				vuln.ConfidenceReason = clusterReason
-				continue
-			}
-			if !strings.Contains(reason, cluster.label) {
-				vuln.ConfidenceReason = reason + "；" + clusterReason
-			}
+			vuln.ConfidenceReason = "低置信：结果更像相似拒绝模板或通用错误响应"
 		}
 	}
 
@@ -1213,6 +1215,9 @@ func buildFrontendRouteDeltas(routes []string, records []crawl.FrontendRouteReco
 	deltas := make([]jsHookFrontendRouteDelta, 0, len(allowed))
 	seen := make(map[string]struct{}, len(allowed))
 	for _, record := range records {
+		if !isConfirmedFrontendRouteSourceKind(record.SourceKind) {
+			continue
+		}
 		path := normalizeFrontendRoutePath(record.Path)
 		if path == "" {
 			continue

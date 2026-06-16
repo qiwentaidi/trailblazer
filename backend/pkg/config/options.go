@@ -50,7 +50,7 @@ type SQLInjectionConfig struct {
 	Enabled       bool     `yaml:"enabled" json:"enabled"`
 	Payloads      []string `yaml:"payloads" json:"payloads"`
 	MatchKeywords []string `yaml:"match-keywords" json:"matchKeywords"`
-	// Rules: 可选。支持为每个特定 payload 配置期望行为（延时阈值、响应体包含等）
+	// Rules: 可选。支持为每个特定 payload 配置期望行为（响应体包含等）
 	Rules []SQLiPayloadRule `yaml:"rules" json:"rules"`
 }
 
@@ -58,10 +58,8 @@ type SQLInjectionConfig struct {
 type SQLiPayloadRule struct {
 	// Payloads 要注入的载荷数组
 	Payloads []string `yaml:"payloads" json:"payloads"`
-	// Type 注入类型：error-based, time-based, boolean-based
+	// Type 注入类型：error-based, boolean-based
 	Type string `yaml:"type" json:"type"`
-	// MinDelayMs 仅用于 time-based 场景：判定为成功所需的最小延时（毫秒）
-	MinDelayMs int `yaml:"min-delay-ms" json:"minDelayMs"`
 	// BodyContains 响应体需包含的任意关键词（为空表示不校验）
 	BodyContains []string `yaml:"body-contains" json:"bodyContains"`
 }

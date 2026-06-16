@@ -8,9 +8,13 @@
  * - `getSkillById(id)`：基于 meta.id 查找对应 skill 模块。
  */
 import dashboard from './dashboard.skill';
+import engineerUnauthorized from './engineer-unauthorized.skill';
+import pmUnauthorized from './pm-unauthorized.skill';
 
 const skills: Record<string, any> = {
   dashboard,
+  pmUnauthorized,
+  engineerUnauthorized,
 };
 
 export function listSkills() {

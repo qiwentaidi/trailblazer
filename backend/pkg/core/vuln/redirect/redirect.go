@@ -64,7 +64,7 @@ func TestRedirectVulnerability(apiReq structs.APIRequest, cfg config.RedirectCon
 	}
 
 	if trace.Vulnerable {
-		fmt.Printf("[INFO] Redirect vulnerability detected on %s with payload %s (final=%s)\n", apiReq.URL, payload, trace.FinalURL)
+		fmt.Printf("[信息] 发现重定向漏洞: %s，Payload=%s，最终跳转=%s\n", apiReq.URL, payload, trace.FinalURL)
 		return &RedirectResult{
 			Vulnerable: true,
 			Payload:    payload,

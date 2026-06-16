@@ -1,6 +1,7 @@
 package crawl
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -244,7 +245,7 @@ func normalizeProtocolMethod(method string) string {
 	return method
 }
 
-const protocolHookScript = `(function () {
+const protocolHookScriptTemplate = `(function () {
   if (window.__trailblazerProtocolHookInstalled) {
     return;
   }
@@ -270,6 +271,9 @@ const protocolHookScript = `(function () {
   var lastRequestStepSeq = 0;
   var recentSensitiveInputs = [];
   var maxSensitiveInputs = 20;
+  var bypassFrontendRouteGuards = __TRAILBLAZER_BYPASS_FRONTEND_ROUTE_GUARDS__;
+  var maxBypassedLoginRedirects = 12;
+  var bypassedLoginRedirectCount = 0;
 
   function nowMs() {
     return Date.now();
@@ -1140,20 +1144,142 @@ const protocolHookScript = `(function () {
     return raw.replace(/\/{2,}/g, "/");
   }
 
-  function looksLikeRouteRecord(candidate) {
+  function decodeRedirectTarget(raw) {
+    if (typeof raw !== "string") {
+      return "";
+    }
+    var value = raw.trim();
+    if (!value) {
+      return "";
+    }
+    for (var i = 0; i < 2; i += 1) {
+      try {
+        value = decodeURIComponent(value);
+      } catch (err) {
+        break;
+      }
+    }
+    return normalizeDiscoveredRoutePath(value);
+  }
+
+  function extractRedirectTarget(candidate) {
+    if (candidate == null) {
+      return "";
+    }
+    if (typeof candidate === "object") {
+      try {
+        if (candidate.query && typeof candidate.query.redirect === "string") {
+          return decodeRedirectTarget(candidate.query.redirect);
+        }
+      } catch (err) {}
+      try {
+        if (typeof candidate.redirect === "string") {
+          return decodeRedirectTarget(candidate.redirect);
+        }
+      } catch (err) {}
+      try {
+        if (typeof candidate.fullPath === "string") {
+          return extractRedirectTarget(candidate.fullPath);
+        }
+      } catch (err) {}
+      try {
+        if (typeof candidate.path === "string" && typeof candidate.search === "string") {
+          return extractRedirectTarget(candidate.path + candidate.search);
+        }
+      } catch (err) {}
+      return "";
+    }
+    var text = String(candidate || "");
+    if (!text) {
+      return "";
+    }
+    var match = text.match(/(?:[?#&]|^)redirect=([^&#]+)/i);
+    if (match && match[1]) {
+      return decodeRedirectTarget(match[1]);
+    }
+    if (text.indexOf("#") >= 0) {
+      var hashPart = text.slice(text.indexOf("#") + 1);
+      match = hashPart.match(/(?:[?&]|^)redirect=([^&#]+)/i);
+      if (match && match[1]) {
+        return decodeRedirectTarget(match[1]);
+      }
+    }
+    return "";
+  }
+
+  function cloneNavigationLocation(location) {
+    if (!location || typeof location !== "object") {
+      return location;
+    }
+    var cloned = Array.isArray(location) ? location.slice() : {};
+    Object.keys(location).forEach(function (key) {
+      if (key === "query" && location.query && typeof location.query === "object") {
+        var nextQuery = {};
+        Object.keys(location.query).forEach(function (queryKey) {
+          nextQuery[queryKey] = location.query[queryKey];
+        });
+        cloned.query = nextQuery;
+        return;
+      }
+      cloned[key] = location[key];
+    });
+    return cloned;
+  }
+
+  function rewriteGuardedNavigationTarget(location, sourceKind, source) {
+    if (!bypassFrontendRouteGuards || bypassedLoginRedirectCount >= maxBypassedLoginRedirects) {
+      return location;
+    }
+    var redirectTarget = extractRedirectTarget(location);
+    if (!redirectTarget) {
+      return location;
+    }
+    bypassedLoginRedirectCount += 1;
+    emitFrontendRoute(redirectTarget, "", sourceKind || "guard-bypass", source || "guard.redirect");
+    if (typeof location === "string") {
+      return redirectTarget;
+    }
+    if (location && typeof location === "object") {
+      var cloned = cloneNavigationLocation(location);
+      cloned.path = redirectTarget;
+      cloned.fullPath = redirectTarget;
+      if (cloned.query && typeof cloned.query === "object") {
+        delete cloned.query.redirect;
+      }
+      if (typeof cloned.hash === "string" && cloned.hash.indexOf("?redirect=") >= 0) {
+        cloned.hash = "#" + redirectTarget.replace(/^#/, "");
+      }
+      return cloned;
+    }
+    return location;
+  }
+
+  function routeNameOf(candidate) {
     if (!candidate || typeof candidate !== "object") {
-      return false;
+      return "";
     }
-    if (typeof candidate.path === "string" && candidate.path.trim()) {
-      return true;
+    if (typeof candidate.name === "string") {
+      return candidate.name.trim();
     }
-    if (candidate.children && typeof candidate.children.length === "number") {
-      return true;
+    return "";
+  }
+
+  function emitRouteFromNavigationTarget(candidate, sourceKind, source) {
+    var routePath = "";
+    if (candidate && typeof candidate === "object") {
+      if (typeof candidate.fullPath === "string" && candidate.fullPath) {
+        routePath = candidate.fullPath;
+      } else if (typeof candidate.path === "string" && candidate.path) {
+        routePath = candidate.path;
+      } else if (typeof candidate.hash === "string" && candidate.hash) {
+        routePath = candidate.hash;
+      }
+    } else if (typeof candidate === "string") {
+      routePath = candidate;
     }
-    if (candidate.routes && typeof candidate.routes.length === "number") {
-      return true;
+    if (routePath) {
+      emitFrontendRoute(routePath, routeNameOf(candidate), sourceKind, source);
     }
-    return false;
   }
 
   function emitFrontendRoute(path, name, sourceKind, source) {
@@ -1173,72 +1299,716 @@ const protocolHookScript = `(function () {
     });
   }
 
-  function inspectRouteCandidate(candidate, sourceKind, source, depth) {
-    if (depth > 4 || candidate == null) {
-      return;
+  function joinRoutePath(basePath, routePath) {
+    var base = String(basePath || "").trim();
+    var path = String(routePath || "").trim();
+    if (!path) {
+      return base;
     }
-    if (typeof candidate === "string") {
-      emitFrontendRoute(candidate, "", sourceKind, source);
-      return;
+    if (path === "*") {
+      return path;
     }
-    if (typeof candidate.length === "number" && typeof candidate !== "function" && typeof candidate !== "string") {
-      try {
-        Array.prototype.slice.call(candidate, 0, 24).forEach(function (item) {
-          inspectRouteCandidate(item, sourceKind, source, depth + 1);
+    if (path.charAt(0) === "/") {
+      return path;
+    }
+    if (!base || base === "/") {
+      return "/" + path.replace(/^\/+/, "");
+    }
+    return base.replace(/\/+$/, "") + "/" + path.replace(/^\/+/, "");
+  }
+
+  function looksLikeOfficialRouteRecord(candidate) {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+    if (typeof candidate.path === "string" && candidate.path.trim()) {
+      return true;
+    }
+    if (typeof candidate.name === "string" && candidate.name.trim() && Array.isArray(candidate.children)) {
+      return true;
+    }
+    return false;
+  }
+
+  function emitRouteRecord(candidate, sourceKind, source, parentPath) {
+    if (!candidate || typeof candidate !== "object") {
+      return "";
+    }
+    var routePath = "";
+    if (typeof candidate.path === "string" && candidate.path.trim()) {
+      routePath = joinRoutePath(parentPath, candidate.path);
+    } else if (typeof candidate.alias === "string" && candidate.alias.trim()) {
+      routePath = joinRoutePath(parentPath, candidate.alias);
+    }
+    if (!routePath) {
+      return "";
+    }
+    emitFrontendRoute(routePath, routeNameOf(candidate), sourceKind, source);
+    if (candidate.alias) {
+      if (Array.isArray(candidate.alias)) {
+        candidate.alias.forEach(function (aliasValue) {
+          emitFrontendRoute(joinRoutePath(parentPath, aliasValue), routeNameOf(candidate), sourceKind, source + ".alias");
         });
-      } catch (err) {}
-      return;
-    }
-    if (typeof candidate !== "object") {
-      return;
-    }
-    if (looksLikeRouteRecord(candidate)) {
-      emitFrontendRoute(candidate.path, candidate.name, sourceKind, source);
-      if (candidate.alias) {
-        inspectRouteCandidate(candidate.alias, sourceKind, source + ".alias", depth + 1);
+      } else if (typeof candidate.alias === "string") {
+        emitFrontendRoute(joinRoutePath(parentPath, candidate.alias), routeNameOf(candidate), sourceKind, source + ".alias");
       }
-      if (candidate.children) {
-        inspectRouteCandidate(candidate.children, sourceKind, source + ".children", depth + 1);
-      }
-      if (candidate.routes) {
-        inspectRouteCandidate(candidate.routes, sourceKind, source + ".routes", depth + 1);
-      }
+    }
+    return routePath;
+  }
+
+  function readRoutesFromCollection(routes, sourceKind, source, parentPath, depth) {
+    if (depth > 6 || !routes || typeof routes.length !== "number") {
       return;
     }
-    if (candidate.options && candidate.options.routes) {
-      inspectRouteCandidate(candidate.options.routes, sourceKind, source + ".options.routes", depth + 1);
+    try {
+      Array.prototype.slice.call(routes, 0, 512).forEach(function (route, index) {
+        if (!looksLikeOfficialRouteRecord(route)) {
+          return;
+        }
+        var fullPath = emitRouteRecord(route, sourceKind, source + "[" + index + "]", parentPath);
+        if (Array.isArray(route.children) && route.children.length) {
+          readRoutesFromCollection(route.children, sourceKind, source + "[" + index + "].children", fullPath, depth + 1);
+        }
+      });
+    } catch (err) {}
+  }
+
+  function emitRoutesFromRouter(router, source) {
+    if (!router || typeof router !== "object") {
       return;
     }
-    if (candidate.matcher && candidate.matcher.getRoutes && typeof candidate.matcher.getRoutes === "function") {
-      try {
-        inspectRouteCandidate(candidate.matcher.getRoutes(), sourceKind, source + ".matcher.getRoutes()", depth + 1);
-      } catch (err) {}
+    try {
+      if (typeof router.getRoutes === "function") {
+        readRoutesFromCollection(router.getRoutes(), "router-get-routes", source + ".getRoutes()", "", 0);
+      }
+    } catch (err) {}
+    try {
+      if (router.options && Array.isArray(router.options.routes)) {
+        readRoutesFromCollection(router.options.routes, "router-options", source + ".options.routes", "", 0);
+      }
+    } catch (err) {}
+    try {
+      if (router.matcher && typeof router.matcher.getRoutes === "function") {
+        readRoutesFromCollection(router.matcher.getRoutes(), "router-matcher", source + ".matcher.getRoutes()", "", 0);
+      }
+    } catch (err) {}
+    try {
+      if (router.history && router.history.current && Array.isArray(router.history.current.matched)) {
+        readRoutesFromCollection(router.history.current.matched, "router-current-matched", source + ".history.current.matched", "", 0);
+      }
+    } catch (err) {}
+  }
+
+  function looksLikeReactRouteRecord(route) {
+    if (!route || typeof route !== "object") {
+      return false;
+    }
+    if (typeof route.path === "string") {
+      return true;
+    }
+    if (route.index === true) {
+      return true;
+    }
+    if (typeof route.id === "string" && Array.isArray(route.children)) {
+      return true;
+    }
+    if (typeof route.name === "string" && (Array.isArray(route.childRoutes) || Array.isArray(route.routes))) {
+      return true;
+    }
+    return false;
+  }
+
+  function routeNameFromReactRoute(route) {
+    if (!route || typeof route !== "object") {
+      return "";
+    }
+    if (typeof route.name === "string" && route.name.trim()) {
+      return route.name.trim();
+    }
+    if (typeof route.id === "string" && route.id.trim()) {
+      return route.id.trim();
+    }
+    return "";
+  }
+
+  function joinReactRoutePath(basePath, route) {
+    if (!route || typeof route !== "object") {
+      return "";
+    }
+    if (route.index === true) {
+      return basePath || "/";
+    }
+    if (typeof route.path === "string") {
+      return joinRoutePath(basePath, route.path);
+    }
+    if (typeof route.to === "string") {
+      return joinRoutePath(basePath, route.to);
+    }
+    if (typeof route.from === "string") {
+      return joinRoutePath(basePath, route.from);
+    }
+    return "";
+  }
+
+  function readReactRoutes(routes, sourceKind, source, parentPath, depth) {
+    if (depth > 8 || !Array.isArray(routes)) {
+      return;
+    }
+    routes.slice(0, 512).forEach(function (route, index) {
+      if (!looksLikeReactRouteRecord(route)) {
+        return;
+      }
+      var fullPath = joinReactRoutePath(parentPath, route);
+      if (fullPath) {
+        emitFrontendRoute(fullPath, routeNameFromReactRoute(route), sourceKind, source + "[" + index + "]");
+      }
+      var nextBase = fullPath || parentPath;
+      if (Array.isArray(route.children) && route.children.length) {
+        readReactRoutes(route.children, sourceKind, source + "[" + index + "].children", nextBase, depth + 1);
+      }
+      if (Array.isArray(route.childRoutes) && route.childRoutes.length) {
+        readReactRoutes(route.childRoutes, sourceKind, source + "[" + index + "].childRoutes", nextBase, depth + 1);
+      }
+      if (Array.isArray(route.routes) && route.routes.length) {
+        readReactRoutes(route.routes, sourceKind, source + "[" + index + "].routes", nextBase, depth + 1);
+      }
+    });
+  }
+
+  function getReactElementProps(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    if (value.props && typeof value.props === "object") {
+      return value.props;
+    }
+    return value;
+  }
+
+  function readReactJSXRoutes(value, sourceKind, source, parentPath, depth) {
+    if (depth > 8 || value == null) {
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.slice(0, 256).forEach(function (item, index) {
+        readReactJSXRoutes(item, sourceKind, source + "[" + index + "]", parentPath, depth + 1);
+      });
+      return;
+    }
+    if (typeof value !== "object") {
+      return;
+    }
+    var props = getReactElementProps(value);
+    if (!props || typeof props !== "object") {
+      return;
+    }
+    var nextBase = parentPath;
+    if (typeof props.path === "string") {
+      nextBase = joinRoutePath(parentPath, props.path);
+      emitFrontendRoute(nextBase, "", sourceKind, source + ".props.path");
+    } else if (props.index === true) {
+      nextBase = parentPath || "/";
+      emitFrontendRoute(nextBase, "", sourceKind, source + ".props.index");
+    } else if (typeof props.to === "string" && /^\/|^#\//.test(props.to)) {
+      nextBase = joinRoutePath(parentPath, props.to);
+      emitFrontendRoute(nextBase, "", sourceKind, source + ".props.to");
+    }
+    if (props.children != null) {
+      readReactJSXRoutes(props.children, sourceKind, source + ".props.children", nextBase, depth + 1);
     }
   }
 
-  function hookArrayMutation(methodName) {
-    if (!Array.prototype[methodName] || Array.prototype[methodName].__trailblazerWrapped) {
+  function reactFiberTagName(tag) {
+    switch (tag) {
+      case 0: return "FunctionComponent";
+      case 1: return "ClassComponent";
+      case 3: return "HostRoot";
+      case 5: return "HostComponent";
+      case 10: return "ContextProvider";
+      case 11: return "ForwardRef";
+      case 14: return "MemoComponent";
+      case 15: return "SimpleMemoComponent";
+      default: return "";
+    }
+  }
+
+  function getReactFiberProp(node) {
+    if (!node || typeof node !== "object") {
+      return "";
+    }
+    try {
+      var keys = Object.getOwnPropertyNames(node);
+      for (var i = 0; i < keys.length; i += 1) {
+        if (keys[i].indexOf("__reactFiber$") === 0 || keys[i].indexOf("__reactInternalInstance$") === 0) {
+          return keys[i];
+        }
+      }
+    } catch (err) {}
+    return "";
+  }
+
+  function findReactHostFibers() {
+    if (!document || (!document.body && !document.documentElement)) {
+      return [];
+    }
+    var roots = [];
+    var queue = [];
+    var visited = [];
+    var seenFibers = [];
+    if (document.body) {
+      queue.push(document.body);
+    }
+    if (document.documentElement && document.documentElement !== document.body) {
+      queue.push(document.documentElement);
+    }
+    while (queue.length) {
+      var node = queue.shift();
+      if (!node) {
+        continue;
+      }
+      if (visited.indexOf(node) >= 0) {
+        continue;
+      }
+      visited.push(node);
+      if (node.nodeType === 1) {
+        var fiberProp = getReactFiberProp(node);
+        if (fiberProp && node[fiberProp] && typeof node[fiberProp] === "object" && seenFibers.indexOf(node[fiberProp]) < 0) {
+          seenFibers.push(node[fiberProp]);
+          roots.push(node[fiberProp]);
+        }
+      }
+      try {
+        var childNodes = node.childNodes || [];
+        for (var i = 0; i < childNodes.length; i += 1) {
+          queue.push(childNodes[i]);
+        }
+      } catch (err) {}
+    }
+    return roots;
+  }
+
+  function findReactFiberRoot(fiber) {
+    if (!fiber || typeof fiber !== "object") {
+      return null;
+    }
+    var current = fiber;
+    var depth = 0;
+    while (current && depth < 10000) {
+      if (current.tag === 3) {
+        if (current.stateNode && current.stateNode.current && current.stateNode.current.child) {
+          return current.stateNode.current.child;
+        }
+        if (current.child) {
+          return current.child;
+        }
+        return current;
+      }
+      current = current.return;
+      depth += 1;
+    }
+    return fiber;
+  }
+
+  function inspectReactFiberRoutes(startFiber, source) {
+    if (!startFiber || typeof startFiber !== "object") {
       return;
     }
-    var originalMethod = Array.prototype[methodName];
-    Array.prototype[methodName] = function () {
-      var result = originalMethod.apply(this, arguments);
+    var stack = [startFiber];
+    var seen = [];
+    var steps = 0;
+    while (stack.length && steps < 4096) {
+      var fiber = stack.pop();
+      steps += 1;
+      if (!fiber || typeof fiber !== "object") {
+        continue;
+      }
+      if (seen.indexOf(fiber) >= 0) {
+        continue;
+      }
+      seen.push(fiber);
       try {
-        var args = Array.prototype.slice.call(arguments);
-        if (methodName === "splice" && args.length > 2) {
-          args = args.slice(2);
+        var props = fiber.memoizedProps || fiber.pendingProps || null;
+        var tagName = reactFiberTagName(fiber.tag);
+        var fiberSource = source + "." + (tagName || "fiber");
+        if (props && typeof props === "object") {
+          if (props.router && props.router.routes && Array.isArray(props.router.routes)) {
+            readReactRoutes(props.router.routes, "react-router-provider", fiberSource + ".props.router.routes", "", 0);
+          }
+          if (Array.isArray(props.routes)) {
+            readReactRoutes(props.routes, "react-routes-props", fiberSource + ".props.routes", "", 0);
+          }
+          if (props.children != null) {
+            readReactJSXRoutes(props.children, "react-jsx-routes", fiberSource + ".props.children", "", 0);
+          }
         }
-        inspectRouteCandidate(args, "array-" + methodName, "Array.prototype." + methodName, 0);
       } catch (err) {}
-      return result;
+      if (fiber.child) {
+        stack.push(fiber.child);
+      }
+      if (fiber.sibling) {
+        stack.push(fiber.sibling);
+      }
+    }
+  }
+
+  function scanReactRouters() {
+    var hostFibers = findReactHostFibers();
+    if (!hostFibers || !hostFibers.length) {
+      return;
+    }
+    hostFibers.forEach(function (fiber, index) {
+      var rootFiber = findReactFiberRoot(fiber);
+      inspectReactFiberRoutes(rootFiber, "react-root[" + index + "]");
+    });
+  }
+
+  function looksLikeRouterInstance(candidate) {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+    try {
+      var hasNavigation = typeof candidate.push === "function" || typeof candidate.replace === "function" || typeof candidate.resolve === "function";
+      var hasRouteStore = typeof candidate.getRoutes === "function" ||
+        (candidate.options && Array.isArray(candidate.options.routes)) ||
+        (candidate.matcher && typeof candidate.matcher.getRoutes === "function") ||
+        (candidate.history && candidate.history.current && Array.isArray(candidate.history.current.matched));
+      if (hasNavigation && hasRouteStore) {
+        return true;
+      }
+    } catch (err) {}
+    return false;
+  }
+
+  function findVueRoots() {
+    if (!document || !document.body) {
+      return [];
+    }
+    var roots = [];
+    var queue = [document.body];
+    var seen = [];
+    while (queue.length) {
+      var node = queue.shift();
+      if (!node || node.nodeType !== 1) {
+        continue;
+      }
+      try {
+        if (seen.indexOf(node) >= 0) {
+          continue;
+        }
+        seen.push(node);
+      } catch (err) {}
+      if (node.__vue_app__ || node.__vue__) {
+        roots.push(node);
+      }
+      try {
+        var children = node.childNodes || [];
+        for (var i = 0; i < children.length; i += 1) {
+          queue.push(children[i]);
+        }
+      } catch (err) {}
+    }
+    return roots;
+  }
+
+  function findVueRouterFromRoot(root) {
+    if (!root || typeof root !== "object") {
+      return null;
+    }
+    try {
+      if (root.__vue_app__) {
+        var app = root.__vue_app__;
+        if (app.config && app.config.globalProperties && looksLikeRouterInstance(app.config.globalProperties.$router)) {
+          return app.config.globalProperties.$router;
+        }
+        var instance = app._instance;
+        if (instance && instance.appContext && instance.appContext.config && instance.appContext.config.globalProperties && looksLikeRouterInstance(instance.appContext.config.globalProperties.$router)) {
+          return instance.appContext.config.globalProperties.$router;
+        }
+        if (instance && instance.ctx && looksLikeRouterInstance(instance.ctx.$router)) {
+          return instance.ctx.$router;
+        }
+      }
+      if (root.__vue__) {
+        var vue = root.__vue__;
+        if (looksLikeRouterInstance(vue.$router)) {
+          return vue.$router;
+        }
+        if (vue.$root && looksLikeRouterInstance(vue.$root.$router)) {
+          return vue.$root.$router;
+        }
+        if (vue.$root && vue.$root.$options && looksLikeRouterInstance(vue.$root.$options.router)) {
+          return vue.$root.$options.router;
+        }
+        if (looksLikeRouterInstance(vue._router)) {
+          return vue._router;
+        }
+      }
+    } catch (err) {}
+    return null;
+  }
+
+  function tryPatchVueRouterCandidate(candidate, source) {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+    if (looksLikeRouterInstance(candidate)) {
+      patchRouterInstance(candidate, source);
+      return true;
+    }
+    return false;
+  }
+
+  function tryPatchVueOwnerCandidate(candidate, source) {
+    if (!candidate || typeof candidate !== "object") {
+      return false;
+    }
+    try {
+      if (tryPatchVueRouterCandidate(candidate.$router, source + ".$router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (tryPatchVueRouterCandidate(candidate.router, source + ".router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (tryPatchVueRouterCandidate(candidate._router, source + "._router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (candidate.$root && tryPatchVueRouterCandidate(candidate.$root.$router, source + ".$root.$router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (candidate.$root && candidate.$root.$options && tryPatchVueRouterCandidate(candidate.$root.$options.router, source + ".$root.$options.router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (candidate.$options && tryPatchVueRouterCandidate(candidate.$options.router, source + ".$options.router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (candidate._routerRoot && tryPatchVueRouterCandidate(candidate._routerRoot._router, source + "._routerRoot._router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (candidate.config && candidate.config.globalProperties && tryPatchVueRouterCandidate(candidate.config.globalProperties.$router, source + ".config.globalProperties.$router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (candidate._instance && candidate._instance.appContext && candidate._instance.appContext.config && candidate._instance.appContext.config.globalProperties &&
+          tryPatchVueRouterCandidate(candidate._instance.appContext.config.globalProperties.$router, source + "._instance.appContext.config.globalProperties.$router")) {
+        return true;
+      }
+    } catch (err) {}
+    try {
+      if (candidate._instance && candidate._instance.ctx && tryPatchVueRouterCandidate(candidate._instance.ctx.$router, source + "._instance.ctx.$router")) {
+        return true;
+      }
+    } catch (err) {}
+    return false;
+  }
+
+  function scanVueDevtoolsHook() {
+    var hook = null;
+    try {
+      hook = window.__VUE_DEVTOOLS_GLOBAL_HOOK__;
+    } catch (err) {}
+    if (!hook || typeof hook !== "object") {
+      return;
+    }
+
+    tryPatchVueOwnerCandidate(hook, "vue-devtools-hook");
+
+    try {
+      if (Array.isArray(hook.apps)) {
+        hook.apps.slice(0, 128).forEach(function (app, index) {
+          tryPatchVueOwnerCandidate(app, "vue-devtools-hook.apps[" + index + "]");
+        });
+      } else if (hook.apps && typeof hook.apps.forEach === "function") {
+        var appIndex = 0;
+        hook.apps.forEach(function (app) {
+          tryPatchVueOwnerCandidate(app, "vue-devtools-hook.apps[" + appIndex + "]");
+          appIndex += 1;
+        });
+      }
+    } catch (err) {}
+
+    try {
+      if (hook.store && Array.isArray(hook.store.apps)) {
+        hook.store.apps.slice(0, 128).forEach(function (app, index) {
+          tryPatchVueOwnerCandidate(app, "vue-devtools-hook.store.apps[" + index + "]");
+        });
+      }
+    } catch (err) {}
+  }
+
+  function scanVueWindowCandidates() {
+    var keys = [];
+    try {
+      keys = Object.getOwnPropertyNames(window);
+    } catch (err) {
+      return;
+    }
+    keys.slice(0, 2048).forEach(function (key) {
+      var candidate = null;
+      try {
+        candidate = window[key];
+      } catch (err) {
+        return;
+      }
+      if (!candidate || (typeof candidate !== "object" && typeof candidate !== "function")) {
+        return;
+      }
+      tryPatchVueRouterCandidate(candidate, "window." + key);
+      tryPatchVueOwnerCandidate(candidate, "window." + key);
+      try {
+        if (candidate.default) {
+          tryPatchVueRouterCandidate(candidate.default, "window." + key + ".default");
+          tryPatchVueOwnerCandidate(candidate.default, "window." + key + ".default");
+        }
+      } catch (err) {}
+    });
+  }
+
+  function clearRouterGuardCollection(value) {
+    if (!value) {
+      return;
+    }
+    try {
+      if (Array.isArray(value)) {
+        value.length = 0;
+        return;
+      }
+      if (typeof value.clear === "function") {
+        value.clear();
+      }
+    } catch (err) {}
+  }
+
+  function scrubExistingRouterGuards(router) {
+    if (!router || typeof router !== "object" || !bypassFrontendRouteGuards) {
+      return;
+    }
+    ["beforeHooks", "resolveHooks", "afterHooks", "beforeGuards", "resolveGuards", "afterGuards"].forEach(function (key) {
+      try {
+        clearRouterGuardCollection(router[key]);
+      } catch (err) {}
+      try {
+        if (router.options && router.options[key]) {
+          clearRouterGuardCollection(router.options[key]);
+        }
+      } catch (err) {}
+    });
+  }
+
+  function wrapRouteGuard(methodName, guard, source) {
+    if (typeof guard !== "function" || guard.__trailblazerGuardWrapped) {
+      return guard;
+    }
+    var wrapped = function (to, from, next) {
+      emitRouteFromNavigationTarget(to, "guard-target", source + "." + methodName);
+      if (!bypassFrontendRouteGuards) {
+        return guard.apply(this, arguments);
+      }
+      if (typeof next === "function") {
+        try {
+          next();
+        } catch (err) {}
+        return;
+      }
+      return true;
     };
-    Array.prototype[methodName].__trailblazerWrapped = true;
+    wrapped.__trailblazerGuardWrapped = true;
+    wrapped.__trailblazerOriginalGuard = guard;
+    return wrapped;
+  }
+
+  function patchRouterMethod(router, methodName, source, wrapperFactory) {
+    if (!router || typeof router[methodName] !== "function" || router[methodName].__trailblazerWrapped) {
+      return;
+    }
+    var original = router[methodName];
+    var wrapped = wrapperFactory(original);
+    if (typeof wrapped !== "function") {
+      return;
+    }
+    wrapped.__trailblazerWrapped = true;
+    wrapped.__trailblazerOriginal = original;
+    router[methodName] = wrapped;
+  }
+
+  function patchRouterInstance(router, source) {
+    if (!looksLikeRouterInstance(router) || router.__trailblazerRouterPatched) {
+      return;
+    }
+    router.__trailblazerRouterPatched = true;
+    scrubExistingRouterGuards(router);
+
+    patchRouterMethod(router, "beforeEach", source, function (original) {
+      return function (guard) {
+        return original.call(this, wrapRouteGuard("beforeEach", guard, source));
+      };
+    });
+    patchRouterMethod(router, "beforeResolve", source, function (original) {
+      return function (guard) {
+        return original.call(this, wrapRouteGuard("beforeResolve", guard, source));
+      };
+    });
+    patchRouterMethod(router, "push", source, function (original) {
+      return function (location) {
+        var rewritten = rewriteGuardedNavigationTarget(location, "guard-bypass", source + ".push");
+        emitRouteFromNavigationTarget(rewritten, "router-push", source + ".push");
+        arguments[0] = rewritten;
+        return original.apply(this, arguments);
+      };
+    });
+    patchRouterMethod(router, "replace", source, function (original) {
+      return function (location) {
+        var rewritten = rewriteGuardedNavigationTarget(location, "guard-bypass", source + ".replace");
+        emitRouteFromNavigationTarget(rewritten, "router-replace", source + ".replace");
+        arguments[0] = rewritten;
+        return original.apply(this, arguments);
+      };
+    });
+    patchRouterMethod(router, "addRoutes", source, function (original) {
+      return function (routes) {
+        if (Array.isArray(routes)) {
+          readRoutesFromCollection(routes, "router-add-routes", source + ".addRoutes", "", 0);
+        }
+        return original.apply(this, arguments);
+      };
+    });
+    patchRouterMethod(router, "addRoute", source, function (original) {
+      return function (route) {
+        if (looksLikeOfficialRouteRecord(route)) {
+          var parentPath = "";
+          if (arguments.length > 1 && typeof arguments[0] === "string" && route && typeof route.path === "string") {
+            parentPath = arguments[0];
+          }
+          emitRouteRecord(route, "router-add-route", source + ".addRoute", parentPath);
+          if (Array.isArray(route.children) && route.children.length) {
+            readRoutesFromCollection(route.children, "router-add-route", source + ".addRoute.children", joinRoutePath(parentPath, route.path), 0);
+          }
+        }
+        return original.apply(this, arguments);
+      };
+    });
+    emitRoutesFromRouter(router, source);
   }
 
   function hookHistoryRoutes() {
     if (window.history && typeof window.history.pushState === "function" && !window.history.pushState.__trailblazerWrapped) {
       var originalPushState = window.history.pushState;
       window.history.pushState = function (state, title, url) {
+        url = rewriteGuardedNavigationTarget(url || window.location.href, "guard-bypass", "history.pushState");
         var result = originalPushState.apply(this, arguments);
         emitFrontendRoute(url || window.location.href, "", "history-push", "history.pushState");
         return result;
@@ -1248,6 +2018,7 @@ const protocolHookScript = `(function () {
     if (window.history && typeof window.history.replaceState === "function" && !window.history.replaceState.__trailblazerWrapped) {
       var originalReplaceState = window.history.replaceState;
       window.history.replaceState = function (state, title, url) {
+        url = rewriteGuardedNavigationTarget(url || window.location.href, "guard-bypass", "history.replaceState");
         var result = originalReplaceState.apply(this, arguments);
         emitFrontendRoute(url || window.location.href, "", "history-replace", "history.replaceState");
         return result;
@@ -1262,37 +2033,55 @@ const protocolHookScript = `(function () {
         emitFrontendRoute(window.location.href, "", "popstate", "window.location");
       }, true);
     } catch (err) {}
-    emitFrontendRoute(window.location.href, "", "page-load", "window.location");
   }
 
-  function scanWindowForRoutes() {
-    var names = [];
-    try {
-      names = Object.getOwnPropertyNames(window);
-    } catch (err) {
+  function scanVueRouters() {
+    var roots = findVueRoots();
+    if (!roots || !roots.length) {
+      scanVueDevtoolsHook();
+      scanVueWindowCandidates();
       return;
     }
-    names.slice(0, 400).forEach(function (name) {
-      if (!/(route|router|menu|nav)/i.test(name)) {
-        return;
+    roots.forEach(function (root, index) {
+      var router = findVueRouterFromRoot(root);
+      if (router) {
+        patchRouterInstance(router, "vue-root[" + index + "]");
       }
-      try {
-        inspectRouteCandidate(window[name], "window-scan", "window." + name, 0);
-      } catch (err) {}
     });
-    if (window.__INITIAL_STATE__) {
-      inspectRouteCandidate(window.__INITIAL_STATE__, "window-scan", "window.__INITIAL_STATE__", 0);
+    scanVueDevtoolsHook();
+    scanVueWindowCandidates();
+  }
+
+  function watchFrontendRouteMounts() {
+    if (typeof MutationObserver !== "function" || !document || !document.documentElement) {
+      return;
     }
+    try {
+      var observer = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i += 1) {
+          if (mutations[i] && mutations[i].addedNodes && mutations[i].addedNodes.length) {
+            scanVueRouters();
+            scanReactRouters();
+            return;
+          }
+        }
+      });
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+      });
+    } catch (err) {}
   }
 
   function hookFrontendRoutes() {
-    hookArrayMutation("push");
-    hookArrayMutation("unshift");
-    hookArrayMutation("splice");
     hookHistoryRoutes();
-    scanWindowForRoutes();
-    window.setTimeout(scanWindowForRoutes, 1200);
-    window.setTimeout(scanWindowForRoutes, 2600);
+    scanVueRouters();
+    scanReactRouters();
+    watchFrontendRouteMounts();
+    window.setTimeout(scanVueRouters, 1200);
+    window.setTimeout(scanVueRouters, 2600);
+    window.setTimeout(scanReactRouters, 1200);
+    window.setTimeout(scanReactRouters, 2600);
   }
 
   function shouldTreatResponseAsText(contentType) {
@@ -2459,7 +3248,7 @@ const protocolHookScript = `(function () {
     attempts += 1;
     hookCryptoJS();
     hookSensitiveInputCapture();
-    scanWindowForRoutes();
+    scanVueRouters();
     hookKnownCryptoConstructors();
     scanAndWrapSuspiciousFunctions(window, "window", 2);
     scanWebpackRuntimeCandidates();
@@ -2468,3 +3257,19 @@ const protocolHookScript = `(function () {
     }
   }, 1000);
 })();`
+
+var protocolHookScript = buildProtocolHookScript(CaptureOptions{
+	BypassFrontendRouteGuards: true,
+})
+
+func buildProtocolHookScript(options CaptureOptions) string {
+	flag := "false"
+	if options.BypassFrontendRouteGuards {
+		flag = "true"
+	}
+	return strings.ReplaceAll(
+		protocolHookScriptTemplate,
+		"__TRAILBLAZER_BYPASS_FRONTEND_ROUTE_GUARDS__",
+		fmt.Sprintf("%s", flag),
+	)
+}

@@ -425,10 +425,6 @@ func buildReportAssetRecord(
 			continue
 		}
 		appendSource(apiRouteSources, apiRoute, sources...)
-		apiRoot := normalizeAPIRoot(apiRoute)
-		if apiRoot != "" {
-			appendSource(apiRootSources, apiRoot, sources...)
-		}
 	}
 
 	result.IPURL = sourceMapToAssetValues(ipURLSources)
@@ -485,14 +481,6 @@ func normalizeAPIRoute(absoluteURL string) string {
 		return ""
 	}
 	return path
-}
-
-func normalizeAPIRoot(route string) string {
-	segments := strings.Split(strings.TrimPrefix(strings.TrimSpace(route), "/"), "/")
-	if len(segments) == 0 || segments[0] == "" {
-		return ""
-	}
-	return "/" + segments[0]
 }
 
 func uniqueStrings(items []string) []string {

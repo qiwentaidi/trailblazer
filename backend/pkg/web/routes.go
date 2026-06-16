@@ -179,12 +179,6 @@ func getConfig(c *gin.Context) {
 			"' OR 1=1--",
 			"\" OR 1=1--",
 		}
-		builtinTimeBased := []string{
-			"' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--",
-			"' OR SLEEP(5)--",
-			"'; WAITFOR DELAY '00:00:05'--",
-			"' OR pg_sleep(5)--",
-		}
 		frontendConfig.VulnDetection.SQLInjection.Rules = []config.SQLiPayloadRule{
 			{
 				Payloads: builtinErrorBased,
@@ -193,7 +187,6 @@ func getConfig(c *gin.Context) {
 					"sql syntax", "mysql_fetch", "ora-", "postgresql", "sqlite", "database error", "sql error", "query failed",
 				},
 			},
-			{Payloads: builtinTimeBased, Type: "time-based", MinDelayMs: 5000},
 		}
 	}
 

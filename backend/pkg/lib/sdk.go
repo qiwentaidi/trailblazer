@@ -49,10 +49,8 @@ type VulnRecord struct {
 	ResponseLength     int                          `json:"response_length,omitempty"` // 原始响应长度（字节）
 	Confidence         string                       `json:"confidence,omitempty"`
 	ConfidenceReason   string                       `json:"confidence_reason,omitempty"`
-	DenyTemplateID     string                       `json:"deny_template_id,omitempty"`
-	DenyTemplateKind   string                       `json:"deny_template_kind,omitempty"`
-	DenyTemplateLabel  string                       `json:"deny_template_label,omitempty"`
-	DenyTemplateCount  int                          `json:"deny_template_count,omitempty"`
+	DataExposure       string                       `json:"data_exposure,omitempty"`
+	ExposureReason     string                       `json:"exposure_reason,omitempty"`
 	StaticContexts     []database.VulnStaticContext `json:"static_contexts,omitempty"`
 	Description        string                       `json:"description"`
 	AIVerified         bool                         `json:"ai_verified"` // AI辅助验证标记
@@ -65,7 +63,6 @@ type ScanEventType string
 const (
 	EventTypeVulnerability ScanEventType = "vulnerability" // 漏洞发现
 	EventTypeAsset         ScanEventType = "asset"         // 资产发现
-	EventTypeRisk          ScanEventType = "risk"          // 风险发现
 	EventTypeAPIRecord     ScanEventType = "api_record"    // 接口请求/响应记录
 	EventTypeProtocolTrace ScanEventType = "protocol_trace"
 	EventTypeProgress      ScanEventType = "progress" // 进度更新
@@ -286,7 +283,7 @@ func buildSDKStaticHintBundleWithFetcherAndTempDir(
 
 	tempDir, err := os.MkdirTemp(tempParentDir, "trailblazer-sdk-js-*")
 	if err != nil {
-		fmt.Printf("[WARNING] 无法创建SDK JS临时目录: %v\n", err)
+		fmt.Printf("[警告] 无法创建SDK JS临时目录: %v\n", err)
 		return crawl.StaticEndpointHintBundle{}
 	}
 	defer os.RemoveAll(tempDir)
@@ -300,20 +297,20 @@ func buildSDKStaticHintBundleWithFetcherAndTempDir(
 
 		content, err := fetcher(resolvedURL)
 		if err != nil {
-			fmt.Printf("[WARNING] SDK下载JS失败 %s: %v\n", resolvedURL, err)
+			fmt.Printf("[警告] SDK下载JS失败 %s: %v\n", resolvedURL, err)
 			continue
 		}
 
 		filePath := filepath.Join(tempDir, buildSDKTempJSFileName(resolvedURL))
 		if err := os.WriteFile(filePath, content, 0o600); err != nil {
-			fmt.Printf("[WARNING] SDK写入JS临时文件失败 %s: %v\n", resolvedURL, err)
+			fmt.Printf("[警告] SDK写入JS临时文件失败 %s: %v\n", resolvedURL, err)
 			continue
 		}
 
 		fileContent, err := os.ReadFile(filePath)
 		_ = os.Remove(filePath)
 		if err != nil {
-			fmt.Printf("[WARNING] SDK读取JS临时文件失败 %s: %v\n", resolvedURL, err)
+			fmt.Printf("[警告] SDK读取JS临时文件失败 %s: %v\n", resolvedURL, err)
 			continue
 		}
 
@@ -455,16 +452,50 @@ type ScanResult struct {
 	Summary  Summary        `json:"summary"`
 }
 
+type SeverityCount struct {
+	High   int `json:"high"`
+	Medium int `json:"medium"`
+	Low    int `json:"low"`
+	Info   int `json:"info"`
+}
+
+type AuxiliaryCount struct {
+	APIRecords     int `json:"apiRecords"`
+	ProtocolTraces int `json:"protocolTraces"`
+	APIRoutes      int `json:"apiRoutes"`
+	APIRoots       int `json:"apiRoots"`
+}
+
+type FindingDigest struct {
+	Title            string `json:"title"`
+	Level            string `json:"level"`
+	Type             string `json:"type"`
+	URL              string `json:"url"`
+	Method           string `json:"method,omitempty"`
+	Confidence       string `json:"confidence,omitempty"`
+	DataExposure     string `json:"dataExposure,omitempty"`
+	HasProtocolTrace bool   `json:"hasProtocolTrace,omitempty"`
+}
+
+type VulnerabilityOverview struct {
+	VulnerabilityCount  int             `json:"vulnerabilityCount"`
+	VulnerableEndpoints int             `json:"vulnerableEndpoints"`
+	Severity            SeverityCount   `json:"severity"`
+	VulnerabilityTypes  map[string]int  `json:"vulnerabilityTypes"`
+	KeyFindings         []FindingDigest `json:"keyFindings,omitempty"`
+	Auxiliary           AuxiliaryCount  `json:"auxiliary"`
+}
+
 // TargetResult 单个目标的扫描结果
 type TargetResult struct {
-	Target          string              `json:"target"`
-	SiteTree        []crawl.ElTreeNode  `json:"siteTree"`
-	JSResources     []tbdb.JSResource   `json:"jsResources,omitempty"`
-	APIRecords      []APIRecord         `json:"apiRecords,omitempty"`
-	ProtocolTraces  []ProtocolTrace     `json:"protocolTraces,omitempty"`
-	Assets          AssetInfo           `json:"assets"`
-	Risks           []RiskItem          `json:"risks"`
-	Vulnerabilities []VulnerabilityItem `json:"vulnerabilities"`
+	Target          string                `json:"target"`
+	Overview        VulnerabilityOverview `json:"overview"`
+	SiteTree        []crawl.ElTreeNode    `json:"siteTree"`
+	JSResources     []tbdb.JSResource     `json:"jsResources,omitempty"`
+	APIRecords      []APIRecord           `json:"apiRecords,omitempty"`
+	ProtocolTraces  []ProtocolTrace       `json:"protocolTraces,omitempty"`
+	Assets          AssetInfo             `json:"assets"`
+	Vulnerabilities []VulnerabilityItem   `json:"vulnerabilities"`
 }
 
 func sdkVulnerabilityDedupKey(vuln VulnRecord) string {
@@ -582,17 +613,6 @@ type SensitiveItem struct {
 	AIVerified bool   `json:"aiVerified,omitempty"`
 }
 
-type RiskItem struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Level       string `json:"level"`
-	Type        string `json:"type"`
-	URL         string `json:"url"`
-	Description string `json:"description"`
-	AIVerified  bool   `json:"aiVerified,omitempty"`
-	CreatedAt   string `json:"createdAt"`
-}
-
 // VulnerabilityItem 漏洞信息（来自AnalyzeAPI检测）
 type VulnerabilityItem struct {
 	ID                 string                       `json:"id"`
@@ -612,6 +632,8 @@ type VulnerabilityItem struct {
 	ResponseLength     int                          `json:"responseLength,omitempty"`
 	Confidence         string                       `json:"confidence,omitempty"`
 	ConfidenceReason   string                       `json:"confidenceReason,omitempty"`
+	DataExposure       string                       `json:"dataExposure,omitempty"`
+	ExposureReason     string                       `json:"exposureReason,omitempty"`
 	StaticContexts     []database.VulnStaticContext `json:"staticContexts,omitempty"`
 	Description        string                       `json:"description"`
 	AIVerified         bool                         `json:"aiVerified"`
@@ -620,11 +642,17 @@ type VulnerabilityItem struct {
 
 // Summary 扫描摘要
 type Summary struct {
-	TotalTargets         int        `json:"totalTargets"`
-	TotalTreeNodes       int        `json:"totalTreeNodes"`
-	TotalRisks           int        `json:"totalRisks"`
-	TotalVulnerabilities int        `json:"totalVulnerabilities"`
-	TotalAssets          AssetCount `json:"totalAssets"`
+	Focus                string          `json:"focus"`
+	TotalTargets         int             `json:"totalTargets"`
+	VulnerableTargets    int             `json:"vulnerableTargets"`
+	TotalTreeNodes       int             `json:"totalTreeNodes"`
+	TotalVulnerabilities int             `json:"totalVulnerabilities"`
+	VulnerableEndpoints  int             `json:"vulnerableEndpoints"`
+	Severity             SeverityCount   `json:"severity"`
+	VulnerabilityTypes   map[string]int  `json:"vulnerabilityTypes"`
+	KeyFindings          []FindingDigest `json:"keyFindings,omitempty"`
+	Auxiliary            AuxiliaryCount  `json:"auxiliary"`
+	TotalAssets          AssetCount      `json:"totalAssets"`
 }
 
 type AssetCount struct {
@@ -636,6 +664,105 @@ type AssetCount struct {
 	FrontendRoutes int `json:"frontendRoutes"`
 	APIRoutes      int `json:"apiRoutes"`
 	APIRoots       int `json:"apiRoots"`
+}
+
+func incrementSDKSeverityCount(counter *SeverityCount, level string) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "high":
+		counter.High++
+	case "medium":
+		counter.Medium++
+	case "low":
+		counter.Low++
+	default:
+		counter.Info++
+	}
+}
+
+func sdkDigestFromVulnerability(item VulnerabilityItem) FindingDigest {
+	return FindingDigest{
+		Title:            item.Title,
+		Level:            item.Level,
+		Type:             item.Type,
+		URL:              item.URL,
+		Method:           item.Method,
+		Confidence:       item.Confidence,
+		DataExposure:     item.DataExposure,
+		HasProtocolTrace: item.HasProtocolTrace,
+	}
+}
+
+func sdkVulnerabilityEndpointKey(item VulnerabilityItem) string {
+	parsed, err := url.Parse(strings.TrimSpace(item.URL))
+	if err == nil && parsed.Host != "" {
+		return strings.ToUpper(strings.TrimSpace(item.Method)) + "|" + strings.ToLower(parsed.Host) + "|" + parsed.Path
+	}
+	return strings.ToUpper(strings.TrimSpace(item.Method)) + "|" + strings.TrimSpace(item.URL)
+}
+
+func buildSDKTargetOverview(target TargetResult) VulnerabilityOverview {
+	overview := VulnerabilityOverview{
+		VulnerabilityCount: len(target.Vulnerabilities),
+		VulnerabilityTypes: make(map[string]int),
+		KeyFindings:        make([]FindingDigest, 0, min(len(target.Vulnerabilities), 8)),
+		Auxiliary: AuxiliaryCount{
+			APIRecords:     len(target.APIRecords),
+			ProtocolTraces: len(target.ProtocolTraces),
+			APIRoutes:      len(target.Assets.APIRoutes),
+			APIRoots:       len(target.Assets.APIRoots),
+		},
+	}
+
+	endpointSet := make(map[string]struct{}, len(target.Vulnerabilities))
+	for i, item := range target.Vulnerabilities {
+		incrementSDKSeverityCount(&overview.Severity, item.Level)
+		typeKey := strings.TrimSpace(item.Type)
+		if typeKey == "" {
+			typeKey = "unknown"
+		}
+		overview.VulnerabilityTypes[typeKey]++
+
+		endpointKey := sdkVulnerabilityEndpointKey(item)
+		if _, exists := endpointSet[endpointKey]; !exists {
+			endpointSet[endpointKey] = struct{}{}
+		}
+
+		if i < 8 {
+			overview.KeyFindings = append(overview.KeyFindings, sdkDigestFromVulnerability(item))
+		}
+	}
+	overview.VulnerableEndpoints = len(endpointSet)
+
+	return overview
+}
+
+func mergeSDKOverviewIntoSummary(summary *Summary, overview VulnerabilityOverview) {
+	if overview.VulnerabilityCount > 0 {
+		summary.VulnerableTargets++
+	}
+	summary.VulnerableEndpoints += overview.VulnerableEndpoints
+	summary.Severity.High += overview.Severity.High
+	summary.Severity.Medium += overview.Severity.Medium
+	summary.Severity.Low += overview.Severity.Low
+	summary.Severity.Info += overview.Severity.Info
+	summary.Auxiliary.APIRecords += overview.Auxiliary.APIRecords
+	summary.Auxiliary.ProtocolTraces += overview.Auxiliary.ProtocolTraces
+	summary.Auxiliary.APIRoutes += overview.Auxiliary.APIRoutes
+	summary.Auxiliary.APIRoots += overview.Auxiliary.APIRoots
+
+	if summary.VulnerabilityTypes == nil {
+		summary.VulnerabilityTypes = make(map[string]int)
+	}
+	for vulnType, count := range overview.VulnerabilityTypes {
+		summary.VulnerabilityTypes[vulnType] += count
+	}
+
+	for _, digest := range overview.KeyFindings {
+		if len(summary.KeyFindings) >= 12 {
+			break
+		}
+		summary.KeyFindings = append(summary.KeyFindings, digest)
+	}
 }
 
 // VulnCollector 漏洞收集器接口（SDK版本，避免ES依赖）
@@ -699,13 +826,13 @@ func (a *SDKVulnCollectorAdapter) Collect(vuln database.VulnRecord) {
 	// 使用JSON序列化/反序列化来转换，因为两个结构体字段相同
 	jsonData, err := json.Marshal(vuln)
 	if err != nil {
-		fmt.Printf("[WARNING] 无法序列化漏洞记录: %v\n", err)
+		fmt.Printf("[警告] 无法序列化漏洞记录: %v\n", err)
 		return
 	}
 
 	var sdkVuln VulnRecord
 	if err := json.Unmarshal(jsonData, &sdkVuln); err != nil {
-		fmt.Printf("[WARNING] 无法反序列化漏洞记录: %v\n", err)
+		fmt.Printf("[警告] 无法反序列化漏洞记录: %v\n", err)
 		return
 	}
 
@@ -949,7 +1076,6 @@ func newTargetResultFromCapturedActivity(targetURL string, allNetworkURLs []stri
 		APIRecords:      make([]APIRecord, 0, len(apiRecords)),
 		ProtocolTraces:  make([]ProtocolTrace, 0, len(protocolTraces)),
 		Assets:          AssetInfo{},
-		Risks:           []RiskItem{},
 		Vulnerabilities: []VulnerabilityItem{},
 	}
 
@@ -1206,7 +1332,6 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 
 	var allTargetResults []TargetResult
 	var totalTreeNodes int
-	var totalRisks int
 	var totalVulnerabilities int
 	var totalAssets AssetCount
 	shouldContinue := true
@@ -1216,7 +1341,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			break
 		}
 
-		fmt.Printf("[INFO] 处理 URL %d/%d: %s\n", i+1, len(urls), targetURL)
+		fmt.Printf("[信息] 处理 URL %d/%d: %s\n", i+1, len(urls), targetURL)
 		if options.OnResult != nil {
 			event := ScanEvent{
 				Type:      EventTypeProgress,
@@ -1230,7 +1355,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 				},
 			}
 			if !options.OnResult(event) {
-				fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
+				fmt.Printf("[信息] 扫描已通过回调函数停止\n")
 				shouldContinue = false
 				break
 			}
@@ -1261,7 +1386,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			DataStore: options.DataStore,
 		})
 		if err != nil {
-			fmt.Printf("[WARNING] 目标 %s 无法访问: %v\n", targetURL, err)
+			fmt.Printf("[警告] 目标 %s 无法访问: %v\n", targetURL, err)
 			if options.OnResult != nil {
 				options.OnResult(ScanEvent{
 					Type:      EventTypeError,
@@ -1293,7 +1418,6 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			APIRecords:      make([]APIRecord, 0, len(targetScanResult.APIRecords)),
 			ProtocolTraces:  make([]ProtocolTrace, 0, len(targetScanResult.ProtocolTraces)),
 			Assets:          convertSharedAssets(targetScanResult.Assets),
-			Risks:           convertSharedSDKRisks(targetScanResult.Risks),
 			Vulnerabilities: convertSharedVulnerabilities(targetScanResult.Vulnerabilities),
 		}
 		for _, resource := range targetScanResult.JSResources {
@@ -1305,6 +1429,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		for _, trace := range targetScanResult.ProtocolTraces {
 			targetResult.ProtocolTraces = append(targetResult.ProtocolTraces, normalizeSDKProtocolTraceForView(convertProtocolTrace(trace)))
 		}
+		targetResult.Overview = buildSDKTargetOverview(targetResult)
 
 		totalTreeNodes += countTreeNodes(targetResult.SiteTree)
 		if options.OnResult != nil {
@@ -1315,7 +1440,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 					Timestamp: record.FetchedAt,
 					Data:      record,
 				}) {
-					fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
+					fmt.Printf("[信息] 扫描已通过回调函数停止\n")
 					shouldContinue = false
 					break
 				}
@@ -1328,7 +1453,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 						Timestamp: trace.CreatedAt,
 						Data:      trace,
 					}) {
-						fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
+						fmt.Printf("[信息] 扫描已通过回调函数停止\n")
 						shouldContinue = false
 						break
 					}
@@ -1363,7 +1488,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 						"source": assetItem.Source,
 					},
 				}) {
-					fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
+					fmt.Printf("[信息] 扫描已通过回调函数停止\n")
 					shouldContinue = false
 					break
 				}
@@ -1386,7 +1511,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 				Timestamp: parseSDKTimestamp(vulnItem.CreatedAt),
 				Data:      vulnItem,
 			}) {
-				fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
+				fmt.Printf("[信息] 扫描已通过回调函数停止\n")
 				shouldContinue = false
 				break
 			}
@@ -1396,24 +1521,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			break
 		}
 
-		for _, risk := range targetResult.Risks {
-			if options.OnResult == nil {
-				continue
-			}
-			if !options.OnResult(ScanEvent{
-				Type:      EventTypeRisk,
-				Target:    targetURL,
-				Timestamp: parseSDKTimestamp(risk.CreatedAt),
-				Data:      risk,
-			}) {
-				fmt.Printf("[INFO] 扫描已通过回调函数停止\n")
-				shouldContinue = false
-				break
-			}
-		}
-
 		allTargetResults = append(allTargetResults, targetResult)
-		totalRisks += len(targetResult.Risks)
 		totalAssets.Email += len(targetResult.Assets.Email)
 		totalAssets.IDCard += len(targetResult.Assets.IDCard)
 		totalAssets.Phone += len(targetResult.Assets.Phone)
@@ -1430,12 +1538,17 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		Targets:  allTargetResults,
 		ScanTime: time.Now().Format("2006-01-02 15:04:05"),
 		Summary: Summary{
+			Focus:                "api_vulnerability_discovery",
 			TotalTargets:         len(allTargetResults),
 			TotalTreeNodes:       totalTreeNodes,
-			TotalRisks:           totalRisks,
 			TotalVulnerabilities: totalVulnerabilities,
+			VulnerabilityTypes:   make(map[string]int),
 			TotalAssets:          totalAssets,
 		},
+	}
+
+	for _, targetResult := range allTargetResults {
+		mergeSDKOverviewIntoSummary(&result.Summary, targetResult.Overview)
 	}
 
 	if options.OnResult != nil {
@@ -1457,10 +1570,10 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		if err := os.WriteFile(options.OutputPath, jsonData, 0644); err != nil {
 			return nil, fmt.Errorf("failed to write output file: %v", err)
 		}
-		fmt.Printf("[INFO] 扫描结果已保存到: %s\n", options.OutputPath)
+		fmt.Printf("[信息] 扫描结果已保存到: %s\n", options.OutputPath)
 	}
 
-	fmt.Printf("[INFO] 扫描完成，耗时: %v\n", time.Since(startTime))
+	fmt.Printf("[信息] 扫描完成，耗时: %v\n", time.Since(startTime))
 	return result, nil
 }
 
@@ -1489,23 +1602,6 @@ func convertSharedSensitiveItemsToSDK(items []scanexec.SensitiveItem) []Sensitiv
 	return result
 }
 
-func convertSharedSDKRisks(items []scanexec.RiskItem) []RiskItem {
-	result := make([]RiskItem, 0, len(items))
-	for _, item := range items {
-		result = append(result, RiskItem{
-			ID:          item.ID,
-			Title:       item.Title,
-			Level:       item.Level,
-			Type:        item.Type,
-			URL:         item.URL,
-			Description: item.Description,
-			AIVerified:  item.AIVerified,
-			CreatedAt:   item.CreatedAt,
-		})
-	}
-	return result
-}
-
 func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityItem {
 	result := make([]VulnerabilityItem, 0, len(items))
 	for _, vuln := range items {
@@ -1527,6 +1623,8 @@ func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityIt
 			ResponseLength:     vuln.ResponseLength,
 			Confidence:         vuln.Confidence,
 			ConfidenceReason:   vuln.ConfidenceReason,
+			DataExposure:       vuln.DataExposure,
+			ExposureReason:     vuln.ExposureReason,
 			StaticContexts:     append([]database.VulnStaticContext(nil), vuln.StaticContexts...),
 			Description:        vuln.Description,
 			AIVerified:         vuln.AIVerified,

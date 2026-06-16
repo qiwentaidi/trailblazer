@@ -190,10 +190,9 @@ func main() {
 		log.Fatalf("scan failed: %v", err)
 	}
 
-	fmt.Printf("targets=%d vulns=%d risks=%d\n",
+	fmt.Printf("targets=%d vulns=%d\n",
 		result.Summary.TotalTargets,
 		result.Summary.TotalVulnerabilities,
-		result.Summary.TotalRisks,
 	)
 }
 ```
@@ -272,8 +271,6 @@ func RunTrailblazerScan(target string, sink EventSink) (*lib.ScanResult, error) 
 		switch event.Type {
 		case lib.EventTypeAsset:
 			sink.OnAsset(event)
-		case lib.EventTypeRisk:
-			sink.OnRisk(event)
 		case lib.EventTypeVulnerability:
 			sink.OnVulnerability(event)
 		case lib.EventTypeAPIRecord:
@@ -474,7 +471,6 @@ options.OnResult = func(event lib.ScanEvent) bool {
 
 - `EventTypeVulnerability`
 - `EventTypeAsset`
-- `EventTypeRisk`
 - `EventTypeAPIRecord`
 - `EventTypeProtocolTrace`
 - `EventTypeProgress`
@@ -544,7 +540,6 @@ type TargetResult struct {
 	APIRecords      []APIRecord
 	ProtocolTraces  []ProtocolTrace
 	Assets          AssetInfo
-	Risks           []RiskItem
 	Vulnerabilities []VulnerabilityItem
 }
 ```
@@ -779,8 +774,6 @@ options.VulnDetection.Enabled = false
 - [backend/example/callback/main.go](/Users/qwtd/WorkManageCode/trailblazer/backend/example/callback/main.go)
 - [backend/example/config/main.go](/Users/qwtd/WorkManageCode/trailblazer/backend/example/config/main.go)
 - [backend/example/local-import/main.go](/Users/qwtd/WorkManageCode/trailblazer/backend/example/local-import/main.go)
-- [backend/example/jzsc-sdk/jzsc_sdk_run.go](/Users/qwtd/WorkManageCode/trailblazer/backend/example/jzsc-sdk/jzsc_sdk_run.go)
-- [backend/example/yqq-sdk/yqq_sdk_run.go](/Users/qwtd/WorkManageCode/trailblazer/backend/example/yqq-sdk/yqq_sdk_run.go)
 
 ## 18. 推荐接入顺序
 

@@ -65,27 +65,28 @@ func TestBuildAssetInfoPreservesAIVerifiedFlag(t *testing.T) {
 	}
 }
 
-func TestBuildRisksPreservesAIVerifiedFlag(t *testing.T) {
-	risks := buildRisks(AssetInfo{
+func TestBuildAssetVulnerabilitiesPreserveAIVerifiedFlag(t *testing.T) {
+	vulns := buildAssetVulnerabilities(AssetInfo{
 		Sensitive: []SensitiveItem{
 			{Value: `password:"adminTest"`, Source: "https://example.com/app.js", AIVerified: true},
 		},
-	}, true)
+	})
 
-	if len(risks) != 1 {
-		t.Fatalf("expected 1 risk, got %d", len(risks))
+	if len(vulns) != 1 {
+		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
 	}
-	if !risks[0].AIVerified {
-		t.Fatal("expected sensitive risk to preserve aiVerified")
+	if !vulns[0].AIVerified {
+		t.Fatal("expected sensitive vulnerability to preserve aiVerified")
 	}
 }
 
 func TestBuildFrontendRoutesNormalizesHashAndFiltersAPI(t *testing.T) {
 	routes := buildFrontendRoutes([]crawl.FrontendRouteRecord{
-		{Path: "https://example.com/#/admin/users"},
-		{Path: "/admin/users?tab=1"},
-		{Path: "/api/users"},
-		{Path: "/assets/logo.svg"},
+		{Path: "https://example.com/#/admin/users", SourceKind: "router-get-routes"},
+		{Path: "/admin/users?tab=1", SourceKind: "router-options"},
+		{Path: "/api/users", SourceKind: "router-get-routes"},
+		{Path: "/assets/logo.svg", SourceKind: "router-get-routes"},
+		{Path: "/noise/route", SourceKind: "window-scan"},
 	})
 
 	if len(routes) != 1 {
@@ -93,6 +94,29 @@ func TestBuildFrontendRoutesNormalizesHashAndFiltersAPI(t *testing.T) {
 	}
 	if routes[0] != "/admin/users" {
 		t.Fatalf("expected normalized frontend route, got %#v", routes)
+	}
+}
+
+func TestBuildFrontendRoutesDropsUnconfirmedSourceKinds(t *testing.T) {
+	routes := buildFrontendRoutes([]crawl.FrontendRouteRecord{
+		{Path: "/admin/users", SourceKind: "window-scan"},
+		{Path: "/admin/roles", SourceKind: "array-push"},
+		{Path: "/admin/dashboard", SourceKind: "react-fiber-scan"},
+	})
+
+	if len(routes) != 0 {
+		t.Fatalf("expected unconfirmed frontend routes to be dropped, got %#v", routes)
+	}
+}
+
+func TestBuildFrontendRoutesKeepsConfirmedReactSourceKinds(t *testing.T) {
+	routes := buildFrontendRoutes([]crawl.FrontendRouteRecord{
+		{Path: "/console/home/dashboard", SourceKind: "react-router-provider"},
+		{Path: "/console/login", SourceKind: "react-jsx-routes"},
+	})
+
+	if len(routes) != 2 {
+		t.Fatalf("expected confirmed react frontend routes to be kept, got %#v", routes)
 	}
 }
 

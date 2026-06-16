@@ -55,13 +55,13 @@ func RestoreWebpack(sourceMapURL string) (string, error) {
 
 		// 创建中间目录
 		if err := os.MkdirAll(filepath.Dir(fullOutputPath), 0755); err != nil {
-			fmt.Printf("[ERROR] 创建目录失败: %s, err: %v\n", fullOutputPath, err)
+			fmt.Printf("[错误] 创建目录失败: %s，错误: %v\n", fullOutputPath, err)
 			continue
 		}
 
 		// 写入文件
 		if err := os.WriteFile(fullOutputPath, []byte(content), 0644); err != nil {
-			fmt.Printf("[ERROR] 写入文件失败: %s, err: %v\n", fullOutputPath, err)
+			fmt.Printf("[错误] 写入文件失败: %s，错误: %v\n", fullOutputPath, err)
 			continue
 		}
 	}

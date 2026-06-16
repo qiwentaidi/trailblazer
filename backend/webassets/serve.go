@@ -71,14 +71,14 @@ func Register(r *gin.Engine, frontendDevURL string) error {
 		serveHTML(c, indexHTML)
 	})
 
-	fmt.Printf("[INFO] Frontend assets source: %s\n", source)
+	fmt.Printf("[信息] 前端资源来源: %s\n", source)
 	return nil
 }
 
 func registerDevProxy(r *gin.Engine, frontendDevURL string) error {
 	target, err := url.Parse(strings.TrimSpace(frontendDevURL))
 	if err != nil {
-		return fmt.Errorf("invalid frontend dev url: %w", err)
+		return fmt.Errorf("前端开发服务器地址无效: %w", err)
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -96,7 +96,7 @@ func registerDevProxy(r *gin.Engine, frontendDevURL string) error {
 		proxy.ServeHTTP(c.Writer, c.Request)
 	})
 
-	fmt.Printf("[INFO] Frontend assets source: dev proxy -> %s\n", target.String())
+	fmt.Printf("[信息] 前端资源来源: 开发代理 -> %s\n", target.String())
 	return nil
 }
 

@@ -932,6 +932,8 @@ type VulnRecord struct {
 	ResponseLength     int                 `json:"response_length,omitempty"` // 原始响应长度（字节）
 	Confidence         string              `json:"confidence,omitempty"`
 	ConfidenceReason   string              `json:"confidence_reason,omitempty"`
+	DataExposure       string              `json:"data_exposure,omitempty"`
+	ExposureReason     string              `json:"exposure_reason,omitempty"`
 	DenyTemplateID     string              `json:"deny_template_id,omitempty"`
 	DenyTemplateKind   string              `json:"deny_template_kind,omitempty"`
 	DenyTemplateLabel  string              `json:"deny_template_label,omitempty"`
@@ -1012,14 +1014,14 @@ func SaveVuln(vuln VulnRecord) error {
 	go func(taskID string, version int) {
 		if version <= 0 {
 			if err := UpdateTaskHighestRiskLevel(taskID); err != nil {
-				fmt.Printf("[WARNING] Failed to update highest risk level for task %s: %v\n", taskID, err)
+				fmt.Printf("[警告] 更新任务 %s 的最高风险等级失败: %v\n", taskID, err)
 			}
 			return
 		}
 
 		vulns, err := QueryVulnsByTaskID(taskID)
 		if err != nil {
-			fmt.Printf("[WARNING] Failed to load vulns for task %s version %d: %v\n", taskID, version, err)
+			fmt.Printf("[警告] 加载任务 %s 版本 %d 的漏洞失败: %v\n", taskID, version, err)
 			return
 		}
 
@@ -1031,7 +1033,7 @@ func SaveVuln(vuln VulnRecord) error {
 		}
 
 		if err := UpdateTaskVersionHighestRiskLevelFromVulns(taskID, version, versionVulns); err != nil {
-			fmt.Printf("[WARNING] Failed to update highest risk level for task %s version %d: %v\n", taskID, version, err)
+			fmt.Printf("[警告] 更新任务 %s 版本 %d 的最高风险等级失败: %v\n", taskID, version, err)
 		}
 	}(vuln.TaskID, vuln.Version)
 

@@ -199,11 +199,7 @@ describe('tasks service', () => {
         response_ciphertext: 'abcd1234',
         decryption_status: 'not_tried',
         decryption_detail: '已关联协议轨迹',
-        confidence_reason: '相同响应大量重复',
-        deny_template_id: 'cluster-a',
-        deny_template_kind: 'auth_required',
-        deny_template_label: '疑似统一认证拒绝模板',
-        deny_template_count: 12,
+        confidence_reason: '低置信：结果更像相似拒绝模板或通用错误响应',
         static_contexts: [
           {
             source_url: 'https://example.com/app.js',
@@ -221,11 +217,7 @@ describe('tasks service', () => {
       responseCiphertext: 'abcd1234',
       decryptionStatus: 'not_tried',
       decryptionDetail: '已关联协议轨迹',
-      confidenceReason: '相同响应大量重复',
-      denyTemplateId: 'cluster-a',
-      denyTemplateKind: 'auth_required',
-      denyTemplateLabel: '疑似统一认证拒绝模板',
-      denyTemplateCount: 12,
+      confidenceReason: '低置信：结果更像相似拒绝模板或通用错误响应',
       staticContexts: [
         {
           sourceUrl: 'https://example.com/app.js',

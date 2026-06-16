@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
@@ -24,7 +26,132 @@ const (
 	defaultScanInitialWait      = 10 * time.Second
 	defaultScanPostWait         = 8 * time.Second
 	defaultScanTimeout          = 120 * time.Second
+	defaultCaptureUserAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+	defaultCaptureLanguage      = "zh-CN,zh;q=0.9,en;q=0.8"
+	defaultCapturePlatform      = "MacIntel"
 )
+
+const stealthBrowserScript = `(function () {
+  try {
+    var overrideGetter = function (target, key, getter) {
+      try {
+        Object.defineProperty(target, key, {
+          configurable: true,
+          enumerable: true,
+          get: getter
+        });
+      } catch (err) {}
+    };
+
+    overrideGetter(Navigator.prototype, "webdriver", function () {
+      return undefined;
+    });
+    overrideGetter(Navigator.prototype, "platform", function () {
+      return "MacIntel";
+    });
+    overrideGetter(Navigator.prototype, "language", function () {
+      return "zh-CN";
+    });
+    overrideGetter(Navigator.prototype, "languages", function () {
+      return ["zh-CN", "zh", "en"];
+    });
+    overrideGetter(Navigator.prototype, "plugins", function () {
+      return [
+        { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer" },
+        { name: "Chrome PDF Viewer", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai" },
+        { name: "Native Client", filename: "internal-nacl-plugin" },
+        { name: "Microsoft Edge PDF Viewer", filename: "internal-pdf-viewer" },
+        { name: "WebKit built-in PDF", filename: "internal-pdf-viewer" }
+      ];
+    });
+    overrideGetter(Navigator.prototype, "mimeTypes", function () {
+      return [
+        { type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" },
+        { type: "text/pdf", suffixes: "pdf", description: "Portable Document Format" }
+      ];
+    });
+
+    if (!window.chrome) {
+      window.chrome = {};
+    }
+    if (!window.chrome.runtime) {
+      window.chrome.runtime = {};
+    }
+    if (!window.chrome.app) {
+      window.chrome.app = {
+        isInstalled: false,
+        InstallState: {
+          DISABLED: "disabled",
+          INSTALLED: "installed",
+          NOT_INSTALLED: "not_installed"
+        },
+        RunningState: {
+          CANNOT_RUN: "cannot_run",
+          READY_TO_RUN: "ready_to_run",
+          RUNNING: "running"
+        }
+      };
+    }
+    if (!window.chrome.csi) {
+      window.chrome.csi = function () {
+        return {
+          onloadT: Date.now(),
+          startE: Date.now() - 100,
+          pageT: Math.max(0, Date.now() - (window.performance && performance.timing ? performance.timing.navigationStart : Date.now()))
+        };
+      };
+    }
+    if (!window.chrome.loadTimes) {
+      window.chrome.loadTimes = function () {
+        var now = Date.now() / 1000;
+        return {
+          requestTime: now - 1,
+          startLoadTime: now - 1,
+          commitLoadTime: now - 0.5,
+          finishDocumentLoadTime: now - 0.2,
+          finishLoadTime: now,
+          firstPaintTime: now - 0.1
+        };
+      };
+    }
+
+    if (navigator.permissions && navigator.permissions.query) {
+      var originalQuery = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = function (parameters) {
+        if (parameters && parameters.name === "notifications") {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return originalQuery(parameters);
+      };
+    }
+
+    try {
+      var originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) {
+          return "Intel Inc.";
+        }
+        if (parameter === 37446) {
+          return "Intel Iris OpenGL Engine";
+        }
+        return originalGetParameter.apply(this, arguments);
+      };
+    } catch (err) {}
+
+    try {
+      var originalGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
+      WebGL2RenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) {
+          return "Intel Inc.";
+        }
+        if (parameter === 37446) {
+          return "Intel Iris OpenGL Engine";
+        }
+        return originalGetParameter2.apply(this, arguments);
+      };
+    } catch (err) {}
+  } catch (err) {}
+})();`
 
 // NetworkRecord 表示浏览器运行时捕获到的接口请求/响应记录
 type NetworkRecord struct {
@@ -64,26 +191,27 @@ type CaptureSnapshot struct {
 
 // CaptureOptions 控制动态采集期间的页面交互行为。
 type CaptureOptions struct {
-	Timeout               time.Duration
-	InitialWait           time.Duration
-	PostInteractionWait   time.Duration
-	BrowserVisible        bool
-	ProxyServer           string
-	ProxyBypassList       string
-	AutoTriggerForms      bool
-	AutoTriggerAttempts   int
-	AutoTriggerRetryDelay time.Duration
-	AutoExploreRoutes     bool
-	MaxExploreRoutes      int
-	MaxRouteClicks        int
-	RouteInteractionWait  time.Duration
-	NativeFormTrigger     bool
-	UsernameSelector      string
-	PasswordSelector      string
-	SubmitSelector        string
-	UsernameValue         string
-	PasswordValue         string
-	OnUpdate              func(CaptureSnapshot)
+	Timeout                   time.Duration
+	InitialWait               time.Duration
+	PostInteractionWait       time.Duration
+	BrowserVisible            bool
+	ProxyServer               string
+	ProxyBypassList           string
+	BypassFrontendRouteGuards bool
+	AutoTriggerForms          bool
+	AutoTriggerAttempts       int
+	AutoTriggerRetryDelay     time.Duration
+	AutoExploreRoutes         bool
+	MaxExploreRoutes          int
+	MaxRouteClicks            int
+	RouteInteractionWait      time.Duration
+	NativeFormTrigger         bool
+	UsernameSelector          string
+	PasswordSelector          string
+	SubmitSelector            string
+	UsernameValue             string
+	PasswordValue             string
+	OnUpdate                  func(CaptureSnapshot)
 }
 
 // 动态捕获网站访问时加载的所有链接
@@ -94,13 +222,14 @@ func CaptureNetworkURLs(url string) []string {
 
 func defaultScanCaptureOptions() CaptureOptions {
 	return CaptureOptions{
-		Timeout:              defaultScanTimeout,
-		InitialWait:          defaultScanInitialWait,
-		PostInteractionWait:  defaultScanPostWait,
-		AutoExploreRoutes:    true,
-		MaxExploreRoutes:     8,
-		MaxRouteClicks:       8,
-		RouteInteractionWait: 2 * time.Second,
+		Timeout:                   defaultScanTimeout,
+		InitialWait:               defaultScanInitialWait,
+		PostInteractionWait:       defaultScanPostWait,
+		BypassFrontendRouteGuards: true,
+		AutoExploreRoutes:         true,
+		MaxExploreRoutes:          8,
+		MaxRouteClicks:            8,
+		RouteInteractionWait:      2 * time.Second,
 	}
 }
 
@@ -281,10 +410,20 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 		runtime.Enable(),
 		runtime.AddBinding(protocolHookBindingName),
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, err := page.AddScriptToEvaluateOnNewDocument(protocolHookScript).Do(ctx)
+			_, err := page.AddScriptToEvaluateOnNewDocument(stealthBrowserScript).Do(ctx)
+			return err
+		}),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, err := page.AddScriptToEvaluateOnNewDocument(buildProtocolHookScript(options)).Do(ctx)
 			return err
 		}),
 		network.Enable(),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return emulation.SetUserAgentOverride(defaultCaptureUserAgent).
+				WithAcceptLanguage(defaultCaptureLanguage).
+				WithPlatform(defaultCapturePlatform).
+				Do(ctx)
+		}),
 		chromedp.Navigate(url),
 		chromedp.Sleep(options.InitialWait),
 	}
@@ -314,13 +453,13 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 
 	if err != nil {
 		if isExpectedCaptureCancellation(err) {
-			fmt.Printf("[INFO] %s 动态捕获已结束，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹、%d 条前端路由, 结束原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes), err)
+			fmt.Printf("[信息] %s 动态捕获已结束，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹、%d 条前端路由，结束原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes), err)
 			return networks, apiRecords, protocolTraces, frontendRoutes
 		}
-		fmt.Printf("[ERROR] %s 动态捕获网络请求失败，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹、%d 条前端路由, 错误原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes), err)
+		fmt.Printf("[错误] %s 动态捕获网络请求失败，已获取 %d 个URL、%d 条接口记录、%d 条协议轨迹、%d 条前端路由，错误原因: %v\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes), err)
 		return networks, apiRecords, protocolTraces, frontendRoutes
 	}
-	fmt.Printf("[INFO] %s 成功捕获 %d 个网络请求，提取 %d 条接口记录、%d 条协议轨迹、%d 条前端路由\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes))
+	fmt.Printf("[信息] %s 成功捕获 %d 个网络请求，提取 %d 条接口记录、%d 条协议轨迹、%d 条前端路由\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes))
 	return networks, apiRecords, protocolTraces, frontendRoutes
 }
 
@@ -384,6 +523,10 @@ func cloneFrontendRouteRecords(records []FrontendRouteRecord) []FrontendRouteRec
 func buildExecAllocatorOptions(options CaptureOptions) []chromedp.ExecAllocatorOption {
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", !options.BrowserVisible),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("enable-automation", false),
+		chromedp.Flag("disable-infobars", true),
+		chromedp.Flag("window-size", "1440,900"),
 	)
 
 	flags := buildCaptureChromeFlags(options)
@@ -399,7 +542,11 @@ func buildExecAllocatorOptions(options CaptureOptions) []chromedp.ExecAllocatorO
 
 func buildCaptureChromeFlags(options CaptureOptions) map[string]any {
 	flags := map[string]any{
-		"headless": !options.BrowserVisible,
+		"headless":               !options.BrowserVisible,
+		"disable-blink-features": "AutomationControlled",
+		"enable-automation":      false,
+		"disable-infobars":       true,
+		"window-size":            "1440,900",
 	}
 
 	if proxyServer := strings.TrimSpace(options.ProxyServer); proxyServer != "" {
@@ -541,16 +688,16 @@ func frontendRouteInteractionAction(entryURL string, options CaptureOptions, rou
 			return nil
 		}
 
-		fmt.Printf("[INFO] 前端路由动态采集开始 entry=%s routes=%d max_clicks=%d\n", entryURL, len(routes), options.MaxRouteClicks)
+		fmt.Printf("[信息] 前端路由动态采集开始 entry=%s routes=%d max_clicks=%d\n", entryURL, len(routes), options.MaxRouteClicks)
 		for _, routeURL := range routes {
 			if err := chromedp.Run(ctx, chromedp.Navigate(routeURL), chromedp.Sleep(options.RouteInteractionWait)); err != nil {
-				fmt.Printf("[WARN] 前端路由动态采集导航失败 route=%s err=%v\n", routeURL, err)
+				fmt.Printf("[警告] 前端路由动态采集导航失败 route=%s err=%v\n", routeURL, err)
 				continue
 			}
 
 			var result routeInteractionResult
 			if err := chromedp.Evaluate(fmt.Sprintf(routeInteractionScript, options.MaxRouteClicks), &result).Do(ctx); err != nil {
-				fmt.Printf("[WARN] 前端路由动态采集交互失败 route=%s err=%v\n", routeURL, err)
+				fmt.Printf("[警告] 前端路由动态采集交互失败 route=%s err=%v\n", routeURL, err)
 				continue
 			}
 			if result.PageURL == "" {
@@ -585,11 +732,19 @@ func buildFrontendRouteExploreURLs(entryURL string, records []FrontendRouteRecor
 	if base == "" {
 		return nil
 	}
+	hashBase := deriveFrontendRouteHashBase(entryURL)
+	if hashBase == "" {
+		hashBase = base
+	}
 
+	prefixes := deriveFrontendRouteBasePrefixes(entryURL, records)
 	seen := map[string]bool{entryURL: true, base: true}
 	var routes []string
 	for _, record := range records {
-		for _, candidate := range frontendRouteURLCandidates(base, record.Path) {
+		if shouldSkipFrontendRouteExploration(record.Path) {
+			continue
+		}
+		for _, candidate := range frontendRouteURLCandidates(base, hashBase, record.Path, prefixes) {
 			if seen[candidate] {
 				continue
 			}
@@ -603,7 +758,131 @@ func buildFrontendRouteExploreURLs(entryURL string, records []FrontendRouteRecor
 	return routes
 }
 
-func frontendRouteURLCandidates(base, rawPath string) []string {
+func deriveFrontendRouteHashBase(entryURL string) string {
+	value := strings.TrimSpace(entryURL)
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "#") {
+		return stripURLFragment(value)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return stripURLFragment(value)
+	}
+	parsed.Path = "/"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func deriveFrontendRouteBasePrefixes(entryURL string, records []FrontendRouteRecord) []string {
+	parsedEntry, err := url.Parse(strings.TrimSpace(entryURL))
+	if err != nil {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	var prefixes []string
+	appendPrefix := func(value string) {
+		value = normalizeFrontendRoutePrefix(value)
+		if value == "" || value == "/" || seen[value] {
+			return
+		}
+		seen[value] = true
+		prefixes = append(prefixes, value)
+	}
+
+	entryPath := strings.TrimSpace(parsedEntry.Path)
+	if entryPath != "" && entryPath != "/" {
+		if dir := path.Dir(entryPath); dir != "." && dir != "/" {
+			appendPrefix(dir)
+		}
+	}
+
+	normalizedPaths := make([]string, 0, len(records))
+	for _, record := range records {
+		normalized := normalizeFrontendRouteCandidatePath(record.Path)
+		if normalized != "" {
+			normalizedPaths = append(normalizedPaths, normalized)
+		}
+	}
+	if current := normalizeFrontendRouteCandidatePath(entryURL); current != "" {
+		normalizedPaths = append(normalizedPaths, current)
+	}
+
+	for _, current := range normalizedPaths {
+		for _, routePath := range normalizedPaths {
+			if current == "" || routePath == "" || current == routePath {
+				continue
+			}
+			if !strings.HasSuffix(current, routePath) {
+				continue
+			}
+			prefix := strings.TrimSuffix(current, routePath)
+			appendPrefix(prefix)
+		}
+	}
+
+	return prefixes
+}
+
+func shouldSkipFrontendRouteExploration(rawPath string) bool {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return true
+	}
+	if parsed, err := url.Parse(path); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		path = parsed.Path
+	}
+	return strings.Contains(path, ":")
+}
+
+func normalizeFrontendRouteCandidatePath(rawPath string) string {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(path); err == nil {
+		switch {
+		case parsed.Fragment != "" && strings.HasPrefix(parsed.Fragment, "/"):
+			path = parsed.Fragment
+		case parsed.Path != "":
+			path = parsed.Path
+		}
+	}
+	if strings.HasPrefix(path, "#") {
+		path = strings.TrimPrefix(path, "#")
+	}
+	if strings.HasPrefix(path, "/#") {
+		path = strings.TrimPrefix(path, "/")
+	}
+	if path == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return normalizeFrontendRoutePrefix(path)
+}
+
+func normalizeFrontendRoutePrefix(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	value = strings.ReplaceAll(value, "//", "/")
+	value = strings.TrimRight(value, "/")
+	if value == "" {
+		return "/"
+	}
+	return value
+}
+
+func frontendRouteURLCandidates(base, hashBase, rawPath string, prefixes []string) []string {
 	path := strings.TrimSpace(rawPath)
 	if path == "" {
 		return nil
@@ -613,20 +892,40 @@ func frontendRouteURLCandidates(base, rawPath string) []string {
 	}
 
 	if strings.HasPrefix(path, "#") {
-		return []string{base + path}
+		return []string{hashBase + path}
 	}
 
 	if strings.HasPrefix(path, "/#") {
-		return []string{base + strings.TrimPrefix(path, "/")}
+		return []string{hashBase + strings.TrimPrefix(path, "/")}
 	}
 
 	if strings.HasPrefix(path, "/") {
-		candidates := []string{base + "#" + path}
+		candidates := []string{hashBase + "#" + path}
 		if parsedBase, err := url.Parse(base); err == nil && parsedBase.Scheme != "" && parsedBase.Host != "" {
-			parsedBase.Path = path
-			parsedBase.RawQuery = ""
-			parsedBase.Fragment = ""
-			candidates = append(candidates, parsedBase.String())
+			seen := map[string]bool{}
+			appendCandidate := func(candidatePath string) {
+				candidatePath = normalizeFrontendRoutePrefix(candidatePath)
+				if candidatePath == "" {
+					return
+				}
+				next := *parsedBase
+				next.Path = candidatePath
+				next.RawQuery = ""
+				next.Fragment = ""
+				candidate := next.String()
+				if candidate == "" || seen[candidate] {
+					return
+				}
+				seen[candidate] = true
+				candidates = append(candidates, candidate)
+			}
+			appendCandidate(path)
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(path, prefix+"/") || path == prefix {
+					continue
+				}
+				appendCandidate(prefix + path)
+			}
 		}
 		return candidates
 	}
@@ -1015,26 +1314,233 @@ const routeInteractionScript = `(function () {
     return filled;
   }
   function buttonText(el) {
-    return String(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.title || "").replace(/\s+/g, " ").trim();
+    var direct = String(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.title || "").replace(/\s+/g, " ").trim();
+    if (direct) return direct;
+    var field = el.querySelector ? el.querySelector("input, textarea") : null;
+    if (!field) return "";
+    return String(field.value || field.getAttribute("placeholder") || field.getAttribute("aria-label") || field.title || "").replace(/\s+/g, " ").trim();
+  }
+  function className(el) {
+    return String((el && el.className) || "").toLowerCase();
   }
   function isDangerousButton(text) {
-    return /(delete|remove|reset|clear|drop|disable|shutdown|logout|log out|run|execute|exec|poc|attack|exploit|upload|import|删除|移除|重置|清空|禁用|退出|运行|执行|攻击|利用|上传|导入)/i.test(text);
+    return /(delete|remove|clear|drop|disable|shutdown|logout|log out|run|execute|exec|poc|attack|exploit|删除|移除|清空|禁用|退出|运行|执行|攻击|利用)/i.test(text);
   }
-  function isUsefulButton(text) {
-    if (!text) return false;
-    return /(search|query|filter|submit|confirm|ok|next|get|list|load|refresh|查询|搜索|筛选|提交|确定|下一步|获取|列表|加载|刷新)/i.test(text);
+  function isNativeFormField(el) {
+    if (!el || !el.tagName) return false;
+    var tag = String(el.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select" || tag === "option") return true;
+    if (el.isContentEditable) return true;
+    return false;
+  }
+  function hasFrameworkClickableClass(el) {
+    var cls = className(el);
+    return /(^|\s)(el-button|el-link|el-dropdown-link|el-select|el-cascader|el-date-editor|el-upload|el-pagination__sizes|ant-btn|ant-select-selector|ant-picker|ant-dropdown-trigger|ant-pagination-item-link|ivu-btn|ivu-select-selection|ivu-page-item|ivu-page-next|ivu-page-prev|n-button|n-base-selection|my_export)(\s|$)/.test(cls);
+  }
+  function hasInteractiveDescendant(el) {
+    if (!el || !el.querySelector) return false;
+    return !!el.querySelector([
+      "button",
+      "a[href]",
+      "[role='button']",
+      "[role='link']",
+      "[onclick]",
+      "[tabindex]",
+      "[aria-haspopup]",
+      "[aria-expanded]",
+      "[aria-controls]",
+      "[data-target]",
+      "[data-toggle]",
+      "[data-action]",
+      "[data-click]",
+      "[data-testid]",
+      "i[class*='icon']",
+      "svg",
+      ".el-icon-upload",
+      ".el-icon-download"
+    ].join(", "));
+  }
+  function isLikelyActionText(text) {
+    return !!(text && text.length <= 24 && /(query|search|filter|submit|confirm|next|refresh|import|export|download|upload|select|choose|open|more|查询|搜索|筛选|提交|确定|继续|刷新|导入|导出|下载|上传|选择|打开|更多)/i.test(text));
+  }
+  function hasClickSignal(el) {
+    if (!el || !el.tagName) return false;
+    var tag = String(el.tagName || "").toLowerCase();
+    var role = String(el.getAttribute("role") || "").toLowerCase();
+    var href = String(el.getAttribute("href") || "").trim();
+    var tabIndex = String(el.getAttribute("tabindex") || "").trim();
+    var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    var ariaHaspopup = String(el.getAttribute("aria-haspopup") || "").toLowerCase();
+    var ariaExpanded = el.getAttribute("aria-expanded");
+    var ariaControls = String(el.getAttribute("aria-controls") || "").trim();
+    var dataTarget = String(el.getAttribute("data-target") || el.getAttribute("data-toggle") || "").trim();
+    if (tag === "button" || tag === "summary") return true;
+    if (tag === "a" && href && href !== "#" && !/^javascript:/i.test(href)) return true;
+    if (tag === "label" && String(el.getAttribute("for") || "").trim()) return true;
+    if (role === "button" || role === "link" || role === "menuitem" || role === "tab") return true;
+    if (typeof el.onclick === "function" || el.hasAttribute("onclick")) return true;
+    if (tabIndex && tabIndex !== "-1") return true;
+    if (ariaHaspopup === "true" || ariaHaspopup === "menu" || ariaHaspopup === "listbox" || ariaExpanded === "true" || ariaExpanded === "false") return true;
+    if (ariaControls || dataTarget) return true;
+    if (style && style.cursor === "pointer") return true;
+    if (el.hasAttribute("data-action") || el.hasAttribute("data-click") || el.hasAttribute("data-testid")) return true;
+    var text = buttonText(el);
+    if (text && text.length <= 16 && /(import|export|download|upload|导入|导出|下载|上传)/i.test(text)) return true;
+    if (isLikelyActionText(text) && hasInteractiveDescendant(el)) return true;
+    if (isLikelyActionText(text) && /action|operate|toolbar|tools|op|btn|button|link|export|import|download|upload|search|query|filter|page|pager|select|choice|my_export|操作|工具|按钮|链接|导出|导入|下载|上传|查询|筛选|分页|下拉/.test(className(el))) return true;
+    if (hasFrameworkClickableClass(el)) return true;
+    return false;
+  }
+  function normalizeClickableTarget(el) {
+    if (!el || !el.closest) return el;
+    return el.closest([
+      "button",
+      "a[href]",
+      "label[for]",
+      "input[type='submit']",
+      "input[type='button']",
+      "[role='button']",
+      "[role='link']",
+      "[role='menuitem']",
+      "[role='tab']",
+      ".el-button",
+      ".el-link",
+      ".el-dropdown-link",
+      ".el-select",
+      ".el-cascader",
+      ".el-date-editor",
+      ".el-upload",
+      ".my_export",
+      "[class*='export']",
+      "[class*='import']",
+      "[class*='download']",
+      "[class*='upload']",
+      "[class*='action']",
+      "[class*='operate']",
+      "[class*='toolbar']",
+      "[class*='tools']",
+      "[class*='btn']",
+      "[class*='button']",
+      "[class*='link']",
+      "[class*='search']",
+      "[class*='query']",
+      "[class*='filter']",
+      "[class*='page']",
+      "[class*='pager']",
+      "[class*='select']",
+      ".el-pagination .btn-prev",
+      ".el-pagination .btn-next",
+      ".el-pagination__sizes",
+      ".ant-btn",
+      ".ant-select-selector",
+      ".ant-picker",
+      ".ant-dropdown-trigger",
+      ".ant-pagination-prev",
+      ".ant-pagination-next",
+      ".ant-pagination-item",
+      ".ivu-btn",
+      ".ivu-select-selection",
+      ".ivu-page-prev",
+      ".ivu-page-next",
+      ".ivu-page-item",
+      ".n-button",
+      ".n-base-selection"
+    ].join(", ")) || el;
+  }
+  function isOversizedContainer(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var rect = el.getBoundingClientRect();
+    var viewportW = window.innerWidth || document.documentElement.clientWidth || 0;
+    var viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (!viewportW || !viewportH) return false;
+    return rect.width >= viewportW * 0.8 && rect.height >= viewportH * 0.25;
+  }
+  function collectClickableTargets() {
+    var selector = [
+      "button",
+      "a[href]",
+      "label[for]",
+      "input[type='submit']",
+      "input[type='button']",
+      "[role='button']",
+      "[role='link']",
+      "[role='menuitem']",
+      "[role='tab']",
+      "[aria-haspopup]",
+      "[aria-expanded]",
+      "[aria-controls]",
+      "[onclick]",
+      "[tabindex]",
+      "[data-target]",
+      "[data-toggle]",
+      "[data-action]",
+      "[data-click]",
+      "[data-testid]",
+      ".el-button",
+      ".el-link",
+      ".el-dropdown-link",
+      ".el-select",
+      ".el-cascader",
+      ".el-date-editor",
+      ".el-upload",
+      ".my_export",
+      "[class*='export']",
+      "[class*='import']",
+      "[class*='download']",
+      "[class*='upload']",
+      "[class*='action']",
+      "[class*='operate']",
+      "[class*='toolbar']",
+      "[class*='tools']",
+      "[class*='btn']",
+      "[class*='button']",
+      "[class*='link']",
+      "[class*='search']",
+      "[class*='query']",
+      "[class*='filter']",
+      "[class*='page']",
+      "[class*='pager']",
+      "[class*='select']",
+      ".el-pagination .btn-prev",
+      ".el-pagination .btn-next",
+      ".el-pagination__sizes",
+      ".ant-btn",
+      ".ant-select-selector",
+      ".ant-picker",
+      ".ant-dropdown-trigger",
+      ".ant-pagination-prev",
+      ".ant-pagination-next",
+      ".ant-pagination-item",
+      ".ivu-btn",
+      ".ivu-select-selection",
+      ".ivu-page-prev",
+      ".ivu-page-next",
+      ".ivu-page-item",
+      ".n-button",
+      ".n-base-selection"
+    ].join(", ");
+    var seen = [];
+    return Array.prototype.slice.call(document.querySelectorAll(selector)).map(function (el) {
+      return normalizeClickableTarget(el);
+    }).filter(function (target) {
+      if (!target || seen.indexOf(target) >= 0) return false;
+      seen.push(target);
+      if (target.disabled || target.getAttribute("aria-disabled") === "true") return false;
+      if (!isVisible(target)) return false;
+      if (isNativeFormField(target)) return false;
+      if (!hasClickSignal(target)) return false;
+      if (isOversizedContainer(target)) return false;
+      return true;
+    });
   }
   var filled = fillFields();
-  var buttons = Array.prototype.slice.call(document.querySelectorAll("button, input[type='submit'], input[type='button'], [role='button'], .el-button, .ant-btn"))
-    .filter(function (el) {
-      return !el.disabled && el.getAttribute("aria-disabled") !== "true" && isVisible(el);
-    });
+  var buttons = collectClickableTargets();
   var clicked = [];
   var skipped = [];
   buttons.forEach(function (el) {
     var text = buttonText(el);
     if (clicked.length >= maxClicks) return;
-    if (isDangerousButton(text) || !isUsefulButton(text)) {
+    if (isDangerousButton(text)) {
       if (text) skipped.push(text);
       return;
     }

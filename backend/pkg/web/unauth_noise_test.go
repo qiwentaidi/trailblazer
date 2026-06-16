@@ -1,11 +1,12 @@
 package web
 
 import (
-	"strings"
 	"sync"
 	"testing"
 	"trailblazer/pkg/core/database"
 )
+
+const lowConfidenceStatement = "低置信：结果更像相似拒绝模板或通用错误响应"
 
 type stubDenyTemplateAIReviewer struct {
 	confirmed bool
@@ -71,8 +72,8 @@ func TestAnnotateUnauthorizedNoiseMarksAuthTemplateClusters(t *testing.T) {
 		if vuln.Confidence != "low" {
 			t.Fatalf("confidence = %q, want low", vuln.Confidence)
 		}
-		if !strings.Contains(vuln.ConfidenceReason, "疑似统一认证拒绝模板") {
-			t.Fatalf("expected confidence reason to include template label, got %q", vuln.ConfidenceReason)
+		if vuln.ConfidenceReason != lowConfidenceStatement {
+			t.Fatalf("confidence reason = %q, want %q", vuln.ConfidenceReason, lowConfidenceStatement)
 		}
 	}
 }
@@ -163,8 +164,8 @@ func TestAnnotateUnauthorizedNoiseIgnoresVolatileErrorHint(t *testing.T) {
 		if vuln.Confidence != "low" {
 			t.Fatalf("confidence = %q, want low", vuln.Confidence)
 		}
-		if !strings.Contains(vuln.ConfidenceReason, "疑似统一拒绝模板") {
-			t.Fatalf("expected confidence reason to include deny template label, got %q", vuln.ConfidenceReason)
+		if vuln.ConfidenceReason != lowConfidenceStatement {
+			t.Fatalf("confidence reason = %q, want %q", vuln.ConfidenceReason, lowConfidenceStatement)
 		}
 	}
 }

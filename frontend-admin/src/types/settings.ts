@@ -7,8 +7,7 @@ export interface OpenAISettings {
 
 export interface SQLiPayloadRule {
   payloads: string[]
-  type: 'error-based' | 'time-based' | 'boolean-based' | string
-  minDelayMs: number
+  type: 'error-based' | 'boolean-based' | string
   bodyContains: string[]
 }
 

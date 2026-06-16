@@ -177,7 +177,7 @@ func TestGetTaskVulnsVersionQueryUsesSelectedVersionWithoutMixing(t *testing.T) 
 		}
 
 		var response struct {
-			Data []database.VulnRecord `json:"data"`
+			Data []taskVulnResponse `json:"data"`
 		}
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 			t.Fatalf("json.Unmarshal() error = %v; body=%s", err, recorder.Body.String())
@@ -205,7 +205,7 @@ func TestGetTaskVulnsVersionQueryUsesSelectedVersionWithoutMixing(t *testing.T) 
 		}
 
 		var response struct {
-			Data []database.VulnRecord `json:"data"`
+			Data []taskVulnResponse `json:"data"`
 		}
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 			t.Fatalf("json.Unmarshal() error = %v; body=%s", err, recorder.Body.String())
@@ -302,7 +302,7 @@ func TestGetTaskVulnsDedupesHTTPHTTPSDuplicates(t *testing.T) {
 	}
 
 	var response struct {
-		Data []database.VulnRecord `json:"data"`
+		Data []taskVulnResponse `json:"data"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v; body=%s", err, recorder.Body.String())

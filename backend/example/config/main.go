@@ -48,10 +48,6 @@ func main() {
 			if asset, ok := event.Data.(map[string]interface{}); ok {
 				fmt.Printf("[资产] %s: %s\n", asset["type"], asset["value"])
 			}
-		case lib.EventTypeRisk:
-			if risk, ok := event.Data.(lib.RiskItem); ok {
-				fmt.Printf("[风险] [%s] %s\n", risk.Level, risk.Title)
-			}
 		case lib.EventTypeProgress:
 			progress := event.Data.(map[string]interface{})
 			if status, ok := progress["status"].(string); ok {
@@ -79,6 +75,5 @@ func main() {
 	fmt.Printf("\n=== 扫描结果 ===\n")
 	fmt.Printf("目标数量: %d\n", result.Summary.TotalTargets)
 	fmt.Printf("漏洞数量: %d\n", result.Summary.TotalVulnerabilities)
-	fmt.Printf("风险数量: %d\n", result.Summary.TotalRisks)
 	fmt.Printf("结果已保存到: %s\n", options.OutputPath)
 }

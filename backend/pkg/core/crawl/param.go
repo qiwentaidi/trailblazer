@@ -169,7 +169,7 @@ func completeParameters(method, apiURL string, params url.Values) url.Values {
 		content, err := parameterProbeFunc(ctx, method, fullURL)
 		cancel()
 		if err != nil {
-			fmt.Printf("[WARN] %s 参数探测请求失败: %v\n", fullURL, err)
+			fmt.Printf("[警告] %s 参数探测请求失败: %v\n", fullURL, err)
 			return params
 		}
 
@@ -179,7 +179,7 @@ func completeParameters(method, apiURL string, params url.Values) url.Values {
 		}
 
 		if _, exists := params[missingParam.Name]; exists {
-			fmt.Printf("[WARN] %s 缺失参数 %s 已存在，跳过重复补全\n", fullURL, missingParam.Name)
+			fmt.Printf("[警告] %s 缺失参数 %s 已存在，跳过重复补全\n", fullURL, missingParam.Name)
 			return params
 		}
 

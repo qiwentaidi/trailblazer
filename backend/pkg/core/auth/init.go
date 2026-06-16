@@ -39,7 +39,7 @@ func InitializeDefaultUser() error {
 			return err
 		}
 
-		log.Printf("Default admin user created: %s / %s", DefaultAdminUsername, DefaultAdminPassword)
+		log.Printf("已创建默认管理员账号: %s / %s", DefaultAdminUsername, DefaultAdminPassword)
 	}
 
 	return nil
@@ -80,6 +80,6 @@ func CreateRandomUser() error {
 		return err
 	}
 
-	log.Printf("Random user created - Username: %s, Password: %s", randomUsername, randomPassword)
+	log.Printf("已创建随机账号，用户名: %s，密码: %s", randomUsername, randomPassword)
 	return nil
 }

@@ -167,13 +167,13 @@ func InitSQLite(dbPath string) error {
 
 	// 数据库迁移：确保 tasks 表包含 highest_risk_level 列
 	if err := migrateTasksTable(); err != nil {
-		log.Printf("Warning: Failed to migrate tasks table: %v", err)
+		log.Printf("警告: 迁移 tasks 表失败: %v", err)
 	}
 	if err := migrateBrowserSessionTracesTable(); err != nil {
-		log.Printf("Warning: Failed to migrate browser_session_traces table: %v", err)
+		log.Printf("警告: 迁移 browser_session_traces 表失败: %v", err)
 	}
 	if err := migrateBrowserSessionRequestsTable(); err != nil {
-		log.Printf("Warning: Failed to migrate browser_session_requests table: %v", err)
+		log.Printf("警告: 迁移 browser_session_requests 表失败: %v", err)
 	}
 
 	// 预置 JS 示例规则（仅在表为空时）
@@ -193,7 +193,7 @@ func InitSQLite(dbPath string) error {
 		}
 	}
 
-	log.Println("SQLite initialized successfully")
+	log.Println("SQLite 初始化成功")
 	return nil
 }
 
@@ -216,7 +216,7 @@ func migrateTasksTable() error {
 			SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name=?
 		`, col.name).Scan(&count)
 		if err != nil {
-			log.Printf("Warning: Failed to check column %s: %v\n", col.name, err)
+			log.Printf("警告: 检查字段 %s 失败: %v\n", col.name, err)
 			continue
 		}
 
@@ -224,10 +224,10 @@ func migrateTasksTable() error {
 		if count == 0 {
 			_, err := DB.Exec(col.sql)
 			if err != nil {
-				log.Printf("Warning: Failed to add column %s: %v\n", col.name, err)
+				log.Printf("警告: 新增字段 %s 失败: %v\n", col.name, err)
 				continue
 			}
-			log.Printf("Added column %s to tasks table\n", col.name)
+			log.Printf("已向 tasks 表新增字段: %s\n", col.name)
 		}
 	}
 
@@ -254,16 +254,16 @@ func migrateBrowserSessionTracesTable() error {
 			SELECT COUNT(*) FROM pragma_table_info('browser_session_traces') WHERE name=?
 		`, col.name).Scan(&count)
 		if err != nil {
-			log.Printf("Warning: Failed to check browser_session_traces column %s: %v\n", col.name, err)
+			log.Printf("警告: 检查 browser_session_traces 字段 %s 失败: %v\n", col.name, err)
 			continue
 		}
 
 		if count == 0 {
 			if _, err := DB.Exec(col.sql); err != nil {
-				log.Printf("Warning: Failed to add browser_session_traces column %s: %v\n", col.name, err)
+				log.Printf("警告: 新增 browser_session_traces 字段 %s 失败: %v\n", col.name, err)
 				continue
 			}
-			log.Printf("Added column %s to browser_session_traces table\n", col.name)
+			log.Printf("已向 browser_session_traces 表新增字段: %s\n", col.name)
 		}
 	}
 
@@ -298,16 +298,16 @@ func migrateBrowserSessionRequestsTable() error {
 			SELECT COUNT(*) FROM pragma_table_info('browser_session_requests') WHERE name=?
 		`, col.name).Scan(&count)
 		if err != nil {
-			log.Printf("Warning: Failed to check browser_session_requests column %s: %v\n", col.name, err)
+			log.Printf("警告: 检查 browser_session_requests 字段 %s 失败: %v\n", col.name, err)
 			continue
 		}
 
 		if count == 0 {
 			if _, err := DB.Exec(col.sql); err != nil {
-				log.Printf("Warning: Failed to add browser_session_requests column %s: %v\n", col.name, err)
+				log.Printf("警告: 新增 browser_session_requests 字段 %s 失败: %v\n", col.name, err)
 				continue
 			}
-			log.Printf("Added column %s to browser_session_requests table\n", col.name)
+			log.Printf("已向 browser_session_requests 表新增字段: %s\n", col.name)
 		}
 	}
 
@@ -656,11 +656,11 @@ func (task *Task) Update() (string, error) {
 	`, task.Name, string(targetsJSON), task.Status, task.Progress, task.HighestRiskLevel, time.Now(), task.ID)
 
 	if err != nil {
-		fmt.Printf("[ERROR] 更新任务 \"%s\" 失败: %v\n", task.ID, err)
+		fmt.Printf("[错误] 更新任务 \"%s\" 失败: %v\n", task.ID, err)
 		return task.ID, err
 	}
 
-	fmt.Printf("[INFO] 更新任务成功: ID=%s, Name=%s, Status=%s, Progress=%d\n", task.ID, task.Name, task.Status, task.Progress)
+	fmt.Printf("[信息] 更新任务成功: ID=%s, Name=%s, Status=%s, Progress=%d\n", task.ID, task.Name, task.Status, task.Progress)
 	return task.ID, err
 }
 
@@ -677,11 +677,11 @@ func (task *Task) UpdateStatus(status string, progress int) (string, error) {
 	`, status, progress, time.Now(), task.ID)
 
 	if err != nil {
-		fmt.Printf("[ERROR] 更新任务状态 \"%s\" 失败: %v\n", task.ID, err)
+		fmt.Printf("[错误] 更新任务状态 \"%s\" 失败: %v\n", task.ID, err)
 		return task.ID, err
 	}
 
-	fmt.Printf("[INFO] 更新任务状态成功: ID=%s, Status=%s, Progress=%d\n", task.ID, status, progress)
+	fmt.Printf("[信息] 更新任务状态成功: ID=%s, Status=%s, Progress=%d\n", task.ID, status, progress)
 	return task.ID, nil
 }
 
@@ -713,7 +713,7 @@ func UpdateTaskHighestRiskLevel(taskID string) error {
 		WHERE task_id=?
 	`, highestRiskLevelFromVulns(vulns), time.Now(), taskID)
 	if err != nil {
-		fmt.Printf("[ERROR] 更新任务最高风险等级 \"%s\" 失败: %v\n", taskID, err)
+		fmt.Printf("[错误] 更新任务最高风险等级 \"%s\" 失败: %v\n", taskID, err)
 		return err
 	}
 
@@ -735,11 +735,11 @@ func (task *Task) Save() (string, error) {
 	`, task.ID, task.Name, string(targetsJSON), task.Status, task.Progress, task.HighestRiskLevel, time.Now(), time.Now())
 
 	if err != nil {
-		fmt.Printf("[ERROR] 插入任务 \"%s\" 失败: %v\n", task.ID, err)
+		fmt.Printf("[错误] 插入任务 \"%s\" 失败: %v\n", task.ID, err)
 		return "", err
 	}
 
-	fmt.Printf("[INFO] 插入新任务: ID=%s, Name=%s, Status=%s\n", task.ID, task.Name, task.Status)
+	fmt.Printf("[信息] 插入新任务: ID=%s, Name=%s, Status=%s\n", task.ID, task.Name, task.Status)
 	return task.ID, nil
 }
 
@@ -751,11 +751,11 @@ func (task *Task) Delete() error {
 
 	_, err := DB.Exec("DELETE FROM tasks WHERE task_id = ?", task.ID)
 	if err != nil {
-		fmt.Printf("[ERROR] 删除任务 \"%s\" 失败: %v\n", task.ID, err)
+		fmt.Printf("[错误] 删除任务 \"%s\" 失败: %v\n", task.ID, err)
 		return err
 	}
 
-	fmt.Printf("[INFO] 删除任务成功: ID=%s\n", task.ID)
+	fmt.Printf("[信息] 删除任务成功: ID=%s\n", task.ID)
 	return nil
 }
 

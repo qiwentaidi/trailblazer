@@ -175,7 +175,7 @@ func QuerySiteTreeByTaskID(taskID string, versions ...int) ([]SiteTreeNode, erro
 	}
 
 	nodes, err := querySiteTree(query)
-	fmt.Printf("[DEBUG] QuerySiteTreeByTaskID(%s) returned %d nodes, err: %v\n", taskID, len(nodes), err)
+	fmt.Printf("[调试] QuerySiteTreeByTaskID(%s) 返回 %d 个节点，错误: %v\n", taskID, len(nodes), err)
 	return nodes, err
 }
 
@@ -748,7 +748,7 @@ func QueryAPIResourcesByTaskID(taskID string, versions ...int) ([]APIResource, e
 		"query": buildTaskVersionQuery(taskID, resolvedVersion),
 		"size":  1000,
 		"sort": []map[string]interface{}{
-			{"fetched_at": "desc"},
+			{"fetched_at": map[string]interface{}{"order": "desc", "unmapped_type": "date"}},
 		},
 	}
 
@@ -806,7 +806,7 @@ func QueryProtocolTracesByTaskID(taskID string, versions ...int) ([]ProtocolTrac
 		"query": buildTaskVersionQuery(taskID, resolvedVersion),
 		"size":  1000,
 		"sort": []map[string]interface{}{
-			{"created_at": "desc"},
+			{"created_at": map[string]interface{}{"order": "desc", "unmapped_type": "date"}},
 		},
 	}
 

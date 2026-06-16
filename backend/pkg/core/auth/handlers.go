@@ -28,7 +28,7 @@ func validateUsernameAndPassword(username, password string) string {
 func GetAuthStatusHandler(c *gin.Context) {
 	count, err := database.CountUsers()
 	if err != nil {
-		log.Printf("Error counting users: %v", err)
+		log.Printf("统计用户数量失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Internal server error",
 		})
@@ -57,7 +57,7 @@ func InitializeAccountHandler(c *gin.Context) {
 
 	count, err := database.CountUsers()
 	if err != nil {
-		log.Printf("Error counting users: %v", err)
+		log.Printf("统计用户数量失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Internal server error",
 		})
@@ -72,7 +72,7 @@ func InitializeAccountHandler(c *gin.Context) {
 
 	hashedPassword, err := HashPassword(req.Password)
 	if err != nil {
-		log.Printf("Error hashing initial password: %v", err)
+		log.Printf("生成初始密码哈希失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Failed to initialize account",
 		})
@@ -88,7 +88,7 @@ func InitializeAccountHandler(c *gin.Context) {
 		UpdatedAt: time.Now(),
 	})
 	if err != nil {
-		log.Printf("Error saving initial user: %v", err)
+		log.Printf("保存初始用户失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Failed to initialize account",
 		})
@@ -113,7 +113,7 @@ func LoginHandler(c *gin.Context) {
 	// 获取用户
 	user, err := database.GetUserByUsername(req.Username)
 	if err != nil {
-		log.Printf("Error getting user: %v", err)
+		log.Printf("获取用户失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Internal server error",
 		})
@@ -138,7 +138,7 @@ func LoginHandler(c *gin.Context) {
 	// 生成token
 	token, err := GenerateToken(user.Username)
 	if err != nil {
-		log.Printf("Error generating token: %v", err)
+		log.Printf("生成令牌失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Failed to generate token",
 		})
@@ -165,7 +165,7 @@ func GetUserInfoHandler(c *gin.Context) {
 
 	user, err := database.GetUserByUsername(username.(string))
 	if err != nil {
-		log.Printf("Error getting user info: %v", err)
+		log.Printf("获取用户信息失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Internal server error",
 		})
@@ -223,7 +223,7 @@ func ChangePasswordHandler(c *gin.Context) {
 	username := usernameValue.(string)
 	user, err := database.GetUserByUsername(username)
 	if err != nil {
-		log.Printf("Error getting user for password change: %v", err)
+		log.Printf("获取待修改密码的用户失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Internal server error",
 		})
@@ -245,7 +245,7 @@ func ChangePasswordHandler(c *gin.Context) {
 
 	hashedPassword, err := HashPassword(req.NewPassword)
 	if err != nil {
-		log.Printf("Error hashing new password: %v", err)
+		log.Printf("生成新密码哈希失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Failed to update password",
 		})
@@ -253,7 +253,7 @@ func ChangePasswordHandler(c *gin.Context) {
 	}
 
 	if err := database.UpdateUserPasswordByUsername(username, hashedPassword); err != nil {
-		log.Printf("Error updating password: %v", err)
+		log.Printf("更新密码失败: %v", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Failed to update password",
 		})

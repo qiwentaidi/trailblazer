@@ -48,12 +48,26 @@ var (
 	staticVariableTokenPattern           = regexp.MustCompile(`[A-Za-z_$]`)
 )
 
+func printAPITestProgress(index, total int, message string) {
+	if total <= 1 {
+		fmt.Printf("[信息] 接口测试 %d/%d %s\n", index, total, message)
+		return
+	}
+	fmt.Printf("\r[信息] 接口测试 %d/%d %s", index, total, message)
+}
+
+func finalizeAPITestProgress(total int) {
+	if total > 1 {
+		fmt.Print("\n")
+	}
+}
+
 // FindInfo 使用线程池处理单个 URL 的信息提取
 func FindInfo(url string, aiChecker *SensitiveInfoChecker) *structs.FindSomething {
 	var fs = &structs.FindSomething{}
 	resp, err := clients.SimpleGet(url, clients.DefaultRestyClient())
 	if err != nil {
-		fmt.Printf("[ERROR] Error fetching URL %s: %v\n", url, err)
+		fmt.Printf("[错误] 抓取 URL 失败: %s，原因: %v\n", url, err)
 		return fs
 	}
 	content := string(resp.Body())
@@ -124,7 +138,7 @@ func ExtractFromSourceMapDir(dirPath string) *structs.FindSomething {
 
 func Scan(target string, jsLinks []string, aiChecker *SensitiveInfoChecker) structs.FindSomething {
 	startedAt := time.Now()
-	fmt.Printf("[INFO] JS analysis started for %s (js_links=%d)\n", target, len(jsLinks))
+	fmt.Printf("[信息] 开始分析 JS 资源: %s（JS 链接数: %d）\n", target, len(jsLinks))
 
 	var fs = structs.FindSomething{}
 	var mu sync.Mutex // 用于保护 fs 的并发写操作
@@ -165,7 +179,7 @@ func Scan(target string, jsLinks []string, aiChecker *SensitiveInfoChecker) stru
 
 	// 等待所有任务完成
 	wg.Wait()
-	fmt.Printf("[INFO] JS content scan finished for %s in %s\n", target, time.Since(startedAt).Round(time.Millisecond))
+	fmt.Printf("[信息] JS 内容扫描完成: %s，耗时: %s\n", target, time.Since(startedAt).Round(time.Millisecond))
 
 	// 进行webpack检测
 	sourceMapStartedAt := time.Now()
@@ -178,7 +192,7 @@ func Scan(target string, jsLinks []string, aiChecker *SensitiveInfoChecker) stru
 			// 检测到 .map 泄漏，尝试还原
 			fp, err := RestoreWebpack(mapURL)
 			if err == nil {
-				fmt.Printf("[INFO] 发现JS SourceMap泄漏: %s, 恢复webpack成功: %s\n", mapURL, fp)
+				fmt.Printf("[信息] 发现JS SourceMap泄漏: %s，恢复webpack成功: %s\n", mapURL, fp)
 			}
 			sourceMapInfo := ExtractFromSourceMapDir(fp)
 			mu.Lock()
@@ -191,7 +205,7 @@ func Scan(target string, jsLinks []string, aiChecker *SensitiveInfoChecker) stru
 			mu.Unlock()
 		}
 	}
-	fmt.Printf("[INFO] SourceMap analysis finished for %s in %s (hits=%d)\n", target, time.Since(sourceMapStartedAt).Round(time.Millisecond), sourceMapHitCount)
+	fmt.Printf("[信息] SourceMap 分析完成: %s，耗时: %s，命中: %d\n", target, time.Since(sourceMapStartedAt).Round(time.Millisecond), sourceMapHitCount)
 
 	// 去重处理
 	fs.APIRoute = RemoveDuplicatesInfoSource(fs.APIRoute)
@@ -206,10 +220,10 @@ func Scan(target string, jsLinks []string, aiChecker *SensitiveInfoChecker) stru
 	if aiChecker != nil {
 		aiStartedAt := time.Now()
 
-		fmt.Printf("[INFO] Starting AI-assisted filtering for sensitive keywords... (candidates=%d)\n", len(fs.Sensitive))
+		fmt.Printf("[信息] 开始使用 AI 辅助过滤敏感关键字（候选数: %d）\n", len(fs.Sensitive))
 		fs.Sensitive = filterInfoSourceWithAI(aiChecker, fs.Sensitive)
 
-		fmt.Printf("[INFO] Sensitive keywords after AI filtering: %d items (elapsed=%s)\n", len(fs.Sensitive), time.Since(aiStartedAt).Round(time.Millisecond))
+		fmt.Printf("[信息] AI 敏感关键字过滤完成，剩余 %d 项，耗时: %s\n", len(fs.Sensitive), time.Since(aiStartedAt).Round(time.Millisecond))
 	}
 
 	fmt.Printf(
@@ -271,7 +285,7 @@ func filterWithAI(checker *SensitiveInfoChecker, items []string) []string {
 		isSensitive, err := checker.Check(item)
 		if err != nil {
 			// AI检测失败时保留原结果，确保不漏报
-			fmt.Printf("[WARNING] AI detection failed for '%s': %v, keeping original\n", item, err)
+			fmt.Printf("[警告] AI 检测失败，保留原始项: %s，原因: %v\n", item, err)
 			filtered = append(filtered, item)
 			failed++
 			continue
@@ -280,15 +294,15 @@ func filterWithAI(checker *SensitiveInfoChecker, items []string) []string {
 		if isSensitive {
 			filtered = append(filtered, item)
 			confirmed++
-			fmt.Printf("[INFO] AI confirmed: %s\n", truncateString(item, 50))
+			fmt.Printf("[信息] AI 确认为敏感项: %s\n", truncateString(item, 50))
 		} else {
 			rejected++
-			fmt.Printf("[INFO] AI rejected: %s\n", truncateString(item, 50))
+			fmt.Printf("[信息] AI 判定为非敏感项: %s\n", truncateString(item, 50))
 		}
 	}
 
 	if confirmed > 0 || rejected > 0 {
-		fmt.Printf("[INFO] AI result: %d confirmed, %d rejected, %d errors (total: %d)\n",
+		fmt.Printf("[信息] AI 过滤结果: 确认 %d 项，排除 %d 项，异常 %d 项（总计 %d 项）\n",
 			confirmed, rejected, failed, len(items))
 	}
 
@@ -314,20 +328,20 @@ func filterInfoSourceWithAI(checker *SensitiveInfoChecker, sources []structs.Inf
 
 		if shouldRejectSensitiveCandidate(item.Filed) {
 			rejected++
-			fmt.Printf("[INFO] Local rejected: %s\n", truncateString(item.Filed, 50))
+			fmt.Printf("[信息] 本地规则排除: %s\n", truncateString(item.Filed, 50))
 			continue
 		}
 		if shouldConfirmSensitiveCandidate(item.Filed) {
 			item.AIVerified = true
 			filtered = append(filtered, item)
 			confirmed++
-			fmt.Printf("[INFO] Local confirmed: %s\n", truncateString(item.Filed, 50))
+			fmt.Printf("[信息] 本地规则确认: %s\n", truncateString(item.Filed, 50))
 			continue
 		}
 
 		isSensitive, err := checker.Check(item.Filed)
 		if err != nil {
-			fmt.Printf("[WARNING] AI detection failed for '%s': %v, keeping original\n", item.Filed, err)
+			fmt.Printf("[警告] AI 检测失败，保留原始项: %s，原因: %v\n", item.Filed, err)
 			item.AIVerified = false
 			filtered = append(filtered, item)
 			failed++
@@ -338,15 +352,15 @@ func filterInfoSourceWithAI(checker *SensitiveInfoChecker, sources []structs.Inf
 			item.AIVerified = true
 			filtered = append(filtered, item)
 			confirmed++
-			fmt.Printf("[INFO] AI confirmed: %s\n", truncateString(item.Filed, 50))
+			fmt.Printf("[信息] AI 确认为敏感项: %s\n", truncateString(item.Filed, 50))
 		} else {
 			rejected++
-			fmt.Printf("[INFO] AI rejected: %s\n", truncateString(item.Filed, 50))
+			fmt.Printf("[信息] AI 判定为非敏感项: %s\n", truncateString(item.Filed, 50))
 		}
 	}
 
 	if confirmed > 0 || rejected > 0 {
-		fmt.Printf("[INFO] AI result: %d confirmed, %d rejected, %d errors (total: %d)\n",
+		fmt.Printf("[信息] AI 过滤结果: 确认 %d 项，排除 %d 项，异常 %d 项（总计 %d 项）\n",
 			confirmed, rejected, failed, len(sources))
 	}
 
@@ -600,7 +614,7 @@ func ClearTestedURLs(taskID string) {
 	defer testedURLsMutex.Unlock()
 
 	delete(testedURLs, taskID)
-	fmt.Printf("[INFO] 已清理任务 %s 的内存去重缓存（非历史版本数据）\n", taskID)
+	fmt.Printf("[信息] 已清理任务 %s 的内存去重缓存（非历史版本数据）\n", taskID)
 }
 
 // VulnCollector 漏洞收集器接口（用于CLI模式）
@@ -617,26 +631,41 @@ func AnalyzeAPI(o structs.JSFindOptions) {
 func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 	resp, err := clients.SimpleGet(o.HomeURL, clients.NewRestyClient(nil, true))
 	if err != nil {
-		fmt.Printf("[ERROR] AnalyzeAPI 请求首页失败 %s, 错误: %v\n", o.HomeURL, err)
+		fmt.Printf("[错误] 请求首页失败，无法开始接口测试: %s，原因: %v\n", o.HomeURL, err)
 		return
 	}
 	homeBody := string(resp.Body())
 	apiResourceIndex := loadUnauthorizedAPIResourceIndex(o)
 	protocolTraceIndex := loadUnauthorizedProtocolTraceIndex(o)
+	totalAPIs := len(o.ApiList)
+	fmt.Printf("[信息] 开始进行接口测试: 首页=%s，根路径=%s，接口数=%d\n", o.HomeURL, o.ApiRoot, totalAPIs)
 	var wg sync.WaitGroup
+	var progressMu sync.Mutex
+	completedCount := 0
 	pool, _ := ants.NewPoolWithFunc(10, func(data interface{}) {
 		defer wg.Done()
 		api := data.(string)
+		progressMu.Lock()
+		currentIndex := completedCount + 1
+		printAPITestProgress(currentIndex, totalAPIs, fmt.Sprintf("准备测试: %s", api))
+		progressMu.Unlock()
 
 		// 为每个 API 独立生成 fullURL 和 headers 副本
 		fullURL := buildFullURL(o.HomeURL, o.ApiRoot, api, o.Placeholder)
 		if hasDotPathTraversalSegment(fullURL) {
-			fmt.Printf("[DEBUG] %s 命中点段路径，跳过未授权与漏洞测试\n", fullURL)
+			progressMu.Lock()
+			completedCount++
+			printAPITestProgress(completedCount, totalAPIs, fmt.Sprintf("已跳过（命中点段路径）: %s", fullURL))
+			progressMu.Unlock()
 			return
 		}
 
 		// 去重检查：如果该 URL 已经测试过，跳过
 		if o.TaskID != "" && isURLTested(o.TaskID, fullURL) {
+			progressMu.Lock()
+			completedCount++
+			printAPITestProgress(completedCount, totalAPIs, fmt.Sprintf("已跳过（已测试）: %s", fullURL))
+			progressMu.Unlock()
 			return
 		}
 
@@ -686,10 +715,16 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 		// 检查高风险路由，直接跳过测试
 		for _, router := range o.HighRiskRouter {
 			if strings.Contains(strings.ToLower(apiReq.URL), router) {
-				fmt.Printf("[WARNING] %s 高风险API跳过测试, 触发敏感词: %s\n", fullURL, router)
+				progressMu.Lock()
+				completedCount++
+				printAPITestProgress(completedCount, totalAPIs, fmt.Sprintf("已跳过（高风险关键字 %s）: %s", router, fullURL))
+				progressMu.Unlock()
 				return
 			}
 		}
+		progressMu.Lock()
+		printAPITestProgress(currentIndex, totalAPIs, fmt.Sprintf("测试中: %s %s", method, apiReq.URL))
+		progressMu.Unlock()
 
 		// 创建深拷贝函数，避免检测函数修改原始请求对象
 		cloneAPIRequest := func(req structs.APIRequest) structs.APIRequest {
@@ -697,6 +732,10 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 		}
 
 		if o.SkipVulnScan {
+			progressMu.Lock()
+			completedCount++
+			printAPITestProgress(completedCount, totalAPIs, fmt.Sprintf("已完成（仅探测接口）: %s %s", method, apiReq.URL))
+			progressMu.Unlock()
 			return
 		}
 
@@ -707,9 +746,9 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			if lfiCfg, ok := o.LFIConfig.(config.LFIConfig); ok && lfiCfg.Enabled {
 				lfiResult, err := lfi.TestLocalFileInclusion(cloneAPIRequest(apiReq), lfiCfg)
 				if err != nil {
-					fmt.Printf("[ERROR] LFI test error: %v\n", err)
+					fmt.Printf("\n[错误] LFI 检测失败: %v\n", err)
 				} else if lfiResult.Vulnerable {
-					fmt.Printf("[INFO] LFI 漏洞发现: %s (Payload: %s)\n", fullURL, lfiResult.Payload)
+					fmt.Printf("\n[信息] 发现 LFI 漏洞: %s（Payload: %s）\n", fullURL, lfiResult.Payload)
 
 					// 保存 LFI 漏洞到数据库或收集器
 					vulnID := uuid.New().String()
@@ -733,7 +772,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 						collector.Collect(vulnRecord)
 					} else if database.ESClient != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
-							fmt.Printf("[ERROR] 保存LFI漏洞失败: %v\n", err)
+							fmt.Printf("\n[错误] 保存 LFI 漏洞失败: %v\n", err)
 						}
 					}
 					detectedVuln = true
@@ -746,9 +785,9 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			if ssrfCfg, ok := o.SSRFConfig.(config.SSRFConfig); ok && ssrfCfg.Enabled {
 				ssrfResult, err := ssrf.TestServerSideRequestForgery(cloneAPIRequest(apiReq), ssrfCfg)
 				if err != nil {
-					fmt.Printf("[ERROR] SSRF test error: %v\n", err)
+					fmt.Printf("\n[错误] SSRF 检测失败: %v\n", err)
 				} else if ssrfResult.Vulnerable {
-					fmt.Printf("[INFO] SSRF 漏洞发现: %s (Payload: %s)\n", fullURL, ssrfResult.Payload)
+					fmt.Printf("\n[信息] 发现 SSRF 漏洞: %s（Payload: %s）\n", fullURL, ssrfResult.Payload)
 
 					// 保存 SSRF 漏洞到数据库或收集器
 					vulnID := uuid.New().String()
@@ -772,7 +811,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 						collector.Collect(vulnRecord)
 					} else if database.ESClient != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
-							fmt.Printf("[ERROR] 保存SSRF漏洞失败: %v\n", err)
+							fmt.Printf("\n[错误] 保存 SSRF 漏洞失败: %v\n", err)
 						}
 					}
 					detectedVuln = true
@@ -785,9 +824,9 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			if redirectCfg, ok := o.RedirectConfig.(config.RedirectConfig); ok && redirectCfg.Enabled {
 				redirectResult, err := redirect.TestRedirectVulnerability(cloneAPIRequest(apiReq), redirectCfg)
 				if err != nil {
-					fmt.Printf("[ERROR] Redirect test error: %v\n", err)
+					fmt.Printf("\n[错误] 重定向漏洞检测失败: %v\n", err)
 				} else if redirectResult.Vulnerable {
-					fmt.Printf("[INFO] 重定向漏洞发现: %s (Payload: %s)\n", fullURL, redirectResult.Payload)
+					fmt.Printf("\n[信息] 发现重定向漏洞: %s（Payload: %s）\n", fullURL, redirectResult.Payload)
 
 					// 保存重定向漏洞到数据库或收集器
 					vulnID := uuid.New().String()
@@ -811,7 +850,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 						collector.Collect(vulnRecord)
 					} else if database.ESClient != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
-							fmt.Printf("[ERROR] 保存重定向漏洞失败: %v\n", err)
+							fmt.Printf("\n[错误] 保存重定向漏洞失败: %v\n", err)
 						}
 					}
 					detectedVuln = true
@@ -824,9 +863,9 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			if sqlCfg, ok := o.SQLInjConfig.(config.SQLInjectionConfig); ok && sqlCfg.Enabled {
 				sqlResult, err := sqli.TestSQLInjection(cloneAPIRequest(apiReq), sqlCfg)
 				if err != nil {
-					fmt.Printf("[ERROR] SQL test error: %v\n", err)
+					fmt.Printf("\n[错误] SQL 注入检测失败: %v\n", err)
 				} else if sqlResult != nil && sqlResult.Vulnerable {
-					fmt.Printf("[INFO] SQL注入漏洞发现: %s (Payload: %s, Type: %s)\n", fullURL, sqlResult.Payload, sqlResult.Type)
+					fmt.Printf("\n[信息] 发现 SQL 注入漏洞: %s（Payload: %s，类型: %s）\n", fullURL, sqlResult.Payload, sqlResult.Type)
 
 					// 保存 SQL注入漏洞到数据库或收集器
 					vulnID := uuid.New().String()
@@ -850,7 +889,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 						collector.Collect(vulnRecord)
 					} else if database.ESClient != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
-							fmt.Printf("[ERROR] 保存SQL注入漏洞失败: %v\n", err)
+							fmt.Printf("\n[错误] 保存 SQL 注入漏洞失败: %v\n", err)
 						}
 					}
 					detectedVuln = true
@@ -863,9 +902,9 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			if xssCfg, ok := o.XSSConfig.(config.XSSConfig); ok && xssCfg.Enabled {
 				xssResult, err := xss.TestXSS(cloneAPIRequest(apiReq), xssCfg)
 				if err != nil {
-					fmt.Printf("[ERROR] XSS test error: %v\n", err)
+					fmt.Printf("\n[错误] XSS 检测失败: %v\n", err)
 				} else if xssResult != nil && xssResult.Vulnerable {
-					fmt.Printf("[INFO] XSS漏洞发现: %s (Payload: %s, Type: %s)\n", fullURL, xssResult.Payload, xssResult.Type)
+					fmt.Printf("\n[信息] 发现 XSS 漏洞: %s（Payload: %s，类型: %s）\n", fullURL, xssResult.Payload, xssResult.Type)
 
 					// 保存 XSS漏洞到数据库或收集器
 					vulnID := uuid.New().String()
@@ -891,7 +930,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 						collector.Collect(vulnRecord)
 					} else if database.ESClient != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
-							fmt.Printf("[ERROR] 保存XSS漏洞失败: %v\n", err)
+							fmt.Printf("\n[错误] 保存 XSS 漏洞失败: %v\n", err)
 						}
 					}
 					detectedVuln = true
@@ -911,10 +950,10 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				}
 				uploadResult, err := upload.TestFileUpload(cloneAPIRequest(apiReq), uploadCfg, aiChecker)
 				if err != nil {
-					fmt.Printf("[ERROR] File upload test error: %v\n", err)
+					fmt.Printf("\n[错误] 文件上传漏洞检测失败: %v\n", err)
 				} else if uploadResult != nil {
 					if uploadResult.Vulnerable {
-						fmt.Printf("[INFO] 文件上传漏洞发现: %s (Payload: %s)\n", fullURL, uploadResult.Payload)
+						fmt.Printf("\n[信息] 发现文件上传漏洞: %s（Payload: %s）\n", fullURL, uploadResult.Payload)
 
 						// 保存文件上传漏洞到数据库或收集器
 						vulnID := uuid.New().String()
@@ -946,13 +985,13 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 							collector.Collect(vulnRecord)
 						} else if database.ESClient != nil {
 							if err := database.SaveVuln(vulnRecord); err != nil {
-								fmt.Printf("[ERROR] 保存文件上传漏洞失败: %v\n", err)
+								fmt.Printf("\n[错误] 保存文件上传漏洞失败: %v\n", err)
 							}
 						}
 						detectedVuln = true
 					}
 				} else {
-					fmt.Printf("[DEBUG] 文件上传检测未返回结果: %s\n", fullURL)
+					fmt.Printf("\n[调试] 文件上传检测未返回结果: %s\n", fullURL)
 				}
 			}
 		}
@@ -1018,7 +1057,9 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				ResponseLength:     result.Length,
 				Confidence:         assessment.Confidence,
 				ConfidenceReason:   assessment.ConfidenceReason,
-				Description:        buildUnauthorizedVulnDescription(assessment.RiskLevel, assessment.Confidence, result.Length, replayDetail, assessment.ConfidenceReason),
+				DataExposure:       assessment.DataExposure,
+				ExposureReason:     assessment.ExposureReason,
+				Description:        buildUnauthorizedVulnDescription(assessment.RiskLevel, assessment.Confidence, assessment.DataExposure, result.Length, replayDetail, assessment.ConfidenceReason, assessment.ExposureReason),
 				AIVerified:         false,
 				CreatedAt:          time.Now(),
 			}
@@ -1026,10 +1067,15 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				collector.Collect(vulnRecord)
 			} else if database.ESClient != nil {
 				if err := database.SaveVuln(vulnRecord); err != nil {
-					fmt.Printf("[ERROR] 保存未授权漏洞失败: %v\n", err)
+					fmt.Printf("\n[错误] 保存未授权漏洞失败: %v\n", err)
 				}
 			}
 		}
+
+		progressMu.Lock()
+		completedCount++
+		printAPITestProgress(completedCount, totalAPIs, fmt.Sprintf("已完成: %s %s", method, apiReq.URL))
+		progressMu.Unlock()
 	})
 	defer pool.Release()
 
@@ -1040,6 +1086,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 	}
 
 	wg.Wait()
+	finalizeAPITestProgress(totalAPIs)
 }
 
 func applyStaticConstantParams(method, fullURL string, params url.Values, hints map[string]url.Values) url.Values {
@@ -1105,7 +1152,7 @@ func shouldSkipStaticRouteRootCombination(api, apiRoot string, hints map[string]
 		}
 	}
 
-	fmt.Printf("[DEBUG] Skip API %s on root %s due to static bound roots: %v\n", api, apiRoot, boundRoots)
+	fmt.Printf("[调试] 跳过接口 %s（根路径 %s），原因: 命中静态绑定根路径 %v\n", api, apiRoot, boundRoots)
 	return true
 }
 
@@ -1530,7 +1577,7 @@ func loadUnauthorizedAPIResourceIndex(o structs.JSFindOptions) *unauthorizedAPIR
 		apiResources, err = store.ListAPIResources(o.TaskID)
 	}
 	if err != nil {
-		fmt.Printf("[WARNING] 加载任务 %s 的 API 记录失败，未授权漏洞将缺少协议轨迹关联: %v\n", o.TaskID, err)
+		fmt.Printf("[警告] 加载任务 %s 的 API 记录失败，未授权漏洞将缺少协议轨迹关联: %v\n", o.TaskID, err)
 		return nil
 	}
 
@@ -1559,7 +1606,7 @@ func loadUnauthorizedProtocolTraceIndex(o structs.JSFindOptions) *unauthorizedPr
 		protocolTraces, err = store.ListProtocolTraces(o.TaskID)
 	}
 	if err != nil {
-		fmt.Printf("[WARNING] 加载任务 %s 的协议轨迹失败，未授权漏洞将无法自动复用加密链路: %v\n", o.TaskID, err)
+		fmt.Printf("[警告] 加载任务 %s 的协议轨迹失败，未授权漏洞将无法自动复用加密链路: %v\n", o.TaskID, err)
 		return nil
 	}
 
@@ -1687,7 +1734,7 @@ func prepareUnauthorizedProbeRequest(apiReq structs.APIRequest, apiResourceIndex
 
 	replayedRequest, replayDetail, err := buildUnauthorizedProtocolReplayRequest(apiReq, protocolTrace)
 	if err != nil {
-		fmt.Printf("[DEBUG] 未授权探测复用协议轨迹失败 %s %s: %v\n", apiReq.Method, apiReq.URL, err)
+		fmt.Printf("[调试] 未授权探测复用协议轨迹失败 %s %s: %v\n", apiReq.Method, apiReq.URL, err)
 		return apiReq, ""
 	}
 
@@ -1950,10 +1997,13 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func buildUnauthorizedVulnDescription(riskLevel, confidence string, responseLength int, replayDetail, confidenceReason string) string {
-	description := fmt.Sprintf("发现未授权访问漏洞，风险等级: %s，置信度: %s，响应长度: %d", riskLevel, confidence, responseLength)
+func buildUnauthorizedVulnDescription(riskLevel, confidence, dataExposure string, responseLength int, replayDetail, confidenceReason, exposureReason string) string {
+	description := fmt.Sprintf("发现未授权访问漏洞，风险等级: %s，置信度: %s，数据暴露评级: %s，响应长度: %d", riskLevel, confidence, dataExposure, responseLength)
 	if strings.TrimSpace(confidenceReason) != "" {
 		description += "；置信度说明: " + strings.TrimSpace(confidenceReason)
+	}
+	if strings.TrimSpace(exposureReason) != "" {
+		description += "；暴露评级说明: " + strings.TrimSpace(exposureReason)
 	}
 	if strings.TrimSpace(replayDetail) == "" {
 		return description

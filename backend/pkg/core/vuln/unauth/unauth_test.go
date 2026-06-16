@@ -61,8 +61,8 @@ func TestAssessConfidenceLowersRepeatedGenericErrors(t *testing.T) {
 			t.Fatalf("confidence = %q, want low; reason=%q", confidence, reason)
 		}
 		if i == 4 {
-			if reason == "" {
-				t.Fatal("expected non-empty confidence reason")
+			if reason != "低置信：结果更像相似拒绝模板或通用错误响应" {
+				t.Fatalf("reason = %q, want low confidence statement", reason)
 			}
 		}
 	}
@@ -75,6 +75,42 @@ func TestAssessConfidenceKeepsStructuredDataHigher(t *testing.T) {
 	confidence, reason := assessConfidence(200, body, "https://example.com/api/orders/query")
 	if confidence != "high" {
 		t.Fatalf("confidence = %q, want high; reason=%q", confidence, reason)
+	}
+	if reason != "高置信：响应包含明确业务数据返回" {
+		t.Fatalf("reason = %q, want high confidence statement", reason)
+	}
+}
+
+func TestClassifyUnauthorizedExposureMarksPublicGeoData(t *testing.T) {
+	body := `{"code":200,"data":[{"code":"110000","name":"北京市","province":"北京市","city":"北京市","district":"朝阳区"}],"success":true}`
+	exposure, reason := classifyUnauthorizedExposure(body, "https://example.com/api/base/city/list")
+	if exposure != "public_data" {
+		t.Fatalf("exposure = %q, want public_data; reason=%q", exposure, reason)
+	}
+	if level := adjustUnauthorizedRiskLevel("medium", exposure); level != "info" {
+		t.Fatalf("adjusted level = %q, want info", level)
+	}
+}
+
+func TestClassifyUnauthorizedExposureMarksBasicReferenceData(t *testing.T) {
+	body := `{"data":[{"label":"启用","value":"enabled","dictLabel":"启用","dictValue":"enabled","sort":1}],"success":true}`
+	exposure, reason := classifyUnauthorizedExposure(body, "https://example.com/api/system/dict/options")
+	if exposure != "basic_reference" {
+		t.Fatalf("exposure = %q, want basic_reference; reason=%q", exposure, reason)
+	}
+	if level := adjustUnauthorizedRiskLevel("high", exposure); level != "low" {
+		t.Fatalf("adjusted level = %q, want low", level)
+	}
+}
+
+func TestClassifyUnauthorizedExposureKeepsSensitiveUserDataHigh(t *testing.T) {
+	body := `{"data":{"records":[{"user":"alice","phone":"13800138000","email":"alice@example.com","role":"admin"}],"total":1},"success":true}`
+	exposure, reason := classifyUnauthorizedExposure(body, "https://example.com/api/admin/users/list")
+	if exposure != "sensitive_data" {
+		t.Fatalf("exposure = %q, want sensitive_data; reason=%q", exposure, reason)
+	}
+	if level := adjustUnauthorizedRiskLevel("low", exposure); level != "high" {
+		t.Fatalf("adjusted level = %q, want high", level)
 	}
 }
 
@@ -320,5 +356,36 @@ func TestTestUnauthorizedAccessUsesLearnedAuthPhraseWithoutManualConfig(t *testi
 	}
 	if vulnerable {
 		t.Fatal("expected learned auth phrase not to be marked vulnerable")
+	}
+}
+
+func TestTestUnauthorizedAccessAnnotatesPublicDataExposure(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"code":"310000","name":"上海市","province":"上海市","city":"上海市","district":"浦东新区"}],"success":true}`))
+	}))
+	defer server.Close()
+
+	vulnerable, _, assessment, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     server.URL + "/api/base/city/list",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !vulnerable {
+		t.Fatal("expected public city list to still be identified as unauthorized access")
+	}
+	if assessment.DataExposure != "public_data" {
+		t.Fatalf("data exposure = %q, want public_data", assessment.DataExposure)
+	}
+	if assessment.RiskLevel != "info" {
+		t.Fatalf("risk level = %q, want info", assessment.RiskLevel)
+	}
+	if assessment.ExposureReason == "" {
+		t.Fatal("expected non-empty exposure reason")
 	}
 }

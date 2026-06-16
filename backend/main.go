@@ -118,13 +118,13 @@ func runCLIMode(c *cli.Context) error {
 	output := c.String("output")
 	configPath := c.String("config")
 
-	fmt.Printf("[INFO] 启动CLI扫描模式\n")
-	fmt.Printf("[INFO] 扫描目标数量: %d\n", len(urlList))
-	fmt.Printf("[INFO] 配置文件: %s\n", configPath)
+	fmt.Printf("[信息] 启动CLI扫描模式\n")
+	fmt.Printf("[信息] 扫描目标数量: %d\n", len(urlList))
+	fmt.Printf("[信息] 配置文件: %s\n", configPath)
 	if output != "" {
-		fmt.Printf("[INFO] 输出文件: %s\n", output)
+		fmt.Printf("[信息] 输出文件: %s\n", output)
 	} else {
-		fmt.Printf("[INFO] 输出到标准输出\n")
+		fmt.Printf("[信息] 输出到标准输出\n")
 	}
 
 	if err := cliscan.PerformScanWithConfigFile(urlList, configPath, output); err != nil {
@@ -174,7 +174,7 @@ func runWebMode(c *cli.Context) error {
 
 	// 初始化SQLite
 	if err := database.InitSQLite("./tasks.db"); err != nil {
-		log.Printf("Warning: Failed to init SQLite: %v", err)
+		log.Printf("警告: 初始化 SQLite 失败: %v", err)
 	}
 
 	// 加载配置文件
@@ -197,9 +197,14 @@ func runWebMode(c *cli.Context) error {
 			// 初始化ES
 			if cfg.Elasticsearch.Address != "" {
 				database.InitESClient(cfg.Elasticsearch)
-				log.Println("Elasticsearch client initialized from config")
+				log.Println("已根据配置初始化 Elasticsearch 客户端")
 			}
 		}
+	}
+
+	gin.SetMode(gin.ReleaseMode)
+	if webConfig.Debug {
+		gin.SetMode(gin.DebugMode)
 	}
 
 	r := gin.New()
@@ -214,21 +219,14 @@ func runWebMode(c *cli.Context) error {
 	r.Use(cors.New(corsConfig))
 	web.RegisterRoutes(r)
 	if err := webassets.Register(r, frontendDevURL); err != nil {
-		return fmt.Errorf("failed to register frontend assets: %w", err)
-	}
-
-	// 设置Gin模式
-	if webConfig.Debug {
-		gin.SetMode(gin.DebugMode)
-	} else {
-		gin.SetMode(gin.ReleaseMode)
+		return fmt.Errorf("注册前端资源失败: %w", err)
 	}
 
 	// 启动服务器
 	serverAddr := fmt.Sprintf("%s:%d", webConfig.Host, webConfig.Port)
-	log.Printf("Server starting on %s...", serverAddr)
+	log.Printf("服务启动中，监听地址: %s", serverAddr)
 	if err := r.Run(serverAddr); err != nil {
-		return fmt.Errorf("Failed to start server: %w", err)
+		return fmt.Errorf("启动服务失败: %w", err)
 	}
 
 	return nil

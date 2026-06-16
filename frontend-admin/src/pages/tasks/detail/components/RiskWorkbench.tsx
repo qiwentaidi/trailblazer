@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { CaretRightOutlined, ClockCircleOutlined } from '@ant-design/icons';
+import {
+  CaretRightOutlined,
+  ClockCircleOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
 import {
   Button,
   Card,
@@ -81,6 +85,21 @@ const levelLabelMap: Record<Risk['level'], string> = {
   info: '信息',
 };
 
+const levelAccentHexMap: Record<Risk['level'], string> = {
+  high: '#d4380d',
+  medium: '#d46b08',
+  low: '#1677ff',
+  info: '#8c8c8c',
+};
+
+const levelSoftBackgroundMap: Record<Risk['level'], string> = {
+  high: 'linear-gradient(135deg, rgba(255, 244, 240, 0.96), rgba(255, 255, 255, 1))',
+  medium:
+    'linear-gradient(135deg, rgba(255, 247, 230, 0.96), rgba(255, 255, 255, 1))',
+  low: 'linear-gradient(135deg, rgba(240, 245, 255, 0.96), rgba(255, 255, 255, 1))',
+  info: 'linear-gradient(135deg, rgba(250, 250, 250, 0.96), rgba(255, 255, 255, 1))',
+};
+
 const confidenceColorMap: Record<string, string> = {
   high: 'success',
   medium: 'warning',
@@ -91,6 +110,20 @@ const confidenceLabelMap: Record<string, string> = {
   high: '高置信',
   medium: '中置信',
   low: '低置信',
+};
+
+const dataExposureColorMap: Record<string, string> = {
+  public_data: 'default',
+  basic_reference: 'blue',
+  internal_business: 'orange',
+  sensitive_data: 'red',
+};
+
+const dataExposureLabelMap: Record<string, string> = {
+  public_data: '公开数据',
+  basic_reference: '基础参考',
+  internal_business: '内部业务',
+  sensitive_data: '敏感数据',
 };
 
 const riskStatusColorMap: Record<string, string> = {
@@ -132,6 +165,7 @@ const sanitizeSummaryText = (value?: string) => {
   return text
     .replace(/(?:^|[，,；;])\s*风险等级[:：][^，,；;]*/gi, '')
     .replace(/(?:^|[，,；;])\s*置信度[:：][^，,；;]*/gi, '')
+    .replace(/(?:^|[，,；;])\s*数据暴露评级[:：][^，,；;]*/gi, '')
     .replace(/(?:^|[，,；;])\s*响应长度[:：][^，,；;]*/gi, '')
     .replace(/(?:^|[，,；;])\s*发现[^，,；;]*漏洞/gi, '')
     .replace(/(?:^|[，,；;])\s+/g, ' ')
@@ -184,7 +218,34 @@ const buildRiskSummary = (risk: Risk) => {
     parts.push(`响应长度: ${risk.responseLength}`);
   }
 
+  if (risk.exposureReason) {
+    parts.push(`暴露评级: ${risk.exposureReason.trim()}`);
+  }
+
   return parts.join('；') || '-';
+};
+
+const buildRiskMetrics = (risk: Risk) => {
+  const metrics: string[] = [];
+
+  if (hasDisplayText(risk.method)) {
+    metrics.push(`请求方式 ${risk.method?.trim()}`);
+  }
+  if (
+    typeof risk.responseLength === 'number' &&
+    Number.isFinite(risk.responseLength) &&
+    risk.responseLength > 0
+  ) {
+    metrics.push(`响应 ${risk.responseLength}B`);
+  }
+  if (risk.traceId) {
+    metrics.push(`轨迹 ${risk.traceId}`);
+  }
+  if (risk.createdAt) {
+    metrics.push(`发现于 ${formatDateTime(risk.createdAt)}`);
+  }
+
+  return metrics;
 };
 
 const buildClusterSummary = (
@@ -229,6 +290,14 @@ const buildRiskHitFeatures = (risk: Risk) => {
       key: 'ciphertext',
       label: '响应密文',
       color: 'gold',
+    });
+  }
+  if ((risk.dataExposure || '').trim()) {
+    const normalized = (risk.dataExposure || '').trim();
+    features.push({
+      key: 'data-exposure',
+      label: dataExposureLabelMap[normalized] || normalized,
+      color: dataExposureColorMap[normalized] || 'default',
     });
   }
 
@@ -690,6 +759,25 @@ export default function RiskWorkbench({
     [protocolTraces, selected?.traceId],
   );
 
+  const riskSummary = useMemo(() => {
+    const openCount = filteredRisks.filter(
+      (risk) => normalizeRiskStatus(risk.status) === 'open',
+    ).length;
+    const highCount = filteredRisks.filter(
+      (risk) => risk.level === 'high',
+    ).length;
+    const clusteredCount = filteredRisks.filter(
+      (risk) => (risk.denyTemplateCount || 0) >= MIN_CLUSTER_SIZE,
+    ).length;
+
+    return {
+      total: filteredRisks.length,
+      openCount,
+      highCount,
+      clusteredCount,
+    };
+  }, [filteredRisks]);
+
   const toggleGroup = (clusterId: string) => {
     setExpandedGroups((current) => ({
       ...current,
@@ -953,78 +1041,169 @@ export default function RiskWorkbench({
       >
         <div
           style={{
-            marginBottom: 16,
-            width: '100%',
-            display: 'flex',
-            gap: 12,
-            flexWrap: 'wrap',
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
+            marginBottom: 20,
+            display: 'grid',
+            gap: 16,
           }}
         >
-          <Space wrap size={[12, 12]} style={{ flex: 1 }}>
-            <Input
-              allowClear
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
-              placeholder="搜索风险标题、类型或 URL"
-              style={{ width: isCompact ? '100%' : 320, minWidth: 220 }}
-            />
-            <Select
-              allowClear
-              placeholder="风险等级"
-              value={level}
-              onChange={(value) => setLevel(value)}
-              options={(
-                ['high', 'medium', 'low', 'info'] as Risk['level'][]
-              ).map((item) => ({
-                label: levelLabelMap[item],
-                value: item,
-              }))}
-              style={{ width: 160 }}
-            />
-            <Select
-              allowClear
-              placeholder="处置状态"
-              value={status}
-              onChange={(value) => setStatus(value)}
-              options={riskStatusOptions}
-              style={{ width: 160 }}
-            />
-            <Select
-              allowClear
-              data-testid="risk-cluster-select"
-              placeholder="模板簇"
-              value={clusterFilter}
-              onChange={(value) => setClusterFilter(value)}
-              options={clusterOptions}
-              style={{ width: 220 }}
-            />
-            <Select
-              data-testid="risk-sort-select"
-              value={sortMode}
-              onChange={(value) => setSortMode(value)}
-              options={[
-                { label: '默认排序', value: 'default' },
-                { label: '风险等级: 高到低', value: 'level_desc' },
-                { label: '风险等级: 低到高', value: 'level_asc' },
-                { label: '响应长度: 长到短', value: 'response_length_desc' },
-                { label: '响应长度: 短到长', value: 'response_length_asc' },
-              ]}
-              style={{ width: 200 }}
-            />
-          </Space>
-          <Typography.Text
-            type="secondary"
-            style={{ whiteSpace: 'nowrap', paddingTop: 6 }}
+          <div
+            style={{
+              display: 'grid',
+              gap: 12,
+              gridTemplateColumns: isCompact
+                ? 'repeat(2, minmax(0, 1fr))'
+                : 'repeat(4, minmax(0, 1fr))',
+            }}
           >
-            共 {filteredRisks.length} 条风险
-          </Typography.Text>
+            {[
+              {
+                label: '风险总数',
+                value: riskSummary.total,
+                tone: '#1677ff',
+                note: '当前筛选结果',
+              },
+              {
+                label: '待处理',
+                value: riskSummary.openCount,
+                tone: '#d48806',
+                note: '需要优先跟进',
+              },
+              {
+                label: '高危项',
+                value: riskSummary.highCount,
+                tone: '#cf1322',
+                note: '建议先处理',
+              },
+              {
+                label: '模板簇风险',
+                value: riskSummary.clusteredCount,
+                tone: '#531dab',
+                note: '已归并去噪',
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                style={{
+                  border: '1px solid #eef2f6',
+                  borderRadius: 16,
+                  padding: '14px 16px',
+                  background:
+                    'linear-gradient(180deg, rgba(255,255,255,1), rgba(248,250,252,0.92))',
+                  boxShadow: '0 10px 24px rgba(15, 23, 42, 0.04)',
+                  minWidth: 0,
+                }}
+              >
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {item.label}
+                </Typography.Text>
+                <div
+                  style={{
+                    marginTop: 6,
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    gap: 8,
+                  }}
+                >
+                  <Typography.Text
+                    strong
+                    style={{ fontSize: 28, lineHeight: 1, color: item.tone }}
+                  >
+                    {item.value}
+                  </Typography.Text>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {item.note}
+                  </Typography.Text>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div
+            style={{
+              border: '1px solid #eef2f6',
+              borderRadius: 18,
+              padding: 16,
+              background:
+                'linear-gradient(180deg, rgba(250,252,255,0.9), rgba(255,255,255,1))',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 12,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                marginBottom: 12,
+              }}
+            >
+              <Space size={8}>
+                <WarningOutlined style={{ color: '#1677ff' }} />
+                <Typography.Text strong>筛选与排序</Typography.Text>
+              </Space>
+              <Typography.Text type="secondary">
+                共 {filteredRisks.length} 条风险
+              </Typography.Text>
+            </div>
+            <Space wrap size={[12, 12]} style={{ width: '100%' }}>
+              <Input
+                allowClear
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+                placeholder="搜索风险标题、类型或 URL"
+                style={{ width: isCompact ? '100%' : 320, minWidth: 220 }}
+              />
+              <Select
+                allowClear
+                placeholder="风险等级"
+                value={level}
+                onChange={(value) => setLevel(value)}
+                options={(
+                  ['high', 'medium', 'low', 'info'] as Risk['level'][]
+                ).map((item) => ({
+                  label: levelLabelMap[item],
+                  value: item,
+                }))}
+                style={{ width: 160 }}
+              />
+              <Select
+                allowClear
+                placeholder="处置状态"
+                value={status}
+                onChange={(value) => setStatus(value)}
+                options={riskStatusOptions}
+                style={{ width: 160 }}
+              />
+              <Select
+                allowClear
+                data-testid="risk-cluster-select"
+                placeholder="模板簇"
+                value={clusterFilter}
+                onChange={(value) => setClusterFilter(value)}
+                options={clusterOptions}
+                style={{ width: 220 }}
+              />
+              <Select
+                data-testid="risk-sort-select"
+                value={sortMode}
+                onChange={(value) => setSortMode(value)}
+                options={[
+                  { label: '默认排序', value: 'default' },
+                  { label: '风险等级: 高到低', value: 'level_desc' },
+                  { label: '风险等级: 低到高', value: 'level_asc' },
+                  { label: '响应长度: 长到短', value: 'response_length_desc' },
+                  { label: '响应长度: 短到长', value: 'response_length_asc' },
+                ]}
+                style={{ width: 200 }}
+              />
+            </Space>
+          </div>
         </div>
 
         <List
           loading={loading}
           locale={{ emptyText: <Empty description="暂无风险数据" /> }}
+          style={{ display: 'grid', gap: 14 }}
           dataSource={pagedEntries.entries}
           renderItem={(entry) => {
             if (entry.kind === 'cluster') {
@@ -1036,254 +1215,299 @@ export default function RiskWorkbench({
                 clusterPageStart + CLUSTER_PAGE_SIZE,
               );
               return (
-                <List.Item key={entry.id} actions={[]}>
-                  <List.Item.Meta
-                    title={
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'flex-start',
-                          justifyContent: 'space-between',
-                          gap: 16,
-                          width: '100%',
-                        }}
-                      >
-                        <Space wrap size={8} style={{ flex: 1 }}>
-                          <Button
-                            key="toggle"
-                            type="text"
-                            size="small"
-                            aria-label={expanded ? '收起接口' : '展开接口'}
-                            onClick={() => toggleGroup(entry.clusterId)}
-                            style={{
-                              paddingInline: 4,
-                              minWidth: 24,
-                            }}
-                            icon={
-                              <CaretRightOutlined
-                                style={{
-                                  transition: 'transform 0.2s ease',
-                                  transform: expanded
-                                    ? 'rotate(90deg)'
-                                    : 'rotate(0deg)',
-                                }}
-                              />
-                            }
-                          />
-                          <Tag color={levelColorMap[entry.level]}>
-                            {levelLabelMap[entry.level]}
-                          </Tag>
-                          <Tag
-                            color={
-                              confidenceColorMap[entry.confidence] || 'default'
-                            }
-                          >
-                            {confidenceLabelMap[entry.confidence] ||
-                              `${entry.confidence} 置信`}
-                          </Tag>
-                          <Tag>{entry.kindLabel}</Tag>
-                          <Typography.Text strong>
-                            {entry.label}
-                          </Typography.Text>
-                        </Space>
-                        <Popconfirm
-                          key="delete-cluster"
-                          title="确认删除该模板簇吗？"
-                          description={`将批量删除 ${entry.count} 条风险记录，删除后无法恢复。`}
-                          disabled={deleting}
-                          onConfirm={() => void handleDeleteCluster(entry)}
-                          okButtonProps={{
-                            danger: true,
-                            loading: deleting,
+                <List.Item
+                  key={entry.id}
+                  actions={[]}
+                  style={{
+                    display: 'block',
+                    padding: 0,
+                    border: 'none',
+                    background: levelSoftBackgroundMap[entry.level],
+                    borderRadius: 18,
+                    boxShadow: '0 14px 30px rgba(15, 23, 42, 0.05)',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      borderLeft: `4px solid ${levelAccentHexMap[entry.level]}`,
+                      padding: '18px 20px',
+                    }}
+                  >
+                    <List.Item.Meta
+                      title={
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            justifyContent: 'space-between',
+                            gap: 16,
+                            width: '100%',
                           }}
                         >
-                          <Button
-                            key="delete"
-                            danger
-                            type="link"
-                            disabled={deleting}
-                            style={{ paddingInline: 0, flexShrink: 0 }}
-                          >
-                            删除模板簇
-                          </Button>
-                        </Popconfirm>
-                      </div>
-                    }
-                    description={
-                      <Space
-                        direction="vertical"
-                        size={8}
-                        style={{ width: '100%' }}
-                      >
-                        {buildClusterSummary(entry).map((line) => (
-                          <Typography.Text key={line} type="secondary">
-                            {line}
-                          </Typography.Text>
-                        ))}
-                        {buildClusterHitFeatures(entry).length ? (
-                          <Space wrap size={[4, 4]}>
-                            {buildClusterHitFeatures(entry).map((feature) => (
-                              <Tag key={feature.key} color={feature.color}>
-                                {feature.label}
-                              </Tag>
-                            ))}
+                          <Space wrap size={8} style={{ flex: 1 }}>
+                            <Button
+                              key="toggle"
+                              type="text"
+                              size="small"
+                              aria-label={expanded ? '收起接口' : '展开接口'}
+                              onClick={() => toggleGroup(entry.clusterId)}
+                              style={{
+                                paddingInline: 4,
+                                minWidth: 24,
+                              }}
+                              icon={
+                                <CaretRightOutlined
+                                  style={{
+                                    transition: 'transform 0.2s ease',
+                                    transform: expanded
+                                      ? 'rotate(90deg)'
+                                      : 'rotate(0deg)',
+                                  }}
+                                />
+                              }
+                            />
+                            <Tag color={levelColorMap[entry.level]}>
+                              {levelLabelMap[entry.level]}
+                            </Tag>
+                            <Tag
+                              color={
+                                confidenceColorMap[entry.confidence] ||
+                                'default'
+                              }
+                            >
+                              {confidenceLabelMap[entry.confidence] ||
+                                `${entry.confidence} 置信`}
+                            </Tag>
+                            <Tag>{entry.kindLabel}</Tag>
+                            <Typography.Text strong>
+                              {entry.label}
+                            </Typography.Text>
+                            <Typography.Text type="secondary">
+                              {entry.count} 条同类接口
+                            </Typography.Text>
                           </Space>
-                        ) : null}
-                        {expanded ? (
-                          <div
-                            style={{
-                              display: 'grid',
-                              gap: 8,
-                              padding: '8px 0 0',
+                          <Popconfirm
+                            key="delete-cluster"
+                            title="确认删除该模板簇吗？"
+                            description={`将批量删除 ${entry.count} 条风险记录，删除后无法恢复。`}
+                            disabled={deleting}
+                            onConfirm={() => void handleDeleteCluster(entry)}
+                            okButtonProps={{
+                              danger: true,
+                              loading: deleting,
                             }}
                           >
-                            <Typography.Text type="secondary">
-                              当前显示第 {clusterPage} 页，每页{' '}
-                              {CLUSTER_PAGE_SIZE} 条。
+                            <Button
+                              key="delete"
+                              danger
+                              type="link"
+                              disabled={deleting}
+                              style={{ paddingInline: 0, flexShrink: 0 }}
+                            >
+                              删除模板簇
+                            </Button>
+                          </Popconfirm>
+                        </div>
+                      }
+                      description={
+                        <Space
+                          direction="vertical"
+                          size={10}
+                          style={{ width: '100%' }}
+                        >
+                          {buildClusterSummary(entry).map((line) => (
+                            <Typography.Text key={line} type="secondary">
+                              {line}
                             </Typography.Text>
-                            {visibleClusterRisks.map((risk) => (
-                              <div
-                                key={risk.id}
-                                style={{
-                                  display: 'flex',
-                                  justifyContent: 'space-between',
-                                  gap: 12,
-                                  alignItems: 'flex-start',
-                                  flexWrap: 'wrap',
-                                }}
-                              >
-                                <Space
-                                  direction="vertical"
-                                  size={2}
-                                  style={{ flex: 1, minWidth: 260 }}
-                                >
-                                  <Space wrap size={[4, 4]}>
-                                    <Tag color={levelColorMap[risk.level]}>
-                                      {levelLabelMap[risk.level]}
-                                    </Tag>
-                                    {risk.confidence ? (
-                                      <Tag
-                                        color={
-                                          confidenceColorMap[risk.confidence] ||
-                                          'default'
-                                        }
-                                      >
-                                        {confidenceLabelMap[risk.confidence] ||
-                                          `${risk.confidence} 置信`}
-                                      </Tag>
-                                    ) : null}
-                                    {renderRiskStatusTag(risk.status)}
-                                  </Space>
-                                  <Typography.Text strong>
-                                    {risk.title}
-                                  </Typography.Text>
-                                  <Typography.Text type="secondary">
-                                    {buildRiskMetaLine(risk)}
-                                  </Typography.Text>
-                                  {renderRiskLocation(risk.url, true)}
-                                  <Typography.Paragraph
-                                    type="secondary"
-                                    style={{
-                                      margin: 0,
-                                      display: '-webkit-box',
-                                      WebkitBoxOrient: 'vertical',
-                                      WebkitLineClamp: 2,
-                                      overflow: 'hidden',
-                                      whiteSpace: 'normal',
-                                    }}
-                                  >
-                                    {buildRiskSummary(risk)}
-                                  </Typography.Paragraph>
-                                  {buildRiskHitFeatures(risk).length ? (
-                                    <Space wrap size={[4, 4]}>
-                                      {buildRiskHitFeatures(risk).map(
-                                        (feature) => (
-                                          <Tag
-                                            key={feature.key}
-                                            color={feature.color}
-                                          >
-                                            {feature.label}
-                                          </Tag>
-                                        ),
-                                      )}
-                                    </Space>
-                                  ) : null}
-                                </Space>
-                                <Space
-                                  wrap
-                                  size={[8, 8]}
+                          ))}
+                          {buildClusterHitFeatures(entry).length ? (
+                            <Space wrap size={[4, 4]}>
+                              {buildClusterHitFeatures(entry).map((feature) => (
+                                <Tag key={feature.key} color={feature.color}>
+                                  {feature.label}
+                                </Tag>
+                              ))}
+                            </Space>
+                          ) : null}
+                          {expanded ? (
+                            <div
+                              style={{
+                                display: 'grid',
+                                gap: 10,
+                                padding: '10px 0 0',
+                              }}
+                            >
+                              <Typography.Text type="secondary">
+                                当前显示第 {clusterPage} 页，每页{' '}
+                                {CLUSTER_PAGE_SIZE} 条。
+                              </Typography.Text>
+                              {visibleClusterRisks.map((risk) => (
+                                <div
+                                  key={risk.id}
                                   style={{
-                                    justifyContent: isCompact
-                                      ? 'flex-start'
-                                      : 'flex-end',
-                                    width: isCompact ? '100%' : 'auto',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    gap: 12,
+                                    alignItems: 'flex-start',
+                                    flexWrap: 'wrap',
+                                    padding: '12px 14px',
+                                    borderRadius: 14,
+                                    background: 'rgba(255,255,255,0.82)',
+                                    border:
+                                      '1px solid rgba(229, 231, 235, 0.92)',
                                   }}
                                 >
-                                  <Select
-                                    data-testid={`risk-status-select-${risk.id}`}
-                                    size="small"
-                                    value={normalizeRiskStatus(risk.status)}
-                                    options={riskStatusOptions}
-                                    style={{ width: 110 }}
-                                    loading={updatingRiskId === risk.id}
-                                    onChange={(value) =>
-                                      void handleUpdateStatus(risk, value)
-                                    }
-                                  />
-                                  <Button
-                                    type="link"
-                                    onClick={() => setSelected(risk)}
+                                  <Space
+                                    direction="vertical"
+                                    size={2}
+                                    style={{ flex: 1, minWidth: 260 }}
                                   >
-                                    查看详情
-                                  </Button>
-                                  <Popconfirm
-                                    title="确认删除该漏洞记录吗？"
-                                    description="删除后将无法恢复。"
-                                    disabled={deleting}
-                                    onConfirm={() => void handleDelete(risk)}
-                                    okButtonProps={{
-                                      danger: true,
-                                      loading: deleting,
+                                    <Space wrap size={[4, 4]}>
+                                      <Tag color={levelColorMap[risk.level]}>
+                                        {levelLabelMap[risk.level]}
+                                      </Tag>
+                                      {risk.confidence ? (
+                                        <Tag
+                                          color={
+                                            confidenceColorMap[
+                                              risk.confidence
+                                            ] || 'default'
+                                          }
+                                        >
+                                          {confidenceLabelMap[
+                                            risk.confidence
+                                          ] || `${risk.confidence} 置信`}
+                                        </Tag>
+                                      ) : null}
+                                      {renderRiskStatusTag(risk.status)}
+                                    </Space>
+                                    <Typography.Text strong>
+                                      {risk.title}
+                                    </Typography.Text>
+                                    <Typography.Text type="secondary">
+                                      {buildRiskMetaLine(risk)}
+                                    </Typography.Text>
+                                    {renderRiskLocation(risk.url, true)}
+                                    <Typography.Paragraph
+                                      type="secondary"
+                                      style={{
+                                        margin: 0,
+                                        display: '-webkit-box',
+                                        WebkitBoxOrient: 'vertical',
+                                        WebkitLineClamp: 2,
+                                        overflow: 'hidden',
+                                        whiteSpace: 'normal',
+                                      }}
+                                    >
+                                      {buildRiskSummary(risk)}
+                                    </Typography.Paragraph>
+                                    {buildRiskHitFeatures(risk).length ? (
+                                      <Space wrap size={[4, 4]}>
+                                        {buildRiskHitFeatures(risk).map(
+                                          (feature) => (
+                                            <Tag
+                                              key={feature.key}
+                                              color={feature.color}
+                                            >
+                                              {feature.label}
+                                            </Tag>
+                                          ),
+                                        )}
+                                      </Space>
+                                    ) : null}
+                                    {buildRiskMetrics(risk).length ? (
+                                      <Space wrap size={[8, 6]}>
+                                        {buildRiskMetrics(risk).map(
+                                          (metric) => (
+                                            <Typography.Text
+                                              key={metric}
+                                              type="secondary"
+                                              style={{ fontSize: 12 }}
+                                            >
+                                              {metric}
+                                            </Typography.Text>
+                                          ),
+                                        )}
+                                      </Space>
+                                    ) : null}
+                                  </Space>
+                                  <Space
+                                    wrap
+                                    size={[8, 8]}
+                                    style={{
+                                      justifyContent: isCompact
+                                        ? 'flex-start'
+                                        : 'flex-end',
+                                      width: isCompact ? '100%' : 'auto',
                                     }}
                                   >
+                                    <Select
+                                      data-testid={`risk-status-select-${risk.id}`}
+                                      size="small"
+                                      value={normalizeRiskStatus(risk.status)}
+                                      options={riskStatusOptions}
+                                      style={{ width: 110 }}
+                                      loading={updatingRiskId === risk.id}
+                                      onChange={(value) =>
+                                        void handleUpdateStatus(risk, value)
+                                      }
+                                    />
                                     <Button
-                                      danger
                                       type="link"
-                                      disabled={deleting}
+                                      onClick={() => setSelected(risk)}
                                     >
-                                      删除
+                                      查看详情
                                     </Button>
-                                  </Popconfirm>
-                                </Space>
-                              </div>
-                            ))}
-                            {entry.count > CLUSTER_PAGE_SIZE ? (
-                              <div
-                                style={{
-                                  display: 'flex',
-                                  justifyContent: 'flex-end',
-                                  paddingTop: 8,
-                                }}
-                              >
-                                <Pagination
-                                  simple
-                                  current={clusterPage}
-                                  pageSize={CLUSTER_PAGE_SIZE}
-                                  total={entry.count}
-                                  onChange={(nextPage) =>
-                                    handleClusterPageChange(
-                                      entry.clusterId,
-                                      nextPage,
-                                    )
-                                  }
-                                />
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : null}
-                      </Space>
-                    }
-                  />
+                                    <Popconfirm
+                                      title="确认删除该漏洞记录吗？"
+                                      description="删除后将无法恢复。"
+                                      disabled={deleting}
+                                      onConfirm={() => void handleDelete(risk)}
+                                      okButtonProps={{
+                                        danger: true,
+                                        loading: deleting,
+                                      }}
+                                    >
+                                      <Button
+                                        danger
+                                        type="link"
+                                        disabled={deleting}
+                                      >
+                                        删除
+                                      </Button>
+                                    </Popconfirm>
+                                  </Space>
+                                </div>
+                              ))}
+                              {entry.count > CLUSTER_PAGE_SIZE ? (
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    justifyContent: 'flex-end',
+                                    paddingTop: 8,
+                                  }}
+                                >
+                                  <Pagination
+                                    simple
+                                    current={clusterPage}
+                                    pageSize={CLUSTER_PAGE_SIZE}
+                                    total={entry.count}
+                                    onChange={(nextPage) =>
+                                      handleClusterPageChange(
+                                        entry.clusterId,
+                                        nextPage,
+                                      )
+                                    }
+                                  />
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </Space>
+                      }
+                    />
+                  </div>
                 </List.Item>
               );
             }
@@ -1293,7 +1517,15 @@ export default function RiskWorkbench({
               <List.Item
                 key={risk.id}
                 onClick={() => setSelected(risk)}
-                style={{ cursor: 'pointer' }}
+                style={{
+                  cursor: 'pointer',
+                  padding: 0,
+                  border: 'none',
+                  borderRadius: 18,
+                  background: levelSoftBackgroundMap[risk.level],
+                  boxShadow: '0 14px 30px rgba(15, 23, 42, 0.05)',
+                  overflow: 'hidden',
+                }}
               >
                 <div
                   style={{
@@ -1303,66 +1535,96 @@ export default function RiskWorkbench({
                     alignItems: 'flex-start',
                     width: '100%',
                     flexWrap: 'wrap',
+                    padding: '18px 20px',
+                    borderLeft: `4px solid ${levelAccentHexMap[risk.level]}`,
                   }}
                 >
-                <List.Item.Meta
-                  title={
-                    <Space wrap size={[8, 8]}>
-                      <Typography.Text strong>{risk.title}</Typography.Text>
-                      <Tag color={levelColorMap[risk.level]}>
-                        {levelLabelMap[risk.level]}
-                      </Tag>
-                      {risk.confidence ? (
-                        <Tag
-                          color={
-                            confidenceColorMap[risk.confidence] || 'default'
-                          }
-                        >
-                          {confidenceLabelMap[risk.confidence] ||
-                            `${risk.confidence} 置信`}
+                  <List.Item.Meta
+                    style={{ marginBlock: 0, flex: 1, minWidth: 0 }}
+                    title={
+                      <Space wrap size={[8, 8]}>
+                        <Typography.Text strong>{risk.title}</Typography.Text>
+                        <Tag color={levelColorMap[risk.level]}>
+                          {levelLabelMap[risk.level]}
                         </Tag>
-                      ) : null}
-                      {renderRiskStatusTag(risk.status)}
-                      {risk.aiVerified ? (
-                        <Tag color="processing">AI</Tag>
-                      ) : null}
-                    </Space>
-                  }
-                  description={
-                    <Space
-                      direction="vertical"
-                      size={4}
-                      style={{ width: '100%', minWidth: 0 }}
-                    >
-                      <Typography.Text type="secondary">
-                        {buildRiskMetaLine(risk)}
-                      </Typography.Text>
-                      {renderRiskLocation(risk.url, true)}
-                      <Typography.Paragraph
-                        type="secondary"
-                        style={{
-                          margin: 0,
-                          display: '-webkit-box',
-                          WebkitBoxOrient: 'vertical',
-                          WebkitLineClamp: 3,
-                          overflow: 'hidden',
-                          whiteSpace: 'normal',
-                        }}
+                        {risk.confidence ? (
+                          <Tag
+                            color={
+                              confidenceColorMap[risk.confidence] || 'default'
+                            }
+                          >
+                            {confidenceLabelMap[risk.confidence] ||
+                              `${risk.confidence} 置信`}
+                          </Tag>
+                        ) : null}
+                        {renderRiskStatusTag(risk.status)}
+                        {risk.aiVerified ? (
+                          <Tag color="processing">AI</Tag>
+                        ) : null}
+                      </Space>
+                    }
+                    description={
+                      <Space
+                        direction="vertical"
+                        size={8}
+                        style={{ width: '100%', minWidth: 0 }}
                       >
-                        {buildRiskSummary(risk)}
-                      </Typography.Paragraph>
-                      {buildRiskHitFeatures(risk).length ? (
-                        <Space wrap size={[4, 4]}>
-                          {buildRiskHitFeatures(risk).map((feature) => (
-                            <Tag key={feature.key} color={feature.color}>
-                              {feature.label}
-                            </Tag>
-                          ))}
-                        </Space>
-                      ) : null}
-                    </Space>
-                  }
-                />
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: 12 }}
+                        >
+                          {buildRiskMetaLine(risk)}
+                        </Typography.Text>
+                        <Typography.Paragraph
+                          style={{
+                            margin: 0,
+                            color: '#1f2937',
+                            fontSize: 14,
+                            lineHeight: 1.7,
+                            display: '-webkit-box',
+                            WebkitBoxOrient: 'vertical',
+                            WebkitLineClamp: 2,
+                            overflow: 'hidden',
+                            whiteSpace: 'normal',
+                          }}
+                        >
+                          {buildRiskSummary(risk)}
+                        </Typography.Paragraph>
+                        <div
+                          style={{
+                            padding: '10px 12px',
+                            borderRadius: 12,
+                            background: 'rgba(255,255,255,0.82)',
+                            border: '1px solid rgba(229, 231, 235, 0.92)',
+                          }}
+                        >
+                          {renderRiskLocation(risk.url, true)}
+                        </div>
+                        {buildRiskHitFeatures(risk).length ? (
+                          <Space wrap size={[4, 4]}>
+                            {buildRiskHitFeatures(risk).map((feature) => (
+                              <Tag key={feature.key} color={feature.color}>
+                                {feature.label}
+                              </Tag>
+                            ))}
+                          </Space>
+                        ) : null}
+                        {buildRiskMetrics(risk).length ? (
+                          <Space wrap size={[8, 6]}>
+                            {buildRiskMetrics(risk).map((metric) => (
+                              <Typography.Text
+                                key={metric}
+                                type="secondary"
+                                style={{ fontSize: 12 }}
+                              >
+                                {metric}
+                              </Typography.Text>
+                            ))}
+                          </Space>
+                        ) : null}
+                      </Space>
+                    }
+                  />
                   <Space
                     wrap
                     size={[8, 8]}
@@ -1501,12 +1763,14 @@ export default function RiskWorkbench({
                 <Typography.Text>
                   置信度说明: {selected.confidenceReason || '-'}
                 </Typography.Text>
-                <Typography.Text>
-                  拒绝模板簇: {selected.denyTemplateLabel || '-'}
-                  {selected.denyTemplateCount
-                    ? `（命中 ${selected.denyTemplateCount} 个接口）`
-                    : ''}
-                </Typography.Text>
+                {hasDisplayText(selected.denyTemplateLabel) ? (
+                  <Typography.Text>
+                    拒绝模板簇: {selected.denyTemplateLabel}
+                    {selected.denyTemplateCount
+                      ? `（命中 ${selected.denyTemplateCount} 个接口）`
+                      : ''}
+                  </Typography.Text>
+                ) : null}
                 <Typography.Text>
                   协议轨迹: {selected.traceId || '-'}
                   {selected.hasProtocolTrace ? '（已关联）' : ''}

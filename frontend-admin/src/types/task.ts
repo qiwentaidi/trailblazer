@@ -147,6 +147,8 @@ export interface Risk {
   decryptionStatus?: string;
   decryptionDetail?: string;
   responseLength?: number;
+  dataExposure?: 'public_data' | 'basic_reference' | 'internal_business' | 'sensitive_data' | string;
+  exposureReason?: string;
   staticContexts?: {
     sourceUrl: string;
     snippet: string;

@@ -110,6 +110,8 @@ type BackendRisk = {
   decryption_status?: string;
   decryption_detail?: string;
   response_length?: number;
+  data_exposure?: Risk['dataExposure'];
+  exposure_reason?: string;
   static_contexts?: Array<{
     source_url?: string;
     snippet?: string;
@@ -924,6 +926,8 @@ export const normalizeRisks = (items: unknown[]): Risk[] =>
       decryptionStatus: risk.decryption_status,
       decryptionDetail: risk.decryption_detail,
       responseLength: risk.response_length || 0,
+      dataExposure: risk.data_exposure || '',
+      exposureReason: risk.exposure_reason || '',
       staticContexts: (risk.static_contexts || [])
         .map((item) => ({
           sourceUrl: item?.source_url || '',

@@ -137,9 +137,6 @@ SDK 支持以下事件类型：
   
 - `EventTypeAsset`: 资产发现
   - 数据: `map[string]interface{}` (包含 type, value, source)
-  
-- `EventTypeRisk`: 风险发现
-  - 数据: `RiskItem`
 
 - `EventTypeAPIRecord`: 接口请求/响应记录
   - 数据: `APIRecord`

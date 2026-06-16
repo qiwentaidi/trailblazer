@@ -70,7 +70,6 @@ func main() {
 	fmt.Printf("目标数量: %d\n", result.Summary.TotalTargets)
 	fmt.Printf("树节点数: %d\n", result.Summary.TotalTreeNodes)
 	fmt.Printf("漏洞数量: %d\n", result.Summary.TotalVulnerabilities)
-	fmt.Printf("风险数量: %d\n", result.Summary.TotalRisks)
 	fmt.Printf("资产统计:\n")
 	fmt.Printf("  - 邮箱: %d\n", result.Summary.TotalAssets.Email)
 	fmt.Printf("  - 身份证: %d\n", result.Summary.TotalAssets.IDCard)
@@ -106,4 +105,3 @@ func main() {
 		fmt.Printf("\n结果已保存到: %s\n", options.OutputPath)
 	}
 }
-

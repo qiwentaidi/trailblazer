@@ -123,12 +123,15 @@ const normalizeSQLi = (value: Partial<SQLInjectionSettings> | undefined): SQLInj
     value?.matchKeywords,
     DEFAULT_SQLI.matchKeywords,
   ),
-  rules: Array.isArray(value?.rules) ? value.rules.map((rule) => ({
-    payloads: normalizeStringArray(rule?.payloads),
-    type: typeof rule?.type === 'string' ? rule.type : 'error-based',
-    minDelayMs: typeof rule?.minDelayMs === 'number' ? rule.minDelayMs : 0,
-    bodyContains: normalizeStringArray(rule?.bodyContains),
-  })) : [],
+  rules: Array.isArray(value?.rules)
+    ? value.rules
+        .map((rule) => ({
+          payloads: normalizeStringArray(rule?.payloads),
+          type: typeof rule?.type === 'string' ? rule.type : 'error-based',
+          bodyContains: normalizeStringArray(rule?.bodyContains),
+        }))
+        .filter((rule) => rule.type === 'error-based' || rule.type === 'boolean-based')
+    : [],
 })
 
 const normalizeLFI = (value: Partial<LFISettings> | undefined): LFISettings => ({

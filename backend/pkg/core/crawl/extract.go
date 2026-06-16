@@ -33,7 +33,7 @@ func (e *Extract) StaticJSLink(url string) []string {
 	var staticJsLinks []string
 	resp, err := clients.SimpleGet(url, clients.NewRestyClient(nil, true))
 	if err != nil {
-		fmt.Printf("[ERROR] %s 提取静态JS失败, 错误原因: %v\n", url, err)
+		fmt.Printf("[错误] %s 提取静态JS失败，错误原因: %v\n", url, err)
 		return staticJsLinks
 	}
 	content := string(resp.Body())

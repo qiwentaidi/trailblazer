@@ -84,6 +84,15 @@ func TestBuildCaptureChromeFlagsIncludesProxySettings(t *testing.T) {
 	if got := flags["proxy-bypass-list"]; got != "<-loopback>" {
 		t.Fatalf("expected proxy-bypass-list flag, got %#v", got)
 	}
+	if got := flags["disable-blink-features"]; got != "AutomationControlled" {
+		t.Fatalf("expected disable-blink-features flag, got %#v", got)
+	}
+	if got := flags["enable-automation"]; got != false {
+		t.Fatalf("expected enable-automation=false, got %#v", got)
+	}
+	if got := flags["window-size"]; got != "1440,900" {
+		t.Fatalf("expected window-size flag, got %#v", got)
+	}
 }
 
 func TestDefaultScanCaptureOptionsUseFiniteWait(t *testing.T) {
@@ -422,17 +431,75 @@ func TestProtocolHookScriptSynthesizesFieldRSAEncryptionSteps(t *testing.T) {
 func TestProtocolHookScriptIncludesFrontendRouteHooks(t *testing.T) {
 	requiredSnippets := []string{
 		`function hookFrontendRoutes()`,
-		`function scanWindowForRoutes()`,
+		`function patchRouterInstance(router, source)`,
+		`function wrapRouteGuard(methodName, guard, source)`,
+		`rewriteGuardedNavigationTarget`,
+		`function scanVueRouters()`,
+		`function scanReactRouters()`,
+		`function findVueRoots()`,
+		`function findVueRouterFromRoot(root)`,
+		`function scanVueDevtoolsHook()`,
+		`function scanVueWindowCandidates()`,
+		`function tryPatchVueOwnerCandidate(candidate, source)`,
+		`function emitRoutesFromRouter(router, source)`,
+		`function findReactHostFibers()`,
+		`function inspectReactFiberRoutes(startFiber, source)`,
+		`react-router-provider`,
+		`react-jsx-routes`,
 		`emitPayload({`,
 		`kind: "frontend-route",`,
 		`history.pushState`,
-		`hookArrayMutation("push")`,
+		`watchFrontendRouteMounts()`,
 	}
 
 	for _, snippet := range requiredSnippets {
 		if !strings.Contains(protocolHookScript, snippet) {
 			t.Fatalf("expected protocol hook script to include %q", snippet)
 		}
+	}
+}
+
+func TestStealthBrowserScriptMasksAutomationMarkers(t *testing.T) {
+	requiredSnippets := []string{
+		`Navigator.prototype, "webdriver"`,
+		`return undefined;`,
+		`window.chrome.runtime`,
+		`Navigator.prototype, "plugins"`,
+		`navigator.permissions.query`,
+		`WebGLRenderingContext.prototype.getParameter`,
+	}
+
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(stealthBrowserScript, snippet) {
+			t.Fatalf("expected stealth browser script to include %q", snippet)
+		}
+	}
+}
+
+func TestProtocolHookScriptDoesNotUseHeuristicFrontendRouteScans(t *testing.T) {
+	unexpectedSnippets := []string{
+		`function scanWindowForRoutes()`,
+		`function hookArrayMutation(methodName)`,
+		`inspectRouteCandidate(`,
+		`window.__INITIAL_STATE__`,
+	}
+
+	for _, snippet := range unexpectedSnippets {
+		if strings.Contains(protocolHookScript, snippet) {
+			t.Fatalf("expected protocol hook script not to include heuristic route scan snippet %q", snippet)
+		}
+	}
+}
+
+func TestBuildProtocolHookScriptTogglesRouteGuardBypass(t *testing.T) {
+	enabled := buildProtocolHookScript(CaptureOptions{BypassFrontendRouteGuards: true})
+	if !strings.Contains(enabled, `var bypassFrontendRouteGuards = true;`) {
+		t.Fatalf("expected enabled script to embed bypass flag")
+	}
+
+	disabled := buildProtocolHookScript(CaptureOptions{})
+	if !strings.Contains(disabled, `var bypassFrontendRouteGuards = false;`) {
+		t.Fatalf("expected disabled script to embed bypass flag")
 	}
 }
 
@@ -466,7 +533,30 @@ func TestRouteInteractionScriptIncludesFormFillAndSafeButtonFilters(t *testing.T
 		`Test@123456`,
 		`isDangerousButton`,
 		`run|execute|exec|poc`,
-		`isUsefulButton`,
+		`hasFrameworkClickableClass`,
+		`hasInteractiveDescendant`,
+		`isLikelyActionText`,
+		`normalizeClickableTarget`,
+		`function collectClickableTargets()`,
+		`a[href]`,
+		`label[for]`,
+		`[aria-haspopup]`,
+		`[aria-expanded]`,
+		`[onclick]`,
+		`style.cursor === "pointer"`,
+		`ariaHaspopup`,
+		`isOversizedContainer`,
+		`.el-select`,
+		`.el-button`,
+		`.el-link`,
+		`.my_export`,
+		`[class*='action']`,
+		`[class*='button']`,
+		`[class*='select']`,
+		`.el-pagination__sizes`,
+		`.ant-select-selector`,
+		`if (isDangerousButton(text))`,
+		`el.click();`,
 		`buttonTexts`,
 	}
 
@@ -480,6 +570,7 @@ func TestRouteInteractionScriptIncludesFormFillAndSafeButtonFilters(t *testing.T
 func TestBuildFrontendRouteExploreURLsBuildsHashRouteCandidates(t *testing.T) {
 	routes := buildFrontendRouteExploreURLs("http://192.168.2.101:3000/#/", []FrontendRouteRecord{
 		{Path: "/PocAudit"},
+		{Path: "/users/:id"},
 		{Path: "#/System"},
 		{Path: "http://example.com/#/External"},
 	}, 4)
@@ -492,6 +583,56 @@ func TestBuildFrontendRouteExploreURLsBuildsHashRouteCandidates(t *testing.T) {
 	}
 	if strings.Join(routes, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("unexpected route candidates:\n got: %#v\nwant: %#v", routes, expected)
+	}
+}
+
+func TestBuildFrontendRouteExploreURLsAddsDerivedHistoryBasePrefixes(t *testing.T) {
+	routes := buildFrontendRouteExploreURLs("https://example.com/web/login", []FrontendRouteRecord{
+		{Path: "/web/login"},
+		{Path: "/welcome"},
+		{Path: "/baseTrusteeship/trusteeshipRegister"},
+	}, 8)
+
+	expected := []string{
+		"https://example.com/#/web/login",
+		"https://example.com/#/welcome",
+		"https://example.com/welcome",
+		"https://example.com/web/welcome",
+		"https://example.com/#/baseTrusteeship/trusteeshipRegister",
+		"https://example.com/baseTrusteeship/trusteeshipRegister",
+		"https://example.com/web/baseTrusteeship/trusteeshipRegister",
+	}
+
+	if strings.Join(routes, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected history route candidates:\n got: %#v\nwant: %#v", routes, expected)
+	}
+}
+
+func TestShouldSkipFrontendRouteExplorationSkipsParameterizedRoutes(t *testing.T) {
+	cases := map[string]bool{
+		"/users/:id":                          true,
+		"/redirect/:route*":                   true,
+		"https://example.com/orders/:orderId": true,
+		"/welcome":                            false,
+		"#/login":                             false,
+	}
+
+	for input, want := range cases {
+		if got := shouldSkipFrontendRouteExploration(input); got != want {
+			t.Fatalf("shouldSkipFrontendRouteExploration(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+func TestDeriveFrontendRouteBasePrefixesFindsSPADeployPrefix(t *testing.T) {
+	prefixes := deriveFrontendRouteBasePrefixes("https://xhtgfw.gongshu.gov.cn/web/login", []FrontendRouteRecord{
+		{Path: "/web/login"},
+		{Path: "/login"},
+		{Path: "/welcome"},
+	})
+
+	if strings.Join(prefixes, "\n") != "/web" {
+		t.Fatalf("unexpected prefixes: %#v", prefixes)
 	}
 }
 

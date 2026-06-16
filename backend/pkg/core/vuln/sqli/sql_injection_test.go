@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"trailblazer/pkg/config"
 	"trailblazer/pkg/core/structs"
@@ -51,41 +50,6 @@ func TestSQLInjectionSkipsExistingErrorPageFalsePositive(t *testing.T) {
 	}
 	if result.Vulnerable {
 		t.Fatalf("expected false positive to be suppressed, got %#v", result)
-	}
-}
-
-func TestSQLInjectionTimeBasedRequiresDelayDelta(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := r.URL.Query().Get("user")
-		time.Sleep(250 * time.Millisecond)
-		if strings.Contains(strings.ToLower(user), "sleep") {
-			time.Sleep(100 * time.Millisecond)
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer server.Close()
-
-	cfg := config.SQLInjectionConfig{
-		Enabled: true,
-		Rules: []config.SQLiPayloadRule{
-			{
-				Payloads:   []string{"' OR SLEEP(5)--"},
-				Type:       "time-based",
-				MinDelayMs: 200,
-			},
-		},
-	}
-
-	result, err := TestSQLInjection(newTestAPIRequest(server.URL), cfg)
-	if err != nil {
-		t.Fatalf("TestSQLInjection returned error: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	if result.Vulnerable {
-		t.Fatalf("expected slow baseline to be suppressed, got %#v", result)
 	}
 }
 

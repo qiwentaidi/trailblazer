@@ -39,7 +39,7 @@ func DeleteTaskData(taskID string) error {
 		// 先检查索引是否存在
 		existsRes, err := ESClient.Indices.Exists([]string{index})
 		if err != nil {
-			fmt.Printf("[ERROR] Failed to check index %s: %v\n", index, err)
+			fmt.Printf("[错误] 检查索引 %s 失败: %v\n", index, err)
 			continue
 		}
 		existsRes.Body.Close()
@@ -56,20 +56,20 @@ func DeleteTaskData(taskID string) error {
 		)
 
 		if err != nil {
-			fmt.Printf("[ERROR] Failed to delete from %s: %v\n", index, err)
+			fmt.Printf("[错误] 从索引 %s 删除数据失败: %v\n", index, err)
 			continue
 		}
 
 		defer res.Body.Close()
 
 		if res.IsError() {
-			fmt.Printf("[WARNING] Error response from ES when deleting %s: %s\n", index, res.String())
+			fmt.Printf("[警告] 从 ES 删除索引 %s 数据时返回异常响应: %s\n", index, res.String())
 		} else {
 			var result map[string]interface{}
 			if err := json.NewDecoder(res.Body).Decode(&result); err == nil {
 				deleted := result["deleted"]
 				if deleted != nil && deleted != 0 {
-					fmt.Printf("[INFO] Deleted %v documents from %s for task %s\n", deleted, index, taskID)
+					fmt.Printf("[信息] 已从索引 %s 删除任务 %s 的 %v 条文档\n", index, taskID, deleted)
 				}
 			}
 		}
@@ -176,7 +176,7 @@ func DeleteVulnByID(vulnID string) error {
 	if taskID != "" {
 		go func() {
 			if err := UpdateTaskHighestRiskLevel(taskID); err != nil {
-				fmt.Printf("[WARNING] Failed to update highest risk level for task %s after deleting vuln %s: %v\n", taskID, vulnID, err)
+				fmt.Printf("[警告] 删除漏洞 %s 后，更新任务 %s 的最高风险等级失败: %v\n", vulnID, taskID, err)
 			}
 		}()
 	}
@@ -243,7 +243,7 @@ func DeleteVulnsByIDs(taskID string, vulnIDs []string) error {
 	if taskID != "" {
 		go func() {
 			if err := UpdateTaskHighestRiskLevel(taskID); err != nil {
-				fmt.Printf("[WARNING] Failed to update highest risk level for task %s after batch delete: %v\n", taskID, err)
+				fmt.Printf("[警告] 批量删除后，更新任务 %s 的最高风险等级失败: %v\n", taskID, err)
 			}
 		}()
 	}

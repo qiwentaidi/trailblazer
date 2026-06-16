@@ -119,7 +119,7 @@ func main() {
 
 	// 使用互斥锁保护共享数据（如果需要）
 	var mu sync.Mutex
-	var vulnCount, assetCount, riskCount int
+	var vulnCount, assetCount int
 
 	// 设置回调函数（类似nuclei的方式）
 	options.OnResult = func(event lib.ScanEvent) bool {
@@ -167,20 +167,6 @@ func main() {
 				asset["type"],
 				asset["value"],
 				asset["source"])
-
-		case lib.EventTypeRisk:
-			// 发现风险
-			riskCount++
-			risk, ok := event.Data.(lib.RiskItem)
-			if !ok {
-				fmt.Printf("[警告] 无法解析风险数据\n")
-				return true
-			}
-			fmt.Printf("[%s] [风险] [%s] %s - %s\n",
-				event.Timestamp.Format("15:04:05"),
-				risk.Level,
-				risk.Title,
-				risk.URL)
 
 		case lib.EventTypeAPIRecord:
 			record, ok := event.Data.(lib.APIRecord)
@@ -254,10 +240,8 @@ func main() {
 	// 显示统计信息
 	fmt.Printf("\n=== 实时统计 ===\n")
 	fmt.Printf("扫描耗时: %v\n", duration)
-	fmt.Printf("实时统计 - 漏洞: %d, 资产: %d, 风险: %d\n", vulnCount, assetCount, riskCount)
-	fmt.Printf("最终结果 - 漏洞: %d, 风险: %d\n",
-		result.Summary.TotalVulnerabilities,
-		result.Summary.TotalRisks)
+	fmt.Printf("实时统计 - 漏洞: %d, 资产: %d\n", vulnCount, assetCount)
+	fmt.Printf("最终结果 - 漏洞: %d\n", result.Summary.TotalVulnerabilities)
 
 	// 保存结果到文件
 	if len(result.Targets) > 0 {

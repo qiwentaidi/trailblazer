@@ -48,6 +48,64 @@ func parsePositiveIntQuery(c *gin.Context, key string, fallback int) (int, bool)
 	return value, true
 }
 
+type taskVulnResponse struct {
+	VulnID             string                       `json:"vuln_id"`
+	Title              string                       `json:"title"`
+	Level              string                       `json:"level"`
+	Status             string                       `json:"status,omitempty"`
+	Confidence         string                       `json:"confidence,omitempty"`
+	Type               string                       `json:"type"`
+	URL                string                       `json:"url"`
+	Method             string                       `json:"method,omitempty"`
+	Request            string                       `json:"request,omitempty"`
+	Response           string                       `json:"response,omitempty"`
+	TraceID            string                       `json:"trace_id,omitempty"`
+	HasProtocolTrace   bool                         `json:"has_protocol_trace,omitempty"`
+	ResponseCiphertext string                       `json:"response_ciphertext,omitempty"`
+	DecryptionStatus   string                       `json:"decryption_status,omitempty"`
+	DecryptionDetail   string                       `json:"decryption_detail,omitempty"`
+	ResponseLength     int                          `json:"response_length,omitempty"`
+	DataExposure       string                       `json:"data_exposure,omitempty"`
+	ExposureReason     string                       `json:"exposure_reason,omitempty"`
+	StaticContexts     []database.VulnStaticContext `json:"static_contexts,omitempty"`
+	ConfidenceReason   string                       `json:"confidence_reason,omitempty"`
+	Description        string                       `json:"description"`
+	CreatedAt          time.Time                    `json:"created_at"`
+	AIVerified         bool                         `json:"ai_verified,omitempty"`
+}
+
+func buildTaskVulnResponses(vulns []database.VulnRecord) []taskVulnResponse {
+	result := make([]taskVulnResponse, 0, len(vulns))
+	for _, vuln := range vulns {
+		result = append(result, taskVulnResponse{
+			VulnID:             vuln.VulnID,
+			Title:              vuln.Title,
+			Level:              vuln.Level,
+			Status:             vuln.Status,
+			Confidence:         vuln.Confidence,
+			Type:               vuln.Type,
+			URL:                vuln.URL,
+			Method:             vuln.Method,
+			Request:            vuln.Request,
+			Response:           vuln.Response,
+			TraceID:            vuln.TraceID,
+			HasProtocolTrace:   vuln.HasProtocolTrace,
+			ResponseCiphertext: vuln.ResponseCiphertext,
+			DecryptionStatus:   vuln.DecryptionStatus,
+			DecryptionDetail:   vuln.DecryptionDetail,
+			ResponseLength:     vuln.ResponseLength,
+			DataExposure:       vuln.DataExposure,
+			ExposureReason:     vuln.ExposureReason,
+			StaticContexts:     append([]database.VulnStaticContext(nil), vuln.StaticContexts...),
+			ConfidenceReason:   vuln.ConfidenceReason,
+			Description:        vuln.Description,
+			CreatedAt:          vuln.CreatedAt,
+			AIVerified:         vuln.AIVerified,
+		})
+	}
+	return result
+}
+
 // getTaskDetail 获取任务详情
 func getTaskDetail(c *gin.Context) {
 	taskID := c.Param("taskId")
@@ -181,14 +239,14 @@ func getTaskVulns(c *gin.Context) {
 		if strings.Contains(err.Error(), "index_not_found_exception") ||
 			strings.Contains(err.Error(), "ES client not initialized") ||
 			strings.Contains(err.Error(), "connection") {
-			c.JSON(200, gin.H{"data": []interface{}{}})
+			c.JSON(200, gin.H{"data": []taskVulnResponse{}})
 			return
 		}
 		c.JSON(500, gin.H{"error": "failed to query vulns", "detail": err.Error()})
 		return
 	}
 
-	c.JSON(200, gin.H{"data": vulns})
+	c.JSON(200, gin.H{"data": buildTaskVulnResponses(vulns)})
 }
 
 // getTaskJS 获取任务的JS资源列表
@@ -769,7 +827,7 @@ func rebuildTree(nodes []database.SiteTreeNode) []TreeNode {
 		return children
 	}
 
-	fmt.Printf("[DEBUG] Rebuild complete: %d roots, %d total nodes\n", len(rootIDs), len(nodes))
+	fmt.Printf("[调试] 站点树重建完成: %d 个根节点，%d 个总节点\n", len(rootIDs), len(nodes))
 
 	// 构建根节点及其完整子树
 	result := make([]TreeNode, 0, len(rootIDs))
@@ -1211,11 +1269,11 @@ func deleteTask(c *gin.Context) {
 	// 删除ES中的相关数据（使用任务ID）
 	if database.ESClient != nil {
 		if err := database.DeleteTaskData(task.ID); err != nil {
-			fmt.Printf("[ERROR] Failed to delete ES data for task %s: %v\n", task.ID, err)
+			fmt.Printf("[错误] 删除任务 %s 的 ES 数据失败: %v\n", task.ID, err)
 			c.JSON(500, gin.H{"error": "failed to delete ES data", "detail": err.Error()})
 			return
 		} else {
-			fmt.Printf("[INFO] Deleted ES data for task %s\n", task.ID)
+			fmt.Printf("[信息] 已删除任务 %s 的 ES 数据\n", task.ID)
 		}
 	}
 

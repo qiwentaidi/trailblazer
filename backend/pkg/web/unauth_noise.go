@@ -120,16 +120,7 @@ func annotateUnauthorizedNoise(vulns []database.VulnRecord) []database.VulnRecor
 			vuln.DenyTemplateCount = len(cluster.items)
 
 			vuln.Confidence = "low"
-
-			reason := strings.TrimSpace(vuln.ConfidenceReason)
-			clusterReason := fmt.Sprintf("%s，当前模板命中 %d 个接口", cluster.label, len(cluster.items))
-			if reason == "" {
-				vuln.ConfidenceReason = clusterReason
-				continue
-			}
-			if !strings.Contains(reason, cluster.label) {
-				vuln.ConfidenceReason = reason + "；" + clusterReason
-			}
+			vuln.ConfidenceReason = "低置信：结果更像相似拒绝模板或通用错误响应"
 		}
 	}
 
