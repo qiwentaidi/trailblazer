@@ -200,7 +200,7 @@ func performAsyncScan(urls []string, taskId string) {
 		}
 		return
 	}
-	var config Config
+	var config config.ConfigYAML
 	if err := yaml.Unmarshal(configData, &config); err != nil {
 		fmt.Printf("[错误] 解析配置失败: %v\n", err)
 		if taskId != "" {
@@ -259,6 +259,7 @@ func performAsyncScan(urls []string, taskId string) {
 			HighRiskRouter: config.HighRiskRouter,
 			Authentication: config.Authentication,
 			Placeholder:    config.Placeholder,
+			WeakCreds:      config.WeakCreds,
 			OpenAI:         config.OpenAI,
 			VulnDetection:  resolvedVulnDetection,
 			DataStore:      database.GetScanDataStore(),

@@ -85,7 +85,7 @@ func buildTaskVulnResponses(vulns []database.VulnRecord) []taskVulnResponse {
 			Confidence:         vuln.Confidence,
 			Type:               vuln.Type,
 			URL:                vuln.URL,
-			Method:             vuln.Method,
+			Method:             normalizeTaskVulnMethod(vuln),
 			Request:            vuln.Request,
 			Response:           vuln.Response,
 			TraceID:            vuln.TraceID,
@@ -104,6 +104,17 @@ func buildTaskVulnResponses(vulns []database.VulnRecord) []taskVulnResponse {
 		})
 	}
 	return result
+}
+
+func normalizeTaskVulnMethod(vuln database.VulnRecord) string {
+	method := strings.TrimSpace(vuln.Method)
+	if method != "" {
+		return method
+	}
+	if strings.TrimSpace(vuln.Type) == "敏感信息泄露" {
+		return "GET"
+	}
+	return ""
 }
 
 // getTaskDetail 获取任务详情

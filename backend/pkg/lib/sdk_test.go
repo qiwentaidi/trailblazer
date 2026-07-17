@@ -628,3 +628,45 @@ func TestDedupeSDKVulnerabilitiesPrefersHTTPSVariant(t *testing.T) {
 		t.Fatalf("expected https variant to be preferred, got %#v", vulns[0])
 	}
 }
+
+func TestDedupeSDKVulnerabilitiesHandlesUnauthorizedTrailingSlash(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses [2]string
+		lengths   [2]int
+		wantCount int
+	}{
+		{name: "same response", responses: [2]string{`{"detail":"ok"}`, `{"detail":"ok"}`}, lengths: [2]int{15, 15}, wantCount: 1},
+		{name: "different response", responses: [2]string{`{"detail":"first"}`, `{"detail":"second"}`}, lengths: [2]int{18, 19}, wantCount: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vulns := dedupeSDKVulnerabilities([]VulnRecord{
+				{Title: "未授权访问", Type: "未授权访问", Method: "GET", URL: "https://sentry.weixing-tech.com/api/0", Response: tt.responses[0], ResponseLength: tt.lengths[0]},
+				{Title: "未授权访问", Type: "未授权访问", Method: "GET", URL: "https://sentry.weixing-tech.com/api/0/", Response: tt.responses[1], ResponseLength: tt.lengths[1]},
+			})
+			if len(vulns) != tt.wantCount {
+				t.Fatalf("deduped findings = %#v, want %d", vulns, tt.wantCount)
+			}
+		})
+	}
+}
+
+func TestConvertSharedVulnerabilitiesDefaultsSensitiveLeakMethodToGET(t *testing.T) {
+	items := convertSharedVulnerabilities([]database.VulnRecord{
+		{
+			VulnID: "vuln-sensitive",
+			Title:  "敏感关键词泄露",
+			Type:   "敏感信息泄露",
+			URL:    "https://example.com/app.js",
+		},
+	})
+
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Method != "GET" {
+		t.Fatalf("expected sensitive leak method GET, got %q", items[0].Method)
+	}
+}

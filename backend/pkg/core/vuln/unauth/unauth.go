@@ -3,6 +3,7 @@ package unauth
 import (
 	"crypto/sha1"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"mime"
@@ -94,6 +95,9 @@ func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 	}
 	body := string(resp.Body())
 	responseType := normalizeUnauthorizedResponseType(resp.Header().Get("Content-Type"))
+	if reject, reason := shouldRejectUnauthorizedPayload(body); reject {
+		return false, "", UnauthorizedAssessment{}, errors.New(reason)
+	}
 
 	// 1. HTTP状态码异常，直接返回
 	if resp.StatusCode() > 400 && resp.StatusCode() != 500 {
@@ -150,6 +154,32 @@ func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 		ExposureReason:   exposureReason,
 		ResponseType:     responseType,
 	}, nil
+}
+
+// shouldRejectUnauthorizedPayload enforces the minimum evidence required for an
+// unauthorized-access finding: the response must contain a non-trivial JSON or
+// XML document. Binary, HTML, and plain-text responses are treated as false
+// positives before any risk is recorded or sent to AI for review.
+func shouldRejectUnauthorizedPayload(body string) (bool, string) {
+	trimmed := strings.TrimSpace(body)
+	if len([]byte(trimmed)) <= 2 {
+		return true, "响应包内容过短，缺少可验证的业务数据"
+	}
+
+	if json.Valid([]byte(trimmed)) {
+		return false, ""
+	}
+
+	if isHTMLResponse(trimmed) {
+		return true, "响应包不是 JSON 或 XML 格式"
+	}
+
+	var document struct{}
+	if err := xml.Unmarshal([]byte(trimmed), &document); err == nil {
+		return false, ""
+	}
+
+	return true, "响应包不是 JSON 或 XML 格式"
 }
 
 func normalizeUnauthorizedResponseType(raw string) string {
@@ -677,34 +707,37 @@ func calcHash(s string) string {
 
 // shouldSkipUnauthTest 检查是否应该跳过未授权访问测试
 // 排除登录、验证码等本身就无需鉴权的接口
-func shouldSkipUnauthTest(url string) bool {
-	// 将URL转换为小写进行匹配
-	urlLower := strings.ToLower(url)
+func shouldSkipUnauthTest(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	pathRaw := strings.TrimSpace(rawURL)
+	pathLower := strings.ToLower(pathRaw)
+	if err == nil && parsed != nil {
+		pathRaw = parsed.EscapedPath()
+		if pathRaw == "" {
+			pathRaw = parsed.Path
+		}
+		pathLower = strings.ToLower(pathRaw)
+	}
 
-	// 定义需要跳过的路径关键词
-	skipPatterns := []string{
-		// 登录相关
-		"/login",
-		"/signin",
-		"/oauth",
-		"/sso",
-		"/cas",
-		"/saml",
+	if pathLower == "" {
+		return false
+	}
 
-		// 注册相关
-		"/register",
-		"/signup",
+	frameworkInternalPrefixes := []string{
+		"/__next",
+		"/__nextjs",
+		"/_next",
+		"/__vite",
+		"/@vite",
+		"/webpack-dev-server",
+	}
+	for _, prefix := range frameworkInternalPrefixes {
+		if strings.HasPrefix(pathLower, prefix) {
+			return true
+		}
+	}
 
-		// 验证码相关
-		"/captcha",
-		"/verify",
-		"/code",
-		"/validate",
-		"/checkcode",
-		"/vcode",
-		"/kaptcha",
-
-		// 公开信息相关
+	pathPrefixes := []string{
 		"/public",
 		"/about",
 		"/contact",
@@ -713,8 +746,6 @@ func shouldSkipUnauthTest(url string) bool {
 		"/terms",
 		"/privacy",
 		"/policy",
-
-		// 静态资源相关
 		"/static",
 		"/assets",
 		"/css",
@@ -723,25 +754,117 @@ func shouldSkipUnauthTest(url string) bool {
 		"/img",
 		"/fonts",
 		"/favicon",
-
-		// 健康检查相关
 		"/health",
 		"/status",
 		"/ping",
 		"/heartbeat",
 		"/monitor",
-
-		// 版本信息相关
 		"/version",
 	}
-
-	// 检查URL是否包含任何跳过模式
-	for _, pattern := range skipPatterns {
-		if strings.Contains(urlLower, pattern) {
+	for _, prefix := range pathPrefixes {
+		if pathLower == prefix || strings.HasPrefix(pathLower, prefix+"/") {
 			return true
 		}
 	}
 
+	tokens := extractURLWordTokens(pathRaw)
+	tokenSet := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		tokenSet[token] = struct{}{}
+	}
+
+	if hasAnyUnauthorizedSkipToken(tokenSet,
+		"login", "signin", "logout", "signout",
+		"oauth", "sso", "cas", "saml",
+		"register", "signup", "resetpassword", "forgotpassword",
+		"captcha", "kaptcha", "checkcode", "vcode",
+	) {
+		return true
+	}
+
+	if hasAnyUnauthorizedSkipToken(tokenSet, "otp", "totp") {
+		return true
+	}
+
+	if hasAnyUnauthorizedSkipToken(tokenSet, "sms", "email", "mail") &&
+		hasAnyUnauthorizedSkipToken(tokenSet, "code", "otp", "captcha") {
+		return true
+	}
+
+	if hasAnyUnauthorizedSkipToken(tokenSet, "image", "img", "graphic") &&
+		hasAnyUnauthorizedSkipToken(tokenSet, "code", "captcha") {
+		return true
+	}
+
+	if hasAnyUnauthorizedSkipToken(tokenSet, "auth", "user", "account") &&
+		hasAnyUnauthorizedSkipToken(tokenSet, "login", "signin", "register", "signup", "captcha", "otp") {
+		return true
+	}
+
+	if hasAnyUnauthorizedSkipToken(tokenSet, "send", "get", "generate", "create", "refresh") &&
+		hasAnyUnauthorizedSkipToken(tokenSet, "captcha", "otp") {
+		return true
+	}
+
+	if hasAnyUnauthorizedSkipToken(tokenSet, "send", "get", "generate") &&
+		hasAnyUnauthorizedSkipToken(tokenSet, "sms", "email", "mail") &&
+		hasAnyUnauthorizedSkipToken(tokenSet, "code") {
+		return true
+	}
+
+	return false
+}
+
+func extractURLWordTokens(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	tokens := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		tokens = append(tokens, splitIdentifierTokens(field)...)
+	}
+	return tokens
+}
+
+func splitIdentifierTokens(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+
+	var tokens []string
+	start := 0
+	runes := []rune(raw)
+	for i := 1; i < len(runes); i++ {
+		prev := runes[i-1]
+		curr := runes[i]
+		nextIsLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+
+		switch {
+		case unicode.IsLower(prev) && unicode.IsUpper(curr):
+			tokens = append(tokens, strings.ToLower(string(runes[start:i])))
+			start = i
+		case unicode.IsDigit(prev) != unicode.IsDigit(curr):
+			tokens = append(tokens, strings.ToLower(string(runes[start:i])))
+			start = i
+		case unicode.IsUpper(prev) && unicode.IsUpper(curr) && nextIsLower:
+			tokens = append(tokens, strings.ToLower(string(runes[start:i])))
+			start = i
+		}
+	}
+	tokens = append(tokens, strings.ToLower(string(runes[start:])))
+	return tokens
+}
+
+func hasAnyUnauthorizedSkipToken(tokenSet map[string]struct{}, tokens ...string) bool {
+	for _, token := range tokens {
+		if _, ok := tokenSet[token]; ok {
+			return true
+		}
+	}
 	return false
 }
 
@@ -1055,6 +1178,10 @@ func evaluateUnauthorizedConfidence(statusCode int, responseBody, url string) (s
 func shouldRejectUnauthorizedResponse(statusCode int, responseBody, url string) (bool, string) {
 	bodyLower := strings.ToLower(strings.TrimSpace(responseBody))
 	observation := recordResponseObservation(statusCode, responseBody, url)
+
+	if statusCode >= 400 && statusCode < 500 && !containsMeaningfulDataSignals(bodyLower, url) {
+		return true, fmt.Sprintf("响应状态为 %d 且缺少有效业务数据，判定为未授权误报", statusCode)
+	}
 
 	if isLikelyGenericErrorResponse(bodyLower) {
 		return true, "响应内容命中通用错误模板，判定为未授权误报"

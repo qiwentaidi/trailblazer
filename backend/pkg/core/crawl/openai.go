@@ -435,21 +435,22 @@ func marshalRouteList(routes []string) string {
 	return strings.Join(lines, "\n")
 }
 
-// JudgeDenyTemplate 使用AI判断响应是否属于统一拒绝/鉴权模板
-// 返回：(是否拒绝模板, 原因, 错误)
+// JudgeDenyTemplate 使用 AI 判断未授权候选是否应作为误报过滤。
+// 返回：(是否应过滤, 原因, 错误)
 func (c *SensitiveInfoChecker) JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error) {
-	systemPrompt := `你是一个 Web 安全漏洞复核专家。用户会提供一个接口请求报文和响应报文，你需要判断该响应是否更像“统一拒绝模板/统一鉴权拦截模板”，还是“正常业务响应”。
+	systemPrompt := `你是一个 Web 安全漏洞复核专家。用户会提供一个接口请求报文和响应片段。请结合请求中的路径、查询参数、请求语义与响应内容，判断该未授权访问候选是否应当作为误报过滤。
 
-判断为 TRUE（拒绝模板）的情况：
+判断为 TRUE（应过滤）的情况：
 1. 响应核心语义是未登录、未授权、权限不足、token失效、认证失败、禁止访问、统一网关拒绝
 2. 响应只是通用错误壳子，业务数据为空且没有真实业务字段含义
 3. 响应明显是平台统一封装的拦截结果，而不是该接口自己的业务结果
+4. 请求路径和响应片段共同表明这是无需登录即可调用的公共接口/能力，例如图形验证码、滑块/人机挑战、验证码会话或 challenge、登录/注册/找回密码前的短信或邮箱验证码发送、公开健康检查或公开基础配置。即使响应是 JSON，只要其业务语义是生成验证码、挑战令牌、验证码标识或临时校验材料，也应过滤。
 
-判断为 FALSE（不是拒绝模板，属于正常业务响应或至少不能判定为拒绝模板）的情况：
+判断为 FALSE（保留为未授权候选）的情况：
 1. 响应明确表示 success / code=0 / ok=true / 查询成功 等正常业务语义
 2. 响应中包含真实业务字段、业务对象、列表、统计值、配置项，即使 data 为空数组也仍可能是正常查询结果
 3. 请求和响应可以对上真实业务接口语义，而不是统一的权限拒绝
-4. 证据不足时，优先返回 false，避免误伤正常业务数据
+4. 仅凭模糊路径或单个字段无法确认是公共能力时，优先返回 false，避免误伤真实业务数据
 
 只输出 JSON，不要输出其他任何内容，格式固定为：
 {"is_deny_template": true/false, "reason": "简短原因"}`
@@ -463,7 +464,7 @@ func (c *SensitiveInfoChecker) JudgeDenyTemplate(requestPreview, responsePreview
 
 	reply, err := c.chatComplete(
 		systemPrompt,
-		fmt.Sprintf("请判断以下接口响应是否属于统一拒绝模板。\n\n请求报文：\n%s\n\n响应报文：\n%s", requestPreview, responsePreview),
+		fmt.Sprintf("请判断以下未授权访问候选是否应过滤。务必结合请求路径与响应片段识别公共接口/能力。\n\n请求报文：\n%s\n\n响应报文：\n%s", requestPreview, responsePreview),
 		0.1,
 		180,
 	)

@@ -227,3 +227,21 @@ func TestGetTaskAssetsMergesMultipleAssetDocumentsForSameTaskVersion(t *testing.
 		t.Fatalf("merged ipUrl source len = %d, want 2; values=%#v", len(mergedIPURL.Source), mergedIPURL.Source)
 	}
 }
+
+func TestBuildTaskVulnResponsesDefaultsSensitiveLeakMethodToGET(t *testing.T) {
+	responses := buildTaskVulnResponses([]database.VulnRecord{
+		{
+			VulnID: "vuln-sensitive",
+			Title:  "敏感关键词泄露",
+			Type:   "敏感信息泄露",
+			URL:    "https://example.com/app.js",
+		},
+	})
+
+	if len(responses) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(responses))
+	}
+	if responses[0].Method != http.MethodGet {
+		t.Fatalf("expected sensitive leak method GET, got %q", responses[0].Method)
+	}
+}

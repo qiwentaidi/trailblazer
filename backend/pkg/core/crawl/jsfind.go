@@ -880,7 +880,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 						Method:         method,
 						Request:        vuln.BuildRawRequest(apiReq),
 						Response:       sqlResult.Response,
-						ResponseLength: len(sqlResult.Response),
+						ResponseLength: sqlResult.ResponseLength,
 						Description:    fmt.Sprintf("发现SQL注入漏洞，类型: %s，Payload: %s，原因: %s", sqlResult.Type, sqlResult.Payload, sqlResult.Reason),
 						AIVerified:     false,
 						CreatedAt:      time.Now(),

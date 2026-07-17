@@ -142,6 +142,70 @@ func TestShouldTreatHTMLAsUnauthorizedAcceptsBusinessTablePage(t *testing.T) {
 	}
 }
 
+func TestShouldSkipUnauthTestSkipsPublicAuthEndpoints(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://example.com/api/auth/login",
+		"https://example.com/api/user/logout",
+		"https://example.com/api/captcha/generate",
+		"https://example.com/api/auth/sendSmsCode?mobile=13800138000",
+		"https://example.com/open/kaptcha/image",
+	} {
+		if !shouldSkipUnauthTest(rawURL) {
+			t.Fatalf("expected %s to be skipped", rawURL)
+		}
+	}
+}
+
+func TestShouldSkipUnauthTestSkipsFrameworkInternalEndpoints(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://example.com/__nextjs_launch-editor?",
+		"https://example.com/__nextjs_restart_dev",
+		"https://example.com/_next/static/chunks/app.js",
+		"https://example.com/@vite/client",
+	} {
+		if !shouldSkipUnauthTest(rawURL) {
+			t.Fatalf("expected %s to be skipped", rawURL)
+		}
+	}
+}
+
+func TestShouldSkipUnauthTestKeepsBusinessCodeEndpoints(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://example.com/api/system/dict/code/list",
+		"https://example.com/api/area/countryCode/list",
+		"https://example.com/api/order/verification-record/detail",
+		"https://example.com/api/invite/verifyResult",
+	} {
+		if shouldSkipUnauthTest(rawURL) {
+			t.Fatalf("expected %s not to be skipped", rawURL)
+		}
+	}
+}
+
+func TestShouldRejectUnauthorizedPayloadRequiresStructuredBusinessResponse(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		reject bool
+	}{
+		{name: "empty JSON object", body: "{}", reject: true},
+		{name: "plain ok", body: "ok", reject: true},
+		{name: "binary payload", body: "\x89PNG\r\n\x1a\n", reject: true},
+		{name: "HTML payload", body: "<html><body>business page</body></html>", reject: true},
+		{name: "JSON payload", body: `{"data":{"user_id":1}}`, reject: false},
+		{name: "XML payload", body: "<response><user_id>1</user_id></response>", reject: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reject, _ := shouldRejectUnauthorizedPayload(tt.body)
+			if reject != tt.reject {
+				t.Fatalf("shouldRejectUnauthorizedPayload(%q) = %t, want %t", tt.body, reject, tt.reject)
+			}
+		})
+	}
+}
+
 func TestTestUnauthorizedAccessRejectsGenericJSONTemplate(t *testing.T) {
 	resetUnauthorizedTestState(t)
 
@@ -162,6 +226,28 @@ func TestTestUnauthorizedAccessRejectsGenericJSONTemplate(t *testing.T) {
 	}
 	if vulnerable {
 		t.Fatal("expected generic template response not to be marked vulnerable")
+	}
+}
+
+func TestTestUnauthorizedAccessRejectsBadRequestWithoutBusinessData(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	vulnerable, _, _, err := TestUnauthorizedAccess("", structs.APIRequest{
+		URL:     server.URL + "/api/orders/query",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil)
+
+	if err == nil {
+		t.Fatal("expected bad request response to be rejected")
+	}
+	if vulnerable {
+		t.Fatal("expected bad request response not to be marked vulnerable")
 	}
 }
 

@@ -15,6 +15,7 @@ type ConfigYAML struct {
 	HighRiskRouter []string          `yaml:"high-risk-router"`
 	Authentication []string          `yaml:"authentication"`
 	Placeholder    map[string]string `yaml:"placeholder"`
+	WeakCreds      []string          `yaml:"weakCreds"`
 	VulnDetection  VulnDetection     `yaml:"vuln-detection"`
 }
 

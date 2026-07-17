@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,9 @@ type ScanOptions struct {
 	// 占位符映射（用于参数替换）
 	Placeholder map[string]string `json:"placeholder"`
 
+	// 弱口令字典
+	WeakCreds []string `json:"weakCreds"`
+
 	// 漏洞检测配置
 	VulnDetection VulnDetectionOptions `json:"vulnDetection"`
 
@@ -144,6 +148,7 @@ func NewScanOptions() *ScanOptions {
 		HighRiskRouter: []string{},
 		Authentication: []string{},
 		Placeholder:    make(map[string]string),
+		WeakCreds:      []string{},
 		VulnDetection: VulnDetectionOptions{
 			Enabled:      true,
 			SQLInjection: config.SQLInjectionConfig{Enabled: true},
@@ -193,6 +198,7 @@ func LoadScanOptionsFromFile(configPath string) (*ScanOptions, error) {
 		HighRiskRouter: cfg.HighRiskRouter,
 		Authentication: cfg.Authentication,
 		Placeholder:    cfg.Placeholder,
+		WeakCreds:      cfg.WeakCreds,
 		VulnDetection: VulnDetectionOptions{
 			Enabled:      vulnDetectionEnabled,
 			SQLInjection: cfg.VulnDetection.SQLInjection,
@@ -499,11 +505,29 @@ type TargetResult struct {
 }
 
 func sdkVulnerabilityDedupKey(vuln VulnRecord) string {
+	responseKey := ""
+	if isSDKUnauthorizedVulnerability(vuln) {
+		// Preserve findings with different responses even if their URLs differ
+		// only by a trailing slash.
+		responseKey = "|" + strconv.Itoa(vuln.ResponseLength) + "|" + vuln.Response
+	}
 	parsed, err := url.Parse(strings.TrimSpace(vuln.URL))
 	if err == nil && parsed.Host != "" {
-		return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" + strings.ToLower(parsed.Host) + "|" + parsed.Path + "|" + strings.TrimSpace(vuln.Type)
+		path := parsed.Path
+		if isSDKUnauthorizedVulnerability(vuln) {
+			path = strings.TrimSuffix(path, "/")
+		}
+		return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" + strings.ToLower(parsed.Host) + "|" + path + "|" + strings.TrimSpace(vuln.Type) + responseKey
 	}
-	return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" + strings.TrimSpace(vuln.URL) + "|" + strings.TrimSpace(vuln.Type)
+	urlValue := strings.TrimSpace(vuln.URL)
+	if isSDKUnauthorizedVulnerability(vuln) {
+		urlValue = strings.TrimSuffix(urlValue, "/")
+	}
+	return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" + urlValue + "|" + strings.TrimSpace(vuln.Type) + responseKey
+}
+
+func isSDKUnauthorizedVulnerability(vuln VulnRecord) bool {
+	return vuln.Type == "未授权访问" || vuln.Title == "未授权访问"
 }
 
 func choosePreferredSDKVulnerability(current, candidate VulnRecord) VulnRecord {
@@ -1368,6 +1392,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			HighRiskRouter: options.HighRiskRouter,
 			Authentication: options.Authentication,
 			Placeholder:    options.Placeholder,
+			WeakCreds:      options.WeakCreds,
 			OpenAI: config.OpenAI{
 				APIKey:  options.OpenAI.APIKey,
 				BaseURL: options.OpenAI.BaseURL,
@@ -1611,7 +1636,7 @@ func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityIt
 			Level:              vuln.Level,
 			Type:               vuln.Type,
 			URL:                vuln.URL,
-			Method:             vuln.Method,
+			Method:             normalizeSDKVulnerabilityMethod(vuln),
 			Request:            vuln.Request,
 			Response:           vuln.Response,
 			ResponseType:       vuln.ResponseType,
@@ -1632,6 +1657,17 @@ func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityIt
 		})
 	}
 	return result
+}
+
+func normalizeSDKVulnerabilityMethod(vuln database.VulnRecord) string {
+	method := strings.TrimSpace(vuln.Method)
+	if method != "" {
+		return method
+	}
+	if strings.TrimSpace(vuln.Type) == "敏感信息泄露" {
+		return "GET"
+	}
+	return ""
 }
 
 func parseSDKTimestamp(value string) time.Time {

@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"trailblazer/pkg/config"
 	"trailblazer/pkg/core/structs"
@@ -13,17 +14,19 @@ import (
 
 // SQLInjectionResult 表示 SQL 注入测试结果
 type SQLInjectionResult struct {
-	Vulnerable bool   `json:"vulnerable"`
-	Payload    string `json:"payload"`
-	Response   string `json:"response"`
-	Reason     string `json:"reason"`
-	Type       string `json:"type"` // 注入类型：error-based, boolean-based
+	Vulnerable     bool   `json:"vulnerable"`
+	Payload        string `json:"payload"`
+	Response       string `json:"response"`
+	ResponseLength int    `json:"response_length"`
+	Reason         string `json:"reason"`
+	Type           string `json:"type"` // 注入类型：error-based, boolean-based
 }
 
 type responseSnapshot struct {
 	statusCode int
 	body       string
 	bodyLower  string
+	packet     string
 }
 
 // TestSQLInjection 测试SQL注入漏洞
@@ -50,14 +53,15 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 	// 对每个参数都进行测试
 	for _, paramName := range paramNames {
 		// 检测布尔盲注
-		vulnerable, oddBody1, boolPayload := isBooleanBasedSQLInjection(apiReq, paramName, baselineResp)
+		vulnerable, evidenceResp, boolPayload := isBooleanBasedSQLInjection(apiReq, paramName, baselineResp)
 		if vulnerable {
 			return &SQLInjectionResult{
-				Vulnerable: true,
-				Payload:    boolPayload,
-				Response:   vuln.TruncateResponse(oddBody1),
-				Reason:     "检测到布尔盲注SQL注入漏洞 (参数: " + paramName + ")",
-				Type:       "boolean-based",
+				Vulnerable:     true,
+				Payload:        boolPayload,
+				Response:       vuln.TruncateResponse(evidenceResp.packet),
+				ResponseLength: len(evidenceResp.body),
+				Reason:         "检测到布尔盲注SQL注入漏洞 (参数: " + paramName + ")",
+				Type:           "boolean-based",
 			}, nil
 		}
 
@@ -104,11 +108,12 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 						ruleType = "unknown"
 					}
 					return &SQLInjectionResult{
-						Vulnerable: true,
-						Payload:    payload,
-						Response:   vuln.TruncateResponse(resp.body),
-						Reason:     fmt.Sprintf("检测到%s SQL注入漏洞 (参数: %s)", ruleType, paramName),
-						Type:       ruleType,
+						Vulnerable:     true,
+						Payload:        payload,
+						Response:       vuln.TruncateResponse(resp.packet),
+						ResponseLength: len(resp.body),
+						Reason:         fmt.Sprintf("检测到%s SQL注入漏洞 (参数: %s)", ruleType, paramName),
+						Type:           ruleType,
 					}, nil
 				}
 			}
@@ -129,7 +134,7 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 // evenBody2: 2个单引号的响应
 // evenBody4: 4个单引号的响应
 // 如果奇数响应组（1和3）相同，偶数响应组（2和4）相同，但两组不同，则判断为布尔盲注
-func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string, baseline responseSnapshot) (bool, string, string) {
+func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string, baseline responseSnapshot) (bool, responseSnapshot, string) {
 	for _, probe := range buildBooleanProbePairs(apiReq.Params[paramName]) {
 		falseResp, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.falsePayload))
 		if err != nil {
@@ -149,11 +154,14 @@ func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string, bas
 		if !responsesDifferent(falseResp, trueResp) {
 			continue
 		}
+		if isStatusOnlyEmptyBodyDifference(baseline, falseResp, trueResp) {
+			continue
+		}
 
-		return true, falseResp.body, probe.falsePayload
+		return true, falseResp, probe.falsePayload
 	}
 
-	return false, "", ""
+	return false, responseSnapshot{}, ""
 }
 
 // isErrorBasedSQLInjection 检测基于错误的SQL注入（扩展 sqlmap/常见错误签名）
@@ -380,7 +388,37 @@ func sendSnapshot(apiReq structs.APIRequest) (responseSnapshot, error) {
 		statusCode: resp.StatusCode(),
 		body:       body,
 		bodyLower:  strings.ToLower(body),
+		packet:     buildResponsePacket(resp.Status(), resp.Header(), body),
 	}, nil
+}
+
+func buildResponsePacket(status string, headers map[string][]string, body string) string {
+	var builder strings.Builder
+	if strings.TrimSpace(status) != "" {
+		builder.WriteString("HTTP/1.1 ")
+		builder.WriteString(strings.TrimSpace(status))
+		builder.WriteString("\n")
+	}
+
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		for _, value := range headers[key] {
+			builder.WriteString(key)
+			builder.WriteString(": ")
+			builder.WriteString(value)
+			builder.WriteString("\n")
+		}
+	}
+
+	if builder.Len() > 0 {
+		builder.WriteString("\n")
+	}
+	builder.WriteString(body)
+	return builder.String()
 }
 
 func normalizeBody(body string) string {
@@ -416,6 +454,14 @@ func responsesEquivalent(left, right responseSnapshot) bool {
 
 func responsesDifferent(left, right responseSnapshot) bool {
 	return !responsesEquivalent(left, right)
+}
+
+func isStatusOnlyEmptyBodyDifference(baseline, falseResp, trueResp responseSnapshot) bool {
+	return canonicalizeBody(baseline.body) == "" &&
+		canonicalizeBody(falseResp.body) == "" &&
+		canonicalizeBody(trueResp.body) == "" &&
+		responsesEquivalent(baseline, trueResp) &&
+		baseline.statusCode != falseResp.statusCode
 }
 
 func canonicalizeBody(body string) string {

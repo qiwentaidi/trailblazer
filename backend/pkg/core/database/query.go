@@ -648,16 +648,32 @@ func dedupeQueriedVulns(vulns []VulnRecord) []VulnRecord {
 }
 
 func queriedVulnDedupKey(vuln VulnRecord) string {
+	responseKey := ""
+	if isQueriedUnauthorizedVuln(vuln) {
+		responseKey = fmt.Sprintf("|%d|%s", vuln.ResponseLength, vuln.Response)
+	}
 	parsed, err := url.Parse(strings.TrimSpace(vuln.URL))
 	if err == nil && parsed.Host != "" {
+		path := parsed.Path
+		if isQueriedUnauthorizedVuln(vuln) {
+			path = strings.TrimSuffix(path, "/")
+		}
 		return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" +
 			strings.ToLower(parsed.Host) + "|" +
-			parsed.Path + "|" +
-			strings.TrimSpace(vuln.Type)
+			path + "|" +
+			strings.TrimSpace(vuln.Type) + responseKey
+	}
+	urlValue := strings.TrimSpace(vuln.URL)
+	if isQueriedUnauthorizedVuln(vuln) {
+		urlValue = strings.TrimSuffix(urlValue, "/")
 	}
 	return strings.ToUpper(strings.TrimSpace(vuln.Method)) + "|" +
-		strings.TrimSpace(vuln.URL) + "|" +
-		strings.TrimSpace(vuln.Type)
+		urlValue + "|" +
+		strings.TrimSpace(vuln.Type) + responseKey
+}
+
+func isQueriedUnauthorizedVuln(vuln VulnRecord) bool {
+	return vuln.Type == "未授权访问" || vuln.Title == "未授权访问"
 }
 
 func choosePreferredQueriedVuln(current, candidate VulnRecord) VulnRecord {

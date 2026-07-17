@@ -33,6 +33,12 @@ func TestSQLInjectionDetectsNewErrorBasedSignal(t *testing.T) {
 	if result.Type != "error-based" {
 		t.Fatalf("expected error-based, got %q", result.Type)
 	}
+	if !strings.HasPrefix(result.Response, "HTTP/1.1 500") {
+		t.Fatalf("expected response evidence to include status line, got %q", result.Response)
+	}
+	if result.ResponseLength == 0 {
+		t.Fatalf("expected response body length to be preserved")
+	}
 }
 
 func TestSQLInjectionSkipsExistingErrorPageFalsePositive(t *testing.T) {
@@ -134,6 +140,29 @@ func TestSQLInjectionBooleanBasedSkipsGenericValidationError(t *testing.T) {
 	}
 	if result.Vulnerable {
 		t.Fatalf("expected generic validation behavior to be suppressed, got %#v", result)
+	}
+}
+
+func TestSQLInjectionBooleanBasedSkipsEmptyBodyStatusOnlyDifference(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("user") {
+		case "'":
+			w.WriteHeader(http.StatusBadRequest)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	result, err := TestSQLInjection(newTestAPIRequest(server.URL), config.SQLInjectionConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("TestSQLInjection returned error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Vulnerable {
+		t.Fatalf("expected status-only empty-body difference to be suppressed, got %#v", result)
 	}
 }
 

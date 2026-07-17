@@ -1,8 +1,8 @@
 package scanexec
 
 import (
+	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"trailblazer/pkg/core/crawl"
@@ -12,9 +12,11 @@ import (
 
 type denyTemplateReviewerStub struct {
 	confirmed bool
+	calls     int
 }
 
-func (s denyTemplateReviewerStub) JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error) {
+func (s *denyTemplateReviewerStub) JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error) {
+	s.calls++
 	return s.confirmed, "stub", nil
 }
 
@@ -50,6 +52,30 @@ func TestBindStaticContexts(t *testing.T) {
 	}
 }
 
+func TestDedupeVulnerabilitiesHandlesUnauthorizedTrailingSlash(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses [2]string
+		lengths   [2]int
+		wantCount int
+	}{
+		{name: "same response", responses: [2]string{`{"detail":"ok"}`, `{"detail":"ok"}`}, lengths: [2]int{15, 15}, wantCount: 1},
+		{name: "different response", responses: [2]string{`{"detail":"first"}`, `{"detail":"second"}`}, lengths: [2]int{18, 19}, wantCount: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vulns := dedupeVulnerabilities([]database.VulnRecord{
+				{Title: "未授权访问", Type: "未授权访问", Method: "GET", URL: "https://sentry.weixing-tech.com/api/0", Response: tt.responses[0], ResponseLength: tt.lengths[0]},
+				{Title: "未授权访问", Type: "未授权访问", Method: "GET", URL: "https://sentry.weixing-tech.com/api/0/", Response: tt.responses[1], ResponseLength: tt.lengths[1]},
+			})
+			if len(vulns) != tt.wantCount {
+				t.Fatalf("deduped findings = %#v, want %d", vulns, tt.wantCount)
+			}
+		})
+	}
+}
+
 func TestBuildAssetInfoPreservesAIVerifiedFlag(t *testing.T) {
 	assets := buildAssetInfo(structs.FindSomething{
 		Sensitive: []structs.InfoSource{
@@ -77,6 +103,9 @@ func TestBuildAssetVulnerabilitiesPreserveAIVerifiedFlag(t *testing.T) {
 	}
 	if !vulns[0].AIVerified {
 		t.Fatal("expected sensitive vulnerability to preserve aiVerified")
+	}
+	if vulns[0].Method != http.MethodGet {
+		t.Fatalf("expected sensitive vulnerability method GET, got %q", vulns[0].Method)
 	}
 }
 
@@ -188,9 +217,7 @@ func TestClassifyRuntimeAPIRouteSourcePrefersProtocolTrace(t *testing.T) {
 	}
 }
 
-func TestAnnotateUnauthorizedNoiseMarksClusterAsAIVerified(t *testing.T) {
-	denyTemplateAIReviewCache = sync.Map{}
-
+func TestAnnotateUnauthorizedNoiseRequiresIndividualAIReview(t *testing.T) {
 	vulns := []database.VulnRecord{
 		{
 			Title:          "未授权访问",
@@ -208,23 +235,124 @@ func TestAnnotateUnauthorizedNoiseMarksClusterAsAIVerified(t *testing.T) {
 			Response:       `{"success":false,"message":"请先登录","trace_id":"def"}`,
 			ResponseLength: 64,
 		},
-		{
-			Title:          "未授权访问",
-			Type:           "未授权访问",
-			URL:            "https://example.com/api/c",
-			Request:        "GET /api/c HTTP/1.1",
-			Response:       `{"success":false,"message":"请先登录","trace_id":"ghi"}`,
-			ResponseLength: 64,
-		},
 	}
 
-	annotated := annotateUnauthorizedNoise(vulns, denyTemplateReviewerStub{confirmed: true})
+	reviewer := &denyTemplateReviewerStub{confirmed: false}
+	annotated := annotateUnauthorizedNoise(vulns, reviewer, make(map[string]struct{}))
+	if reviewer.calls != len(vulns) {
+		t.Fatalf("AI review calls = %d, want %d", reviewer.calls, len(vulns))
+	}
 	for _, vuln := range annotated {
 		if !vuln.AIVerified {
 			t.Fatalf("expected vuln %s to be ai verified", vuln.URL)
 		}
-		if vuln.DenyTemplateID == "" {
-			t.Fatalf("expected vuln %s to receive deny template id", vuln.URL)
-		}
+	}
+}
+
+func TestAnnotateUnauthorizedNoiseFiltersDeniedOrUncheckedResults(t *testing.T) {
+	vulns := []database.VulnRecord{{
+		Title:    "未授权访问",
+		Type:     "未授权访问",
+		URL:      "https://example.com/api/a",
+		Request:  "GET /api/a HTTP/1.1",
+		Response: `{"data":{"id":1}}`,
+	}}
+
+	if got := annotateUnauthorizedNoise(vulns, nil, make(map[string]struct{})); len(got) != 0 {
+		t.Fatalf("unchecked unauthorized findings = %#v, want none", got)
+	}
+	if got := annotateUnauthorizedNoise(vulns, &denyTemplateReviewerStub{confirmed: true}, make(map[string]struct{})); len(got) != 0 {
+		t.Fatalf("AI-denied unauthorized findings = %#v, want none", got)
+	}
+}
+
+func TestAnnotateUnauthorizedNoiseReusesFilteredTemplateWithinScan(t *testing.T) {
+	vulns := []database.VulnRecord{
+		{
+			Title:    "未授权访问",
+			Type:     "未授权访问",
+			URL:      "https://example.com/api/a",
+			Request:  "GET /api/a HTTP/1.1",
+			Response: `{"code":200,"message":"错误的 URI /api/a","success":false}`,
+		},
+		{
+			Title:    "未授权访问",
+			Type:     "未授权访问",
+			URL:      "https://example.com/api/b",
+			Request:  "GET /api/b HTTP/1.1",
+			Response: `{"code":200,"message":"错误的 URI /api/b","success":false}`,
+		},
+	}
+
+	reviewer := &denyTemplateReviewerStub{confirmed: true}
+	annotated := annotateUnauthorizedNoise(vulns, reviewer, make(map[string]struct{}))
+	if len(annotated) != 0 {
+		t.Fatalf("filtered findings = %#v, want none", annotated)
+	}
+	if reviewer.calls != 1 {
+		t.Fatalf("AI review calls = %d, want 1", reviewer.calls)
+	}
+}
+
+func TestResolveWeakCredsIncludesObservedLoginCredential(t *testing.T) {
+	creds := resolveWeakCreds([]string{" admin : admin123 ", "invalid", "1:Test@123456"})
+
+	if len(creds) != 2 {
+		t.Fatalf("expected 2 normalized creds, got %#v", creds)
+	}
+	if creds[0] != "admin:admin123" {
+		t.Fatalf("expected first normalized cred, got %#v", creds)
+	}
+	if creds[1] != autogeneratedLoginEventCred {
+		t.Fatalf("expected observed login credential to be preserved, got %#v", creds)
+	}
+}
+
+func TestResolveWeakCredsFallsBackToBuiltins(t *testing.T) {
+	creds := resolveWeakCreds(nil)
+
+	if len(creds) != len(builtinWeakCreds)+1 {
+		t.Fatalf("expected builtin weak creds plus observed login cred, got %#v", creds)
+	}
+	if creds[len(creds)-1] != autogeneratedLoginEventCred {
+		t.Fatalf("expected autogenerated login cred, got %#v", creds)
+	}
+}
+
+func TestInferWeakLoginTargetURLsPrefersCapturedLoginPages(t *testing.T) {
+	targets := inferWeakLoginTargetURLs(
+		"https://example.com/",
+		[]crawl.NetworkRecord{
+			{
+				URL:         "https://example.com/api/auth/login",
+				PageURL:     "https://example.com/#/login",
+				RequestBody: `{"username":"1","password":"Test@123456"}`,
+			},
+		},
+		[]crawl.FrontendRouteRecord{
+			{Path: "/console/login", SourceKind: "react-router-provider"},
+		},
+	)
+
+	if len(targets) < 2 {
+		t.Fatalf("expected multiple login targets, got %#v", targets)
+	}
+	if targets[0] != "https://example.com/#/login" {
+		t.Fatalf("expected captured login page first, got %#v", targets)
+	}
+	if targets[1] != "https://example.com/console/login" {
+		t.Fatalf("expected frontend login route candidate, got %#v", targets)
+	}
+}
+
+func TestInferWeakLoginTargetURLsFallsBackToEntryTarget(t *testing.T) {
+	targets := inferWeakLoginTargetURLs(
+		"https://example.com/login",
+		nil,
+		nil,
+	)
+
+	if len(targets) != 1 || targets[0] != "https://example.com/login" {
+		t.Fatalf("expected fallback target URL, got %#v", targets)
 	}
 }

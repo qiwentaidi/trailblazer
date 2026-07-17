@@ -10,6 +10,30 @@ import (
 	"github.com/elastic/go-elasticsearch/v8"
 )
 
+func TestDedupeQueriedVulnsHandlesUnauthorizedTrailingSlash(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses [2]string
+		lengths   [2]int
+		wantCount int
+	}{
+		{name: "same response", responses: [2]string{`{"detail":"ok"}`, `{"detail":"ok"}`}, lengths: [2]int{15, 15}, wantCount: 1},
+		{name: "different response", responses: [2]string{`{"detail":"first"}`, `{"detail":"second"}`}, lengths: [2]int{18, 19}, wantCount: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vulns := dedupeQueriedVulns([]VulnRecord{
+				{Title: "未授权访问", Type: "未授权访问", Method: "GET", URL: "https://sentry.weixing-tech.com/api/0", Response: tt.responses[0], ResponseLength: tt.lengths[0]},
+				{Title: "未授权访问", Type: "未授权访问", Method: "GET", URL: "https://sentry.weixing-tech.com/api/0/", Response: tt.responses[1], ResponseLength: tt.lengths[1]},
+			})
+			if len(vulns) != tt.wantCount {
+				t.Fatalf("deduped findings = %#v, want %d", vulns, tt.wantCount)
+			}
+		})
+	}
+}
+
 func TestQueryTaskByIDFallsBackToSQLiteAndAppliesLatestVersion(t *testing.T) {
 	dbPath := t.TempDir() + "/query_task.db"
 	if err := InitSQLite(dbPath); err != nil {
