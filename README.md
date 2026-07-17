@@ -46,6 +46,46 @@
 - **前端**：Node.js 18+
 - **数据库**：Elasticsearch 8.x、SQLite
 
+### 项目结构
+
+```text
+.
+├── backend/         # Go 服务、扫描引擎与嵌入式 Web 资源
+├── frontend-admin/  # React 管理端
+├── build.sh          # 一体化构建脚本
+└── dist/             # 构建产物（生成后）
+```
+
+### 前端管理端
+
+管理端基于 Umi + Ant Design 构建，覆盖登录、任务中心、任务详情和配置管理等核心操作流程。
+
+**技术栈**
+
+- Umi 4、React 19、TypeScript
+- Ant Design 6
+- Zustand、`umi-request`
+
+**本地开发与构建**
+
+```bash
+cd frontend-admin
+corepack pnpm install
+corepack pnpm dev
+```
+
+开发服务器默认运行在 `http://localhost:8000`。如后端使用非默认端口，可在浏览器地址后追加 `?backend_port=<port>`，例如 `http://localhost:8000/?backend_port=3000`。
+
+```bash
+# 类型检查
+corepack pnpm typecheck
+
+# 构建生产包
+corepack pnpm build
+```
+
+管理端对接的主要后端接口包括认证、任务记录、任务树、漏洞、资产、配置和 Elasticsearch 健康检查等；会话状态保存在浏览器本地存储，任务详情会轮询刷新风险信息。
+
 ### 安装部署
 
 #### 1. 后端启动
@@ -214,7 +254,7 @@ elasticsearch:
 ✓ 已过滤：${phone}      ← AI 自动过滤
 ```
 
-👉 详细配置指南：[AI_QUICKSTART.md](./AI_QUICKSTART.md)
+👉 按上述步骤保存配置后，重新执行扫描任务即可启用 AI 辅助过滤。
 
 ## 📖 功能详解
 
@@ -301,7 +341,7 @@ elasticsearch:
 
 ## 协议轨迹说明
 
-- 明文响应抓取链路说明： [README-protocol-response-capture.md](./README-protocol-response-capture.md)
+- 明文响应抓取链路说明：[README-protocol-response-capture.md](./backend/README-protocol-response-capture.md)
 
 **安全策略配置**
 - 黑名单域名：过滤第三方资源（如 CDN、统计代码等）
@@ -366,9 +406,7 @@ weakCreds:
 
 ## 📚 文档
 
-- [AI 集成指南](./AI_INTEGRATION.md) - AI 辅助检测的详细技术文档
-- [AI 快速开始](./AI_QUICKSTART.md) - AI 功能的快速配置指南
-- [后端 README](./backend/README.md) - Elasticsearch 部署教程
+- [协议响应抓取说明](./backend/README-protocol-response-capture.md) - 明文响应抓取链路说明
 
 ## 🛠️ 技术栈
 
@@ -391,7 +429,7 @@ weakCreds:
 
 ## 📝 许可
 
-[MIT License](LICENSE)
+[MIT License](./frontend-admin/LICENSE)
 
 ## 🎯 路线图
 
