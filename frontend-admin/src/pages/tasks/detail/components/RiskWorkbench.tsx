@@ -380,9 +380,13 @@ const renderRiskLocation = (value?: string, compact = false) => {
         title={normalized}
         style={{
           display: 'block',
+          width: '100%',
+          minWidth: 0,
           whiteSpace: compact ? 'nowrap' : 'normal',
-          wordBreak: 'break-word',
-          overflowWrap: 'anywhere',
+          overflow: compact ? 'hidden' : 'visible',
+          textOverflow: compact ? 'ellipsis' : 'clip',
+          wordBreak: compact ? 'normal' : 'break-word',
+          overflowWrap: compact ? 'normal' : 'anywhere',
         }}
       >
         {normalized}
@@ -406,9 +410,13 @@ const renderRiskLocation = (value?: string, compact = false) => {
           title={sourceMapMeta.relativePath}
           style={{
             display: 'block',
+            width: '100%',
+            minWidth: 0,
             whiteSpace: compact ? 'nowrap' : 'normal',
-            wordBreak: 'break-word',
-            overflowWrap: 'anywhere',
+            overflow: compact ? 'hidden' : 'visible',
+            textOverflow: compact ? 'ellipsis' : 'clip',
+            wordBreak: compact ? 'normal' : 'break-word',
+            overflowWrap: compact ? 'normal' : 'anywhere',
           }}
         >
           {compact
@@ -1140,12 +1148,14 @@ export default function RiskWorkbench({
                                   justifyContent: 'space-between',
                                   gap: 12,
                                   alignItems: 'flex-start',
+                                  flexWrap: 'wrap',
+                                  minWidth: 0,
                                 }}
                               >
                                 <Space
                                   direction="vertical"
                                   size={2}
-                                  style={{ flex: 1 }}
+                                  style={{ flex: 1, minWidth: 0 }}
                                 >
                                   <Space wrap size={[4, 4]}>
                                     <Tag color={levelColorMap[risk.level]}>
@@ -1180,6 +1190,8 @@ export default function RiskWorkbench({
                                       WebkitLineClamp: 2,
                                       overflow: 'hidden',
                                       whiteSpace: 'normal',
+                                      wordBreak: 'break-word',
+                                      overflowWrap: 'anywhere',
                                     }}
                                   >
                                     {buildRiskSummary(risk)}
@@ -1199,7 +1211,15 @@ export default function RiskWorkbench({
                                     </Space>
                                   ) : null}
                                 </Space>
-                                <Space>
+                                <Space
+                                  wrap
+                                  size={[8, 8]}
+                                  style={{
+                                    flexShrink: 0,
+                                    width: 'auto',
+                                    marginLeft: 'auto',
+                                  }}
+                                >
                                   <Select
                                     data-testid={`risk-status-select-${risk.id}`}
                                     size="small"
@@ -1274,106 +1294,138 @@ export default function RiskWorkbench({
               <List.Item
                 key={risk.id}
                 onClick={() => setSelected(risk)}
-                style={{ cursor: 'pointer' }}
-                actions={[
-                  <Select
-                    key="status"
-                    data-testid={`risk-status-select-${risk.id}`}
-                    size="small"
-                    value={normalizeRiskStatus(risk.status)}
-                    options={riskStatusOptions}
-                    style={{ width: 110 }}
-                    loading={updatingRiskId === risk.id}
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(value) => void handleUpdateStatus(risk, value)}
-                  />,
-                  <Button
-                    key="detail"
-                    type="link"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelected(risk);
-                    }}
-                  >
-                    查看详情
-                  </Button>,
-                  <Popconfirm
-                    key="delete"
-                    title="确认删除该漏洞记录吗？"
-                    description="删除后将无法恢复。"
-                    disabled={deleting}
-                    onConfirm={(event) => {
-                      event?.stopPropagation?.();
-                      void handleDelete(risk);
-                    }}
-                    okButtonProps={{ danger: true, loading: deleting }}
-                    onCancel={(event) => event?.stopPropagation?.()}
-                  >
-                    <Button
-                      danger
-                      type="link"
-                      disabled={deleting}
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      删除
-                    </Button>
-                  </Popconfirm>,
-                ]}
+                style={{ cursor: 'pointer', minWidth: 0 }}
               >
-                <List.Item.Meta
-                  title={
-                    <Space wrap>
-                      <Typography.Text strong>{risk.title}</Typography.Text>
-                      <Tag color={levelColorMap[risk.level]}>
-                        {levelLabelMap[risk.level]}
-                      </Tag>
-                      {risk.confidence ? (
-                        <Tag
-                          color={
-                            confidenceColorMap[risk.confidence] || 'default'
-                          }
-                        >
-                          {confidenceLabelMap[risk.confidence] ||
-                            `${risk.confidence} 置信`}
-                        </Tag>
-                      ) : null}
-                      {renderRiskStatusTag(risk.status)}
-                      {risk.aiVerified ? (
-                        <Tag color="processing">AI</Tag>
-                      ) : null}
-                    </Space>
-                  }
-                  description={
-                    <Space direction="vertical" size={4}>
-                      <Typography.Text type="secondary">
-                        {buildRiskMetaLine(risk)}
-                      </Typography.Text>
-                      {renderRiskLocation(risk.url, true)}
-                      <Typography.Paragraph
-                        type="secondary"
-                        style={{
-                          margin: 0,
-                          display: '-webkit-box',
-                          WebkitBoxOrient: 'vertical',
-                          WebkitLineClamp: 3,
-                          overflow: 'hidden',
-                          whiteSpace: 'normal',
-                        }}
-                      >
-                        {buildRiskSummary(risk)}
-                      </Typography.Paragraph>
-                      {buildRiskHitFeatures(risk).length ? (
-                        <Space wrap size={[4, 4]}>
-                          {buildRiskHitFeatures(risk).map((feature) => (
-                            <Tag key={feature.key} color={feature.color}>
-                              {feature.label}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    flexWrap: 'wrap',
+                    width: '100%',
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <List.Item.Meta
+                      style={{ minWidth: 0 }}
+                      title={
+                        <Space wrap style={{ minWidth: 0 }}>
+                          <Typography.Text strong>{risk.title}</Typography.Text>
+                          <Tag color={levelColorMap[risk.level]}>
+                            {levelLabelMap[risk.level]}
+                          </Tag>
+                          {risk.confidence ? (
+                            <Tag
+                              color={
+                                confidenceColorMap[risk.confidence] || 'default'
+                              }
+                            >
+                              {confidenceLabelMap[risk.confidence] ||
+                                `${risk.confidence} 置信`}
                             </Tag>
-                          ))}
+                          ) : null}
+                          {renderRiskStatusTag(risk.status)}
+                          {risk.aiVerified ? (
+                            <Tag color="processing">AI</Tag>
+                          ) : null}
                         </Space>
-                      ) : null}
-                    </Space>
-                  }
-                />
+                      }
+                      description={
+                        <Space
+                          direction="vertical"
+                          size={4}
+                          style={{ width: '100%', minWidth: 0 }}
+                        >
+                          <Typography.Text type="secondary">
+                            {buildRiskMetaLine(risk)}
+                          </Typography.Text>
+                          <div style={{ width: '100%', minWidth: 0 }}>
+                            {renderRiskLocation(risk.url, true)}
+                          </div>
+                          <Typography.Paragraph
+                            type="secondary"
+                            style={{
+                              margin: 0,
+                              display: '-webkit-box',
+                              WebkitBoxOrient: 'vertical',
+                              WebkitLineClamp: 3,
+                              overflow: 'hidden',
+                              whiteSpace: 'normal',
+                              wordBreak: 'break-word',
+                              overflowWrap: 'anywhere',
+                            }}
+                          >
+                            {buildRiskSummary(risk)}
+                          </Typography.Paragraph>
+                          {buildRiskHitFeatures(risk).length ? (
+                            <Space wrap size={[4, 4]}>
+                              {buildRiskHitFeatures(risk).map((feature) => (
+                                <Tag key={feature.key} color={feature.color}>
+                                  {feature.label}
+                                </Tag>
+                              ))}
+                            </Space>
+                          ) : null}
+                        </Space>
+                      }
+                    />
+                  </div>
+                  <Space
+                    wrap
+                    size={[8, 8]}
+                    onClick={(event) => event.stopPropagation()}
+                    style={{
+                      flexShrink: 0,
+                      width: 'auto',
+                      marginLeft: 'auto',
+                    }}
+                  >
+                    <Select
+                      key="status"
+                      data-testid={`risk-status-select-${risk.id}`}
+                      size="small"
+                      value={normalizeRiskStatus(risk.status)}
+                      options={riskStatusOptions}
+                      style={{ width: 110 }}
+                      loading={updatingRiskId === risk.id}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(value) => void handleUpdateStatus(risk, value)}
+                    />
+                    <Button
+                      key="detail"
+                      type="link"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSelected(risk);
+                      }}
+                    >
+                      查看详情
+                    </Button>
+                    <Popconfirm
+                      key="delete"
+                      title="确认删除该漏洞记录吗？"
+                      description="删除后将无法恢复。"
+                      disabled={deleting}
+                      onConfirm={(event) => {
+                        event?.stopPropagation?.();
+                        void handleDelete(risk);
+                      }}
+                      okButtonProps={{ danger: true, loading: deleting }}
+                      onCancel={(event) => event?.stopPropagation?.()}
+                    >
+                      <Button
+                        danger
+                        type="link"
+                        disabled={deleting}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  </Space>
+                </div>
               </List.Item>
             );
           }}
