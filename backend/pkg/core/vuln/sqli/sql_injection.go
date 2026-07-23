@@ -53,7 +53,7 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 	// 对每个参数都进行测试
 	for _, paramName := range paramNames {
 		// 检测布尔盲注
-		vulnerable, evidenceResp, boolPayload := isBooleanBasedSQLInjection(apiReq, paramName, baselineResp)
+		vulnerable, evidenceResp, boolPayload := isBooleanBasedSQLInjection(apiReq, paramName)
 		if vulnerable {
 			return &SQLInjectionResult{
 				Vulnerable:     true,
@@ -129,36 +129,38 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 	}, nil
 }
 
-// oddBody1: 1个单引号的响应
-// oddBody3: 3个单引号的响应
-// evenBody2: 2个单引号的响应
-// evenBody4: 4个单引号的响应
-// 如果奇数响应组（1和3）相同，偶数响应组（2和4）相同，但两组不同，则判断为布尔盲注
-func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string, baseline responseSnapshot) (bool, responseSnapshot, string) {
-	for _, probe := range buildBooleanProbePairs(apiReq.Params[paramName]) {
-		falseResp, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.falsePayload))
+// 奇数单引号组（1 个和 3 个）的响应必须相同，偶数单引号组（2 个和 4 个）的响应也必须相同，
+// 且两组响应必须不同，才判定为布尔盲注。基线响应不参与该判定。
+func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string) (bool, responseSnapshot, string) {
+	for _, probe := range buildBooleanProbePairs() {
+		oddResp1, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.oddPayload1))
 		if err != nil {
 			continue
 		}
-		trueResp, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.truePayload))
+		oddResp3, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.oddPayload3))
+		if err != nil {
+			continue
+		}
+		evenResp2, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.evenPayload2))
+		if err != nil {
+			continue
+		}
+		evenResp4, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.evenPayload4))
 		if err != nil {
 			continue
 		}
 
-		if !responsesEquivalent(baseline, trueResp) {
+		if !responsesEquivalent(oddResp1, oddResp3) || !responsesEquivalent(evenResp2, evenResp4) {
 			continue
 		}
-		if !responsesDifferent(baseline, falseResp) {
+		if !responsesDifferent(oddResp1, evenResp2) {
 			continue
 		}
-		if !responsesDifferent(falseResp, trueResp) {
-			continue
-		}
-		if isStatusOnlyEmptyBodyDifference(baseline, falseResp, trueResp) {
+		if isStatusOnlyEmptyBodyDifference(oddResp1, evenResp2) {
 			continue
 		}
 
-		return true, falseResp, probe.falsePayload
+		return true, oddResp1, probe.oddPayload1
 	}
 
 	return false, responseSnapshot{}, ""
@@ -319,33 +321,21 @@ func hasNewErrorBasedSignal(bodyLower string, baselineLower string) bool {
 }
 
 type booleanProbePair struct {
-	falsePayload string
-	truePayload  string
+	oddPayload1  string
+	oddPayload3  string
+	evenPayload2 string
+	evenPayload4 string
 }
 
-func buildBooleanProbePairs(currentValues []string) []booleanProbePair {
-	probes := []booleanProbePair{
-		{falsePayload: "'", truePayload: "''"},
+func buildBooleanProbePairs() []booleanProbePair {
+	return []booleanProbePair{
+		{
+			oddPayload1:  "'",
+			oddPayload3:  "'''",
+			evenPayload2: "''",
+			evenPayload4: "''''",
+		},
 	}
-	if isLikelyNumericValue(currentValues) {
-		probes = append(probes, booleanProbePair{falsePayload: "-1", truePayload: "-0"})
-	}
-	return probes
-}
-
-func isLikelyNumericValue(values []string) bool {
-	if len(values) == 0 {
-		return false
-	}
-	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" {
-			continue
-		}
-		matched, _ := regexp.MatchString(`^-?\d+(\.\d+)?$`, trimmed)
-		return matched
-	}
-	return false
 }
 
 // buildTestRequest 构建测试请求
@@ -456,12 +446,10 @@ func responsesDifferent(left, right responseSnapshot) bool {
 	return !responsesEquivalent(left, right)
 }
 
-func isStatusOnlyEmptyBodyDifference(baseline, falseResp, trueResp responseSnapshot) bool {
-	return canonicalizeBody(baseline.body) == "" &&
-		canonicalizeBody(falseResp.body) == "" &&
-		canonicalizeBody(trueResp.body) == "" &&
-		responsesEquivalent(baseline, trueResp) &&
-		baseline.statusCode != falseResp.statusCode
+func isStatusOnlyEmptyBodyDifference(left, right responseSnapshot) bool {
+	return canonicalizeBody(left.body) == "" &&
+		canonicalizeBody(right.body) == "" &&
+		left.statusCode != right.statusCode
 }
 
 func canonicalizeBody(body string) string {

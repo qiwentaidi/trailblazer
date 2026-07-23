@@ -59,7 +59,7 @@ func TestSQLInjectionSkipsExistingErrorPageFalsePositive(t *testing.T) {
 	}
 }
 
-func TestSQLInjectionBooleanBasedRequiresStableDifferentialPattern(t *testing.T) {
+func TestSQLInjectionBooleanBasedRequiresParityWithinBothQuoteGroups(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := r.URL.Query().Get("user")
 		switch user {
@@ -81,31 +81,29 @@ func TestSQLInjectionBooleanBasedRequiresStableDifferentialPattern(t *testing.T)
 	if err != nil {
 		t.Fatalf("TestSQLInjection returned error: %v", err)
 	}
-	if result == nil || !result.Vulnerable {
-		t.Fatalf("expected boolean-based vulnerability, got %#v", result)
+	if result == nil {
+		t.Fatal("expected non-nil result")
 	}
-	if result.Type != "boolean-based" {
-		t.Fatalf("expected boolean-based, got %q", result.Type)
-	}
-	if result.Payload != "'" {
-		t.Fatalf("expected single-quote payload, got %q", result.Payload)
+	if result.Vulnerable {
+		t.Fatalf("quote-only response difference must not be reported as boolean SQL injection, got %#v", result)
 	}
 }
 
-func TestSQLInjectionBooleanBasedAllowsDynamicBaselineContent(t *testing.T) {
+func TestSQLInjectionBooleanBasedDoesNotRequireMatchingBaseline(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user := r.URL.Query().Get("user")
 		switch user {
-		case "'":
-			http.Error(w, "query failed trace=1234567890123", http.StatusInternalServerError)
-			return
-		case "''", "":
+		case "'", "'''":
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok trace=1234567890123 request=550e8400-e29b-41d4-a716-446655440000"))
+			_, _ = w.Write([]byte("odd quote group trace=1234567890123"))
+			return
+		case "''", "''''":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("even quote group trace=1234567890123 request=550e8400-e29b-41d4-a716-446655440000"))
 			return
 		default:
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok trace=1234567890123"))
+			_, _ = w.Write([]byte("baseline differs from both probe groups"))
 		}
 	}))
 	defer server.Close()
@@ -115,7 +113,13 @@ func TestSQLInjectionBooleanBasedAllowsDynamicBaselineContent(t *testing.T) {
 		t.Fatalf("TestSQLInjection returned error: %v", err)
 	}
 	if result == nil || !result.Vulnerable {
-		t.Fatalf("expected boolean-based vulnerability with dynamic baseline, got %#v", result)
+		t.Fatalf("expected boolean-based vulnerability without a matching baseline, got %#v", result)
+	}
+	if result.Type != "boolean-based" {
+		t.Fatalf("expected boolean-based, got %q", result.Type)
+	}
+	if result.Payload != "'" {
+		t.Fatalf("expected one-quote payload, got %q", result.Payload)
 	}
 }
 
@@ -146,7 +150,7 @@ func TestSQLInjectionBooleanBasedSkipsGenericValidationError(t *testing.T) {
 func TestSQLInjectionBooleanBasedSkipsEmptyBodyStatusOnlyDifference(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("user") {
-		case "'":
+		case "'", "'''":
 			w.WriteHeader(http.StatusBadRequest)
 		default:
 			w.WriteHeader(http.StatusOK)
