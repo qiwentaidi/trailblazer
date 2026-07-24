@@ -27,7 +27,11 @@ temp/
 # Package manager caches
 .pnpm-store/
 
-# Frontend dependencies and build output
+# Core SDK local output
+dist/
+release/
+
+# Frontend dependencies and build output (legacy paths, if a checkout still has them)
 frontend-admin/node_modules/
 frontend-admin/dist/
 frontend-admin/.swc/
@@ -40,27 +44,21 @@ frontend-admin/src/.umi-production/
 frontend-admin/src/.umi-test/
 frontend-admin/coverage/
 
-# Go / backend local artifacts
-backend/config.yaml
-backend/webassets/dist/*
-!backend/webassets/dist/.keep
-backend/*.db
-backend/*.db-*
-backend/*.sqlite
-backend/*.sqlite3
-backend/prfm-route-test
-backend/urls.txt
-backend/sourceMap/
+# Go local artifacts
+config.local.yaml
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+prfm-route-test
+urls.txt
+sourceMap/
 
 # Generated reports and example outputs
-backend/example/**/report.html
-backend/example/**/*_scan_result.json
-backend/example/**/*_summary.json
-backend/example/**/callback_result.json
-
-# Nested repository metadata
-backend/.git/
-backend/.git/**
+example/**/report.html
+example/**/*_scan_result.json
+example/**/*_summary.json
+example/**/callback_result.json
 
 # Local product documents not needed for source control
 *.doc

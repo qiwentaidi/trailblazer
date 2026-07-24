@@ -1,42 +1,15 @@
-name: Build
+name: SDK CI
 
 on:
-  workflow_dispatch:
   push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
 
 jobs:
-  build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runs_on }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: darwin-arm64
-            runs_on: macos-14
-            artifact_name: trailblazer-darwin-arm64
-          - name: darwin-amd64
-            runs_on: macos-13
-            artifact_name: trailblazer-darwin-amd64
-          - name: windows-amd64
-            runs_on: windows-latest
-            artifact_name: trailblazer-windows-amd64
-          - name: linux-amd64
-            runs_on: ubuntu-latest
-            artifact_name: trailblazer-linux-amd64
-          - name: linux-arm64
-            runs_on: ubuntu-24.04-arm
-            artifact_name: trailblazer-linux-arm64
-
-    defaults:
-      run:
-        shell: bash
-
+  test:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,48 +17,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: backend/go.mod
+          go-version-file: go.mod
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
+      - name: Test
+        run: go test ./...
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-          cache-dependency-path: frontend-admin/pnpm-lock.yaml
-
-      - name: Install frontend dependencies
-        working-directory: frontend-admin
-        run: pnpm install --frozen-lockfile
-
-      - name: Build current platform
-        run: ./build.sh current
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: |
-            dist/${{ matrix.artifact_name }}*
-          if-no-files-found: error
-
-  release:
-    name: Publish Release Assets
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-
-      - name: Publish assets to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/**/*
+      - name: Vet
+        run: go vet ./...

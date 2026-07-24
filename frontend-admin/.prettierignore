@@ -1,9 +1,0 @@
-node_modules
-dist
-.umi
-build
-coverage
-public
-node_modules
-.umi
-.umi-production
