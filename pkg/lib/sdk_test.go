@@ -19,6 +19,25 @@ func TestNewScanOptionsEnablesVulnDetectionByDefault(t *testing.T) {
 	}
 }
 
+func TestResolveSDKScanIdentityUsesCustomTaskAndVersion(t *testing.T) {
+	taskID, version := resolveSDKScanIdentity(&ScanOptions{
+		TaskID:  "hephaestus-task-1",
+		Version: 7,
+	})
+
+	if taskID != "hephaestus-task-1" || version != 7 {
+		t.Fatalf("expected custom scan identity, got taskID=%q version=%d", taskID, version)
+	}
+}
+
+func TestResolveSDKScanIdentityUsesSafeDefaults(t *testing.T) {
+	taskID, version := resolveSDKScanIdentity(&ScanOptions{Version: -1})
+
+	if taskID != "cli-mode" || version != 0 {
+		t.Fatalf("expected default scan identity, got taskID=%q version=%d", taskID, version)
+	}
+}
+
 func TestResolveSDKVulnDetectionOptionsDisablesAllModulesWhenGlobalSwitchOff(t *testing.T) {
 	resolved := resolveSDKVulnDetectionOptions(VulnDetectionOptions{
 		Enabled:      false,

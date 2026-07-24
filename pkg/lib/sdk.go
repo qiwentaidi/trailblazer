@@ -85,6 +85,12 @@ type ScanCallback func(event ScanEvent) bool
 
 // ScanOptions SDK扫描选项配置
 type ScanOptions struct {
+	// TaskID 扫描任务标识。嵌入业务系统时可传入业务侧任务 ID；为空时使用 cli-mode。
+	TaskID string `json:"taskId,omitempty"`
+
+	// Version 扫描任务版本。与 TaskID 一起用于 DataStore 查询和结果关联；小于等于 0 表示不限定版本。
+	Version int `json:"version,omitempty"`
+
 	// OpenAI配置
 	OpenAI OpenAIOptions `json:"openai"`
 
@@ -453,6 +459,8 @@ func mergeSDKStaticHintBundles(base, extra crawl.StaticEndpointHintBundle) crawl
 
 // ScanResult CLI扫描结果
 type ScanResult struct {
+	TaskID   string         `json:"taskId,omitempty"`
+	Version  int            `json:"version,omitempty"`
 	Targets  []TargetResult `json:"targets"`
 	ScanTime string         `json:"scanTime"`
 	Summary  Summary        `json:"summary"`
@@ -1342,6 +1350,20 @@ func DecryptProtocolTrace(trace ProtocolTrace, keyHex, ciphertext string) (*Decr
 	return protocoltool.DecryptWithTrace(toDatabaseProtocolTrace(trace), keyHex, ciphertext)
 }
 
+func resolveSDKScanIdentity(options *ScanOptions) (string, int) {
+	const defaultTaskID = "cli-mode"
+
+	taskID := strings.TrimSpace(options.TaskID)
+	if taskID == "" {
+		taskID = defaultTaskID
+	}
+	version := options.Version
+	if version < 0 {
+		version = 0
+	}
+	return taskID, version
+}
+
 // PerformScan 执行CLI扫描（无数据库操作）- SDK版本，使用ScanOptions
 func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 	if options == nil {
@@ -1352,7 +1374,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 	}
 
 	startTime := time.Now()
-	const cliTaskID = "cli-mode"
+	scanTaskID, scanVersion := resolveSDKScanIdentity(options)
 
 	var allTargetResults []TargetResult
 	var totalTreeNodes int
@@ -1386,8 +1408,8 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		}
 
 		targetScanResult, err := scanexec.RunTarget(targetURL, scanexec.Options{
-			TaskID:         cliTaskID,
-			Version:        0,
+			TaskID:         scanTaskID,
+			Version:        scanVersion,
 			BlackDomain:    options.BlackDomain,
 			HighRiskRouter: options.HighRiskRouter,
 			Authentication: options.Authentication,
@@ -1429,11 +1451,11 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		if memoryStore, ok := options.DataStore.(*database.MemoryScanDataStore); ok {
 			apiResources := make([]database.APIResource, 0, len(targetScanResult.APIRecords))
 			for _, record := range targetScanResult.APIRecords {
-				apiResources = append(apiResources, convertNetworkRecordToDatabaseAPIResource(cliTaskID, 0, record))
+				apiResources = append(apiResources, convertNetworkRecordToDatabaseAPIResource(scanTaskID, scanVersion, record))
 			}
-			memoryStore.AddJSResources(cliTaskID, targetScanResult.JSResources)
-			memoryStore.AddAPIResources(cliTaskID, apiResources)
-			memoryStore.AddProtocolTraces(cliTaskID, normalizeProtocolTraceRecordsForStore(targetScanResult.ProtocolTraces))
+			memoryStore.AddJSResources(scanTaskID, targetScanResult.JSResources)
+			memoryStore.AddAPIResources(scanTaskID, apiResources)
+			memoryStore.AddProtocolTraces(scanTaskID, normalizeProtocolTraceRecordsForStore(targetScanResult.ProtocolTraces))
 		}
 
 		targetResult := TargetResult{
@@ -1557,9 +1579,11 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		totalAssets.APIRoots += len(targetResult.Assets.APIRoots)
 	}
 
-	crawl.ClearTestedURLs(cliTaskID)
+	crawl.ClearTestedURLs(scanTaskID)
 
 	result := &ScanResult{
+		TaskID:   scanTaskID,
+		Version:  scanVersion,
 		Targets:  allTargetResults,
 		ScanTime: time.Now().Format("2006-01-02 15:04:05"),
 		Summary: Summary{

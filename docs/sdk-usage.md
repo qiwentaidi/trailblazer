@@ -200,29 +200,43 @@ func main() {
 
 如果你不传 `options.DataStore`，SDK 会自动使用内存存储完成一次扫描过程中的上下文复用。
 
+### 5.1.1 平台任务标识
+
+如果 SDK 被任务平台嵌入，建议显式设置任务 ID 和版本，使扫描引擎与 `DataStore` 使用同一组查询条件：
+
+```go
+options := sdk.NewScanOptions()
+options.TaskID = taskID
+options.Version = currentVersion
+options.DataStore = myStore
+
+result, err := sdk.PerformScan(targets, options)
+```
+
+未设置时，SDK 使用 `TaskID=cli-mode` 和 `Version=0`，适合 CLI 或单次本地扫描。
+
 ## 5.2 自定义 DataStore 示例
 
-如果你的系统不使用 ES，而是使用自己的数据库，可以实现 `database.ScanDataStore`：
+如果你的系统不使用 ES，而是使用自己的数据库，可以实现 `sdk.ScanDataStore`：
 
 ```go
 package main
 
 import (
-	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 )
 
 type MyStore struct{}
 
-func (s *MyStore) ListJSResources(taskID string, versions ...int) ([]database.JSResource, error) {
+func (s *MyStore) ListJSResources(taskID string, versions ...int) ([]sdk.JSResource, error) {
 	return nil, nil
 }
 
-func (s *MyStore) ListAPIResources(taskID string, versions ...int) ([]database.APIResource, error) {
+func (s *MyStore) ListAPIResources(taskID string, versions ...int) ([]sdk.APIResource, error) {
 	return nil, nil
 }
 
-func (s *MyStore) ListProtocolTraces(taskID string, versions ...int) ([]database.ProtocolTraceRecord, error) {
+func (s *MyStore) ListProtocolTraces(taskID string, versions ...int) ([]sdk.ProtocolTraceRecord, error) {
 	return nil, nil
 }
 

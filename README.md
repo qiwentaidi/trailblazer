@@ -91,6 +91,28 @@ options := sdk.NewScanOptions()
 options.VulnDetection.Enabled = false
 ```
 
+### 平台嵌入：自定义 TaskID 和 Version
+
+如果 SDK 被任务平台、Web 服务或 worker 嵌入，建议传入业务侧的任务标识：
+
+```go
+options := sdk.NewScanOptions()
+options.TaskID = taskID
+options.Version = currentVersion
+options.DataStore = myStore
+
+result, err := sdk.PerformScan(targets, options)
+```
+
+SDK 会使用这两个值：
+
+- 传给扫描引擎，关联 JS、API 和协议轨迹
+- 作为 `DataStore` 查询条件
+- 写入 `ScanResult.TaskID` 和 `ScanResult.Version`
+- 在未设置时回退到 `TaskID=cli-mode`、`Version=0`
+
+`Version` 小于等于 0 表示不限定版本，适合 CLI；平台任务建议传入正数版本。
+
 ## 4. 目标输入与结果输出
 
 `PerformScan` 接收 URL 列表：
@@ -214,22 +236,22 @@ options.VulnDetection.Upload.Enabled = false
 
 SDK 默认使用内存存储复用单次扫描过程中捕获的 JS、API 请求/响应和协议轨迹，因此单次扫描不依赖 Elasticsearch。
 
-如果需要跨任务保存这些上下文，可以实现 `database.ScanDataStore` 并注入：
+如果需要跨任务保存这些上下文，可以实现 `sdk.ScanDataStore` 并注入：
 
 ```go
-import "github.com/qiwentaidi/trailblazer/pkg/core/database"
+import "github.com/qiwentaidi/trailblazer/pkg/sdk"
 
 type MyStore struct{}
 
-func (s *MyStore) ListJSResources(taskID string, versions ...int) ([]database.JSResource, error) {
+func (s *MyStore) ListJSResources(taskID string, versions ...int) ([]sdk.JSResource, error) {
 	return nil, nil
 }
 
-func (s *MyStore) ListAPIResources(taskID string, versions ...int) ([]database.APIResource, error) {
+func (s *MyStore) ListAPIResources(taskID string, versions ...int) ([]sdk.APIResource, error) {
 	return nil, nil
 }
 
-func (s *MyStore) ListProtocolTraces(taskID string, versions ...int) ([]database.ProtocolTraceRecord, error) {
+func (s *MyStore) ListProtocolTraces(taskID string, versions ...int) ([]sdk.ProtocolTraceRecord, error) {
 	return nil, nil
 }
 
