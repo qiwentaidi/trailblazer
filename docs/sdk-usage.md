@@ -688,6 +688,15 @@ fmt.Println(evidence.Summary)
 
 ## 13. 协议轨迹解密
 
+前端 runtime 解密会在隔离容器中执行目标站点提取出的 Node.js 模块。运行该能力需要本机可用的 Docker 或 Podman；默认使用 `node:22-alpine` 镜像。可通过以下环境变量调整容器运行时和镜像：
+
+```bash
+export TRAILBLAZER_CONTAINER_RUNTIME=docker
+export TRAILBLAZER_NODE_WORKER_IMAGE=node:22-alpine
+```
+
+worker 默认使用非 root 用户、只读根文件系统、无网络、无宿主目录挂载，并限制 CPU、内存、进程数和执行时长。若没有可用容器运行时，runtime 解密会返回错误，并继续由上层解密流程处理其他可用路径。
+
 调用：
 
 ```go

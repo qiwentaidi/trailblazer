@@ -9,6 +9,8 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
@@ -18,16 +20,17 @@ import (
 var ESClient *elasticsearch.Client
 
 func InitESClient(db config.Elasticsearch) {
-	var err error
+	address := strings.TrimSpace(db.Address)
+	transport, err := buildESTransport(address)
+	if err != nil {
+		log.Fatalf("创建 ES 网络传输失败: %v", err)
+	}
+
 	ESClient, err = elasticsearch.NewClient(elasticsearch.Config{
-		Addresses: []string{db.Address}, // 如果启用了安全认证，加上 Username 和 Password
+		Addresses: []string{address}, // 如果启用了安全认证，加上 Username 和 Password
 		Username:  db.Username,
 		Password:  db.Password,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // 忽略自签名证书验证
-			},
-		},
+		Transport: transport,
 	})
 	if err != nil {
 		log.Fatalf("创建 ES 客户端失败: %v", err)
@@ -35,6 +38,26 @@ func InitESClient(db config.Elasticsearch) {
 
 	// 确保所有必要的索引存在
 	ensureAllIndices()
+}
+
+func buildESTransport(address string) (*http.Transport, error) {
+	parsed, err := url.Parse(strings.TrimSpace(address))
+	if err != nil {
+		return nil, fmt.Errorf("无效的 ES 地址 %q: %w", address, err)
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		return &http.Transport{}, nil
+	case "https":
+		return &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("ES 地址必须使用 http 或 https scheme: %q", address)
+	}
 }
 
 // ensureIndex 确保指定索引存在，如果不存在则创建

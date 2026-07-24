@@ -1,16 +1,13 @@
 package protocoltool
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/qiwentaidi/trailblazer/pkg/core/database"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 )
 
 var (
@@ -53,33 +50,11 @@ func DecryptWithStoredFrontendRuntime(taskID, ciphertext, functionPath, moduleID
 		return "", err
 	}
 
-	scriptPath, cleanup, err := buildFrontendRuntimeScript(rootModuleID, keySeed, normalizeCiphertext(ciphertext), functionPath, modules)
+	script, err := buildFrontendRuntimeScript(rootModuleID, keySeed, normalizeCiphertext(ciphertext), functionPath, modules)
 	if err != nil {
 		return "", err
 	}
-	defer cleanup()
-
-	cmd := exec.Command("node", scriptPath)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		return "", fmt.Errorf("frontend runtime decrypt failed: %s", errMsg)
-	}
-
-	var result frontendRuntimeResult
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
-		return "", fmt.Errorf("invalid frontend runtime output: %w", err)
-	}
-	if strings.TrimSpace(result.Plaintext) == "" {
-		return "", fmt.Errorf("frontend runtime returned empty plaintext")
-	}
-	return result.Plaintext, nil
+	return executeNodeWorker(script)
 }
 
 func extractFrontendDecryptRuntime(jsResources []database.JSResource, preferredModuleID string) (string, string, map[string]webpackModule, error) {
@@ -304,22 +279,13 @@ func collectWebpackDependencies(rootID string, modules map[string]webpackModule)
 	return required
 }
 
-func buildFrontendRuntimeScript(rootModuleID, keySeed, ciphertext, functionPath string, modules map[string]webpackModule) (string, func(), error) {
+func buildFrontendRuntimeScript(rootModuleID, keySeed, ciphertext, functionPath string, modules map[string]webpackModule) (string, error) {
 	moduleIDs := make([]string, 0, len(modules))
 	for id := range modules {
 		moduleIDs = append(moduleIDs, id)
 	}
 	slices.Sort(moduleIDs)
 
-	dir, err := os.MkdirTemp("", "trailblazer-frontend-runtime-*")
-	if err != nil {
-		return "", nil, err
-	}
-	cleanup := func() {
-		_ = os.RemoveAll(dir)
-	}
-
-	scriptPath := filepath.Join(dir, "decrypt.js")
 	var builder strings.Builder
 	builder.WriteString(`globalThis.window = globalThis;
 globalThis.self = globalThis;
@@ -413,12 +379,7 @@ const plaintext = decryptFn(ciphertext, key);
 process.stdout.write(JSON.stringify({ plaintext }));
 `)
 
-	if err := os.WriteFile(scriptPath, []byte(builder.String()), 0o600); err != nil {
-		cleanup()
-		return "", nil, err
-	}
-
-	return scriptPath, cleanup, nil
+	return builder.String(), nil
 }
 
 func strconvQuote(value string) string {

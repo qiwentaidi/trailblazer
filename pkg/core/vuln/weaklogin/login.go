@@ -69,7 +69,6 @@ func buildWeakLoginChromeFlags() map[string]any {
 	return map[string]any{
 		"headless":              true,
 		"disable-gpu":           true,
-		"no-sandbox":            true,
 		"disable-dev-shm-usage": true,
 		"disable-extensions":    true,
 		"disable-plugins":       true,
@@ -83,7 +82,6 @@ func buildWeakLoginExecAllocatorOptions() []chromedp.ExecAllocatorOption {
 	return append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", flags["headless"]),
 		chromedp.Flag("disable-gpu", flags["disable-gpu"]),
-		chromedp.Flag("no-sandbox", flags["no-sandbox"]),
 		chromedp.Flag("disable-dev-shm-usage", flags["disable-dev-shm-usage"]),
 		chromedp.Flag("disable-extensions", flags["disable-extensions"]),
 		chromedp.Flag("disable-plugins", flags["disable-plugins"]),
