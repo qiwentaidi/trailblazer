@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/qiwentaidi/trailblazer/pkg/lib"
+	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 	"log"
 )
 
@@ -12,7 +12,7 @@ func main() {
 	fmt.Println("=== Trailblazer SDK 基本使用示例 ===")
 
 	// 1. 创建扫描选项
-	options := lib.NewScanOptions()
+	options := sdk.NewScanOptions()
 
 	// 2. 配置OpenAI（可选）
 	options.OpenAI.Enabled = false // 设置为true并配置API密钥以启用AI检测
@@ -59,7 +59,7 @@ func main() {
 
 	fmt.Printf("开始扫描 %d 个目标...\n\n", len(targets))
 
-	result, err := lib.PerformScan(targets, options)
+	result, err := sdk.PerformScan(targets, options)
 	if err != nil {
 		log.Fatalf("扫描失败: %v", err)
 	}

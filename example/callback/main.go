@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/qiwentaidi/trailblazer/pkg/lib"
+	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 	"log"
 	"os"
 	"sync"
@@ -15,7 +15,7 @@ func main() {
 	fmt.Println("=== Trailblazer SDK 回调示例 ===")
 
 	// 创建扫描选项
-	options := lib.NewScanOptions()
+	options := sdk.NewScanOptions()
 
 	// 配置黑名单域名（来自 config.yaml black-domain）
 	options.BlackDomain = []string{
@@ -122,15 +122,15 @@ func main() {
 	var vulnCount, assetCount int
 
 	// 设置回调函数（类似nuclei的方式）
-	options.OnResult = func(event lib.ScanEvent) bool {
+	options.OnResult = func(event sdk.ScanEvent) bool {
 		mu.Lock()
 		defer mu.Unlock()
 
 		switch event.Type {
-		case lib.EventTypeVulnerability:
+		case sdk.EventTypeVulnerability:
 			// 发现漏洞
 			vulnCount++
-			vuln, ok := event.Data.(lib.VulnerabilityItem)
+			vuln, ok := event.Data.(sdk.VulnerabilityItem)
 			if !ok {
 				fmt.Printf("[警告] 无法解析漏洞数据\n")
 				return true
@@ -158,7 +158,7 @@ func main() {
 				// 可以在这里添加紧急处理逻辑
 			}
 
-		case lib.EventTypeAsset:
+		case sdk.EventTypeAsset:
 			// 发现资产
 			assetCount++
 			asset := event.Data.(map[string]interface{})
@@ -168,8 +168,8 @@ func main() {
 				asset["value"],
 				asset["source"])
 
-		case lib.EventTypeAPIRecord:
-			record, ok := event.Data.(lib.APIRecord)
+		case sdk.EventTypeAPIRecord:
+			record, ok := event.Data.(sdk.APIRecord)
 			if !ok {
 				fmt.Printf("[警告] 无法解析接口记录数据\n")
 				return true
@@ -180,8 +180,8 @@ func main() {
 				record.URL,
 				record.ResponseCode)
 
-		case lib.EventTypeProtocolTrace:
-			trace, ok := event.Data.(lib.ProtocolTrace)
+		case sdk.EventTypeProtocolTrace:
+			trace, ok := event.Data.(sdk.ProtocolTrace)
 			if !ok {
 				fmt.Printf("[警告] 无法解析协议轨迹数据\n")
 				return true
@@ -194,7 +194,7 @@ func main() {
 				fmt.Printf("  已捕获响应明文，长度: %d\n", len(plaintext))
 			}
 
-		case lib.EventTypeProgress:
+		case sdk.EventTypeProgress:
 			// 进度更新
 			progress := event.Data.(map[string]interface{})
 			if status, ok := progress["status"].(string); ok {
@@ -210,7 +210,7 @@ func main() {
 				}
 			}
 
-		case lib.EventTypeError:
+		case sdk.EventTypeError:
 			// 错误信息
 			errData := event.Data.(map[string]interface{})
 			fmt.Printf("[%s] [错误] %s: %s\n",
@@ -230,7 +230,7 @@ func main() {
 	fmt.Printf("开始扫描 %d 个目标（实时回调模式）...\n\n", len(targets))
 
 	startTime := time.Now()
-	result, err := lib.PerformScan(targets, options)
+	result, err := sdk.PerformScan(targets, options)
 	if err != nil {
 		log.Fatalf("扫描失败: %v", err)
 	}

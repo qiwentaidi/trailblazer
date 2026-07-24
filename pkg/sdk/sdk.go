@@ -10,29 +10,31 @@ import (
 )
 
 type (
-	VulnRecord            = lib.VulnRecord
-	ScanEventType         = lib.ScanEventType
-	ScanEvent             = lib.ScanEvent
-	ScanCallback          = lib.ScanCallback
-	ScanOptions           = lib.ScanOptions
-	OpenAIOptions         = lib.OpenAIOptions
-	VulnDetectionOptions  = lib.VulnDetectionOptions
-	ScanResult            = lib.ScanResult
-	TargetResult          = lib.TargetResult
-	APIRecord             = lib.APIRecord
-	ProtocolTrace         = lib.ProtocolTrace
-	AssetInfo             = lib.AssetInfo
-	SensitiveItem         = lib.SensitiveItem
-	VulnerabilityItem     = lib.VulnerabilityItem
-	Summary               = lib.Summary
-	AssetCount            = lib.AssetCount
-	SeverityCount         = lib.SeverityCount
-	AuxiliaryCount        = lib.AuxiliaryCount
-	FindingDigest         = lib.FindingDigest
-	VulnerabilityOverview = lib.VulnerabilityOverview
-	DecryptResult         = lib.DecryptResult
-	VulnCollector         = lib.VulnCollector
-	CLIVulnCollector      = lib.CLIVulnCollector
+	VulnRecord             = lib.VulnRecord
+	ScanEventType          = lib.ScanEventType
+	ScanEvent              = lib.ScanEvent
+	ScanCallback           = lib.ScanCallback
+	ScanOptions            = lib.ScanOptions
+	OpenAIOptions          = lib.OpenAIOptions
+	VulnDetectionOptions   = lib.VulnDetectionOptions
+	ScanResult             = lib.ScanResult
+	TargetResult           = lib.TargetResult
+	APIRecord              = lib.APIRecord
+	ProtocolTrace          = lib.ProtocolTrace
+	AssetInfo              = lib.AssetInfo
+	SensitiveItem          = lib.SensitiveItem
+	VulnerabilityItem      = lib.VulnerabilityItem
+	Summary                = lib.Summary
+	AssetCount             = lib.AssetCount
+	SeverityCount          = lib.SeverityCount
+	AuxiliaryCount         = lib.AuxiliaryCount
+	FindingDigest          = lib.FindingDigest
+	VulnerabilityOverview  = lib.VulnerabilityOverview
+	DecryptResult          = lib.DecryptResult
+	TraceEvidence          = lib.TraceEvidence
+	TraceVariantSuggestion = lib.TraceVariantSuggestion
+	VulnCollector          = lib.VulnCollector
+	CLIVulnCollector       = lib.CLIVulnCollector
 )
 
 const (
@@ -49,6 +51,7 @@ var (
 	LoadScanOptionsFromFile    = lib.LoadScanOptionsFromFile
 	PerformScan                = lib.PerformScan
 	PerformScanWithConfigFile  = lib.PerformScanWithConfigFile
+	AnalyzeProtocolTrace       = lib.AnalyzeProtocolTrace
 	DecryptProtocolTrace       = lib.DecryptProtocolTrace
 	NewCLIVulnCollector        = lib.NewCLIVulnCollector
 	NewSDKVulnCollectorAdapter = lib.NewSDKVulnCollectorAdapter

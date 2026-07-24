@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/qiwentaidi/trailblazer/pkg/lib"
+	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 	"log"
 	"os"
 	"path/filepath"
@@ -15,12 +15,11 @@ func main() {
 	// 获取配置文件路径（相对于当前工作目录）
 	configPath := "config.yaml"
 
-	// 如果配置文件不存在，尝试从backend目录查找
+	// 如果配置文件不存在，尝试从项目根目录查找
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// 尝试从backend目录查找
-		backendConfig := filepath.Join("..", "..", "config.yaml")
-		if _, err := os.Stat(backendConfig); err == nil {
-			configPath = backendConfig
+		rootConfig := filepath.Join("..", "..", "config.yaml")
+		if _, err := os.Stat(rootConfig); err == nil {
+			configPath = rootConfig
 		} else {
 			log.Fatalf("配置文件不存在: %s\n请确保配置文件存在，或使用代码方式配置选项", configPath)
 		}
@@ -29,7 +28,7 @@ func main() {
 	fmt.Printf("从配置文件加载: %s\n", configPath)
 
 	// 从配置文件加载选项
-	options, err := lib.LoadScanOptionsFromFile(configPath)
+	options, err := sdk.LoadScanOptionsFromFile(configPath)
 	if err != nil {
 		log.Fatalf("加载配置文件失败: %v", err)
 	}
@@ -38,17 +37,17 @@ func main() {
 	options.OutputPath = "config_scan_result.json"
 
 	// 设置回调函数（可选）
-	options.OnResult = func(event lib.ScanEvent) bool {
+	options.OnResult = func(event sdk.ScanEvent) bool {
 		switch event.Type {
-		case lib.EventTypeVulnerability:
-			if vuln, ok := event.Data.(lib.VulnerabilityItem); ok {
+		case sdk.EventTypeVulnerability:
+			if vuln, ok := event.Data.(sdk.VulnerabilityItem); ok {
 				fmt.Printf("[漏洞] [%s] %s - %s\n", vuln.Level, vuln.Title, vuln.URL)
 			}
-		case lib.EventTypeAsset:
+		case sdk.EventTypeAsset:
 			if asset, ok := event.Data.(map[string]interface{}); ok {
 				fmt.Printf("[资产] %s: %s\n", asset["type"], asset["value"])
 			}
-		case lib.EventTypeProgress:
+		case sdk.EventTypeProgress:
 			progress := event.Data.(map[string]interface{})
 			if status, ok := progress["status"].(string); ok {
 				if status == "started" {
@@ -66,7 +65,7 @@ func main() {
 
 	fmt.Printf("\n开始扫描 %d 个目标...\n\n", len(targets))
 
-	result, err := lib.PerformScan(targets, options)
+	result, err := sdk.PerformScan(targets, options)
 	if err != nil {
 		log.Fatalf("扫描失败: %v", err)
 	}

@@ -45,6 +45,7 @@ frontend-admin/src/.umi-test/
 frontend-admin/coverage/
 
 # Go local artifacts
+config.yaml
 config.local.yaml
 *.db
 *.db-*

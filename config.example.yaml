@@ -1,0 +1,30 @@
+# Trailblazer SDK/CLI 的安全示例配置。
+#
+# 使用方式：
+#   cp config.example.yaml config.yaml
+#   trailblazer -u https://example.com --config config.yaml
+#
+# config.yaml 只用于本地配置，不要提交真实 API Key、账号或密码。
+# SDK 不依赖 Elasticsearch 或 Web 配置；这里仅保留 SDK 扫描需要的字段。
+
+openai:
+  enabled: false
+  api_key: ""
+  base_url: ""
+  model: ""
+
+vuln-detection:
+  enabled: true
+  sql-injection:
+    enabled: true
+  lfi:
+    enabled: true
+  ssrf:
+    enabled: true
+  redirect:
+    enabled: true
+  xss:
+    enabled: true
+  # 文件上传属于主动写入型探测，示例中默认关闭。
+  upload:
+    enabled: false

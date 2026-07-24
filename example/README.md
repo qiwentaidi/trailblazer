@@ -11,8 +11,6 @@ example/
 │   └── main.go
 ├── callback/          # 回调函数示例（类似nuclei）
 │   └── main.go
-├── local-import/      # 本地引入 + 最小入侵桥接示例
-│   └── main.go
 └── config/            # 从配置文件加载示例
     └── main.go
 ```
@@ -64,19 +62,6 @@ go run main.go
 - 如何在加载配置后修改选项
 - 如何结合配置文件和回调函数使用
 
-### 本地引入示例
-
-```bash
-cd example/local-import
-go run main.go
-```
-
-这个示例展示了：
-- 如何以本地 module 方式引用 SDK
-- 如何用一层桥接函数减少对业务代码的侵入
-- 如何把 SDK 事件回流到你自己的接收器
-- 如何为非 ES 场景预留自定义 `DataStore`
-
 ## 使用场景
 
 ### 1. 基本扫描
@@ -84,8 +69,8 @@ go run main.go
 适用于简单的扫描需求，只需要最终结果：
 
 ```go
-options := lib.NewScanOptions()
-result, err := lib.PerformScan([]string{"https://example.com"}, options)
+options := sdk.NewScanOptions()
+result, err := sdk.PerformScan([]string{"https://example.com"}, options)
 ```
 
 ### 2. 实时回调
@@ -97,7 +82,7 @@ result, err := lib.PerformScan([]string{"https://example.com"}, options)
 - 发送到消息队列
 
 ```go
-options.OnResult = func(event lib.ScanEvent) bool {
+options.OnResult = func(event sdk.ScanEvent) bool {
     // 处理事件
     return true // 继续扫描
 }
@@ -108,7 +93,7 @@ options.OnResult = func(event lib.ScanEvent) bool {
 适用于需要统一管理配置的场景：
 
 ```go
-options, err := lib.LoadScanOptionsFromFile("config.yaml")
+options, err := sdk.LoadScanOptionsFromFile("config.yaml")
 ```
 
 ### 4. 自定义存储
@@ -116,7 +101,7 @@ options, err := lib.LoadScanOptionsFromFile("config.yaml")
 适用于你不希望依赖 ES，而要把上下文存到自己的数据库：
 
 ```go
-options := lib.NewScanOptions()
+options := sdk.NewScanOptions()
 options.DataStore = myStore
 ```
 
@@ -167,6 +152,7 @@ SDK 支持以下事件类型：
 ## 更多信息
 
 更多详细信息请参考：
-- SDK 源码: lib/sdk.go`
-- SDK 文档: sdk-usage.md`
-- 主程序: `trailblazer-server/main.go`
+
+- SDK 入口: [`pkg/sdk/sdk.go`](../pkg/sdk/sdk.go)
+- SDK 文档: [`docs/sdk-usage.md`](../docs/sdk-usage.md)
+- 服务端项目: [`trailblazer-server`](../../trailblazer-server)

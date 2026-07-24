@@ -15,8 +15,9 @@
 
 本文档对应当前仓库中的 SDK 实现：
 
-- SDK 入口文件: [pkg/lib/sdk.go](/Users/qwtd/WorkManageCode/github.com/qiwentaidi/trailblazer/pkg/sdk/sdk.go)
-- 协议证据分析: [pkg/lib/protocol_trace_evidence.go](/Users/qwtd/WorkManageCode/github.com/qiwentaidi/trailblazer/pkg/sdk/protocol_trace_evidence.go)
+- SDK 入口文件: [`pkg/sdk/sdk.go`](../pkg/sdk/sdk.go)
+- SDK 实现文件: [`pkg/lib/sdk.go`](../pkg/lib/sdk.go)
+- 协议证据分析: [`pkg/lib/protocol_trace_evidence.go`](../pkg/lib/protocol_trace_evidence.go)
 
 ## 2. 接口总览
 
@@ -56,13 +57,13 @@ SDK 的扫描链路依赖浏览器运行时抓取能力，因此运行环境需�
 当前仓库模块名为：
 
 ```go
-module trailblazer
+module github.com/qiwentaidi/trailblazer
 ```
 
 在同仓库内调用时，导入路径为：
 
 ```go
-import "github.com/qiwentaidi/github.com/qiwentaidi/trailblazer/pkg/sdk"
+import "github.com/qiwentaidi/trailblazer/pkg/sdk"
 ```
 
 如果你要把 SDK 独立发布到其他仓库，请按你实际发布后的 module path 修改导入路径。
@@ -95,7 +96,7 @@ replace github.com/qiwentaidi/trailblazer => ../trailblazer
 之后你的业务代码中直接：
 
 ```go
-import "github.com/qiwentaidi/github.com/qiwentaidi/trailblazer/pkg/sdk"
+import "github.com/qiwentaidi/trailblazer/pkg/sdk"
 ```
 
 即可完成本地联调。
@@ -112,7 +113,7 @@ import "github.com/qiwentaidi/github.com/qiwentaidi/trailblazer/pkg/sdk"
 原则：
 
 - 保留你现有的任务调度、日志、数据库、消息队列
-- 只在现有扫描入口新增一次 `lib.PerformScan`
+- 只在现有扫描入口新增一次 `sdk.PerformScan`
 - 用 `options.OnResult` 把结果桥接回你的系统
 - 不要求接入 Trailblazer 的前端、任务表、ES 存储
 - 如果你已有自己的数据库，可以实现 `database.ScanDataStore` 直接接入分析链路
@@ -176,14 +177,14 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/qiwentaidi/github.com/qiwentaidi/trailblazer/pkg/sdk"
+	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 )
 
 func main() {
-	options := lib.NewScanOptions()
+	options := sdk.NewScanOptions()
 	options.VulnDetection.Enabled = true
 
-	result, err := lib.PerformScan([]string{
+	result, err := sdk.PerformScan([]string{
 		"https://example.com",
 	}, options)
 	if err != nil {
@@ -208,7 +209,7 @@ package main
 
 import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
-	"github.com/qiwentaidi/github.com/qiwentaidi/trailblazer/pkg/sdk"
+	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 )
 
 type MyStore struct{}
@@ -226,9 +227,9 @@ func (s *MyStore) ListProtocolTraces(taskID string, versions ...int) ([]database
 }
 
 func main() {
-	options := lib.NewScanOptions()
+	options := sdk.NewScanOptions()
 	options.DataStore = &MyStore{}
-	_, _ = lib.PerformScan([]string{"https://example.com"}, options)
+	_, _ = sdk.PerformScan([]string{"https://example.com"}, options)
 }
 ```
 
@@ -250,40 +251,40 @@ package scanner
 import (
 	"log"
 
-	"github.com/qiwentaidi/github.com/qiwentaidi/trailblazer/pkg/sdk"
+	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 )
 
 type EventSink interface {
-	OnAsset(event lib.ScanEvent)
-	OnRisk(event lib.ScanEvent)
-	OnVulnerability(event lib.ScanEvent)
-	OnAPIRecord(event lib.ScanEvent)
-	OnProtocolTrace(event lib.ScanEvent)
+	OnAsset(event sdk.ScanEvent)
+	OnRisk(event sdk.ScanEvent)
+	OnVulnerability(event sdk.ScanEvent)
+	OnAPIRecord(event sdk.ScanEvent)
+	OnProtocolTrace(event sdk.ScanEvent)
 }
 
-func RunTrailblazerScan(target string, sink EventSink) (*lib.ScanResult, error) {
-	options := lib.NewScanOptions()
+func RunTrailblazerScan(target string, sink EventSink) (*sdk.ScanResult, error) {
+	options := sdk.NewScanOptions()
 	options.OpenAI.Enabled = false
 	options.VulnDetection.Enabled = true
 	options.OutputPath = ""
 
-	options.OnResult = func(event lib.ScanEvent) bool {
+	options.OnResult = func(event sdk.ScanEvent) bool {
 		switch event.Type {
-		case lib.EventTypeAsset:
+		case sdk.EventTypeAsset:
 			sink.OnAsset(event)
-		case lib.EventTypeVulnerability:
+		case sdk.EventTypeVulnerability:
 			sink.OnVulnerability(event)
-		case lib.EventTypeAPIRecord:
+		case sdk.EventTypeAPIRecord:
 			sink.OnAPIRecord(event)
-		case lib.EventTypeProtocolTrace:
+		case sdk.EventTypeProtocolTrace:
 			sink.OnProtocolTrace(event)
-		case lib.EventTypeError:
+		case sdk.EventTypeError:
 			log.Printf("[trailblazer] %v", event.Data)
 		}
 		return true
 	}
 
-	return lib.PerformScan([]string{target}, options)
+	return sdk.PerformScan([]string{target}, options)
 }
 ```
 
@@ -299,12 +300,12 @@ func RunTrailblazerScan(target string, sink EventSink) (*lib.ScanResult, error) 
 ### 5.1 调用方式
 
 ```go
-options, err := lib.LoadScanOptionsFromFile("config.yaml")
+options, err := sdk.LoadScanOptionsFromFile("config.yaml")
 if err != nil {
 	log.Fatalf("load config failed: %v", err)
 }
 
-result, err := lib.PerformScan([]string{"https://example.com"}, options)
+result, err := sdk.PerformScan([]string{"https://example.com"}, options)
 if err != nil {
 	log.Fatalf("scan failed: %v", err)
 }
@@ -313,7 +314,7 @@ if err != nil {
 ### 5.2 直接输出结果文件
 
 ```go
-err := lib.PerformScanWithConfigFile(
+err := sdk.PerformScanWithConfigFile(
 	[]string{"https://example.com"},
 	"config.yaml",
 	"./result.json",
@@ -327,7 +328,7 @@ if err != nil {
 
 `ScanOptions` 定义位置：
 
-- [pkg/lib/sdk.go](/Users/qwtd/WorkManageCode/github.com/qiwentaidi/trailblazer/pkg/sdk/sdk.go)
+- [`pkg/sdk/sdk.go`](../pkg/sdk/sdk.go)
 
 核心字段如下。
 
@@ -446,7 +447,7 @@ options.OutputPath = "./scan-result.json"
 回调函数，用于实时消费扫描过程中的事件。
 
 ```go
-options.OnResult = func(event lib.ScanEvent) bool {
+options.OnResult = func(event sdk.ScanEvent) bool {
 	// 返回 true 继续
 	// 返回 false 停止
 	return true
@@ -495,22 +496,22 @@ type ScanEvent struct {
 ### 7.4 回调示例
 
 ```go
-options.OnResult = func(event lib.ScanEvent) bool {
+options.OnResult = func(event sdk.ScanEvent) bool {
 	switch event.Type {
-	case lib.EventTypeProgress:
+	case sdk.EventTypeProgress:
 		fmt.Printf("[progress] %#v\n", event.Data)
-	case lib.EventTypeAPIRecord:
-		record, ok := event.Data.(lib.APIRecord)
+	case sdk.EventTypeAPIRecord:
+		record, ok := event.Data.(sdk.APIRecord)
 		if ok {
 			fmt.Printf("[api] %s %s\n", record.Method, record.URL)
 		}
-	case lib.EventTypeProtocolTrace:
-		trace, ok := event.Data.(lib.ProtocolTrace)
+	case sdk.EventTypeProtocolTrace:
+		trace, ok := event.Data.(sdk.ProtocolTrace)
 		if ok {
 			fmt.Printf("[trace] %s %s\n", trace.Method, trace.RequestURL)
 		}
-	case lib.EventTypeVulnerability:
-		vuln, ok := event.Data.(lib.VulnerabilityItem)
+	case sdk.EventTypeVulnerability:
+		vuln, ok := event.Data.(sdk.VulnerabilityItem)
 		if ok {
 			fmt.Printf("[vuln] %s %s\n", vuln.Level, vuln.URL)
 		}
@@ -635,7 +636,7 @@ SDK 当前已接入静态 hint 构建，用于增强：
 调用：
 
 ```go
-evidence := lib.AnalyzeProtocolTrace(trace)
+evidence := sdk.AnalyzeProtocolTrace(trace)
 ```
 
 返回：
@@ -666,7 +667,7 @@ type TraceEvidence struct {
 示例：
 
 ```go
-evidence := lib.AnalyzeProtocolTrace(trace)
+evidence := sdk.AnalyzeProtocolTrace(trace)
 fmt.Println(evidence.Status)
 fmt.Println(evidence.Summary)
 ```
@@ -676,7 +677,7 @@ fmt.Println(evidence.Summary)
 调用：
 
 ```go
-result, err := lib.DecryptProtocolTrace(trace, "", ciphertext)
+result, err := sdk.DecryptProtocolTrace(trace, "", ciphertext)
 if err != nil {
 	log.Fatalf("decrypt failed: %v", err)
 }
@@ -721,7 +722,7 @@ fmt.Println(result.Plaintext)
 直接用：
 
 ```go
-result, err := lib.PerformScan(urls, options)
+result, err := sdk.PerformScan(urls, options)
 ```
 
 ### 13.2 要把结果写到其他平台
@@ -793,11 +794,11 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/qiwentaidi/github.com/qiwentaidi/trailblazer/pkg/sdk"
+	"github.com/qiwentaidi/trailblazer/pkg/sdk"
 )
 
 func main() {
-	options := lib.NewScanOptions()
+	options := sdk.NewScanOptions()
 	options.VulnDetection.Enabled = true
 	options.BlackDomain = []string{"github.com", "google.com"}
 	options.Placeholder = map[string]string{
@@ -806,28 +807,28 @@ func main() {
 		"name":    "test",
 	}
 
-	options.OnResult = func(event lib.ScanEvent) bool {
+	options.OnResult = func(event sdk.ScanEvent) bool {
 		switch event.Type {
-		case lib.EventTypeProgress:
+		case sdk.EventTypeProgress:
 			fmt.Printf("[progress] %#v\n", event.Data)
-		case lib.EventTypeAPIRecord:
-			if record, ok := event.Data.(lib.APIRecord); ok {
+		case sdk.EventTypeAPIRecord:
+			if record, ok := event.Data.(sdk.APIRecord); ok {
 				fmt.Printf("[api] %s %s code=%d\n", record.Method, record.URL, record.ResponseCode)
 			}
-		case lib.EventTypeProtocolTrace:
-			if trace, ok := event.Data.(lib.ProtocolTrace); ok {
-				evidence := lib.AnalyzeProtocolTrace(trace)
+		case sdk.EventTypeProtocolTrace:
+			if trace, ok := event.Data.(sdk.ProtocolTrace); ok {
+				evidence := sdk.AnalyzeProtocolTrace(trace)
 				fmt.Printf("[trace] %s %s status=%s\n", trace.Method, trace.RequestURL, evidence.Status)
 			}
-		case lib.EventTypeVulnerability:
-			if vuln, ok := event.Data.(lib.VulnerabilityItem); ok {
+		case sdk.EventTypeVulnerability:
+			if vuln, ok := event.Data.(sdk.VulnerabilityItem); ok {
 				fmt.Printf("[vuln] %s %s %s\n", vuln.Level, vuln.Type, vuln.URL)
 			}
 		}
 		return true
 	}
 
-	result, err := lib.PerformScan([]string{
+	result, err := sdk.PerformScan([]string{
 		"https://example.com",
 	}, options)
 	if err != nil {
