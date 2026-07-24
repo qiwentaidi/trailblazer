@@ -666,6 +666,10 @@ type VulnerabilityItem struct {
 	ConfidenceReason   string                       `json:"confidenceReason,omitempty"`
 	DataExposure       string                       `json:"dataExposure,omitempty"`
 	ExposureReason     string                       `json:"exposureReason,omitempty"`
+	AIReviewVerdict    string                       `json:"aiReviewVerdict,omitempty"`
+	AIReviewType       string                       `json:"aiReviewType,omitempty"`
+	AIReviewConfidence int                          `json:"aiReviewConfidence,omitempty"`
+	AIReviewReason     string                       `json:"aiReviewReason,omitempty"`
 	StaticContexts     []database.VulnStaticContext `json:"staticContexts,omitempty"`
 	Description        string                       `json:"description"`
 	AIVerified         bool                         `json:"aiVerified"`
@@ -1674,6 +1678,10 @@ func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityIt
 			ConfidenceReason:   vuln.ConfidenceReason,
 			DataExposure:       vuln.DataExposure,
 			ExposureReason:     vuln.ExposureReason,
+			AIReviewVerdict:    vuln.AIReviewVerdict,
+			AIReviewType:       vuln.AIReviewType,
+			AIReviewConfidence: vuln.AIReviewConfidence,
+			AIReviewReason:     vuln.AIReviewReason,
 			StaticContexts:     append([]database.VulnStaticContext(nil), vuln.StaticContexts...),
 			Description:        vuln.Description,
 			AIVerified:         vuln.AIVerified,

@@ -435,66 +435,215 @@ func marshalRouteList(routes []string) string {
 	return strings.Join(lines, "\n")
 }
 
-// JudgeDenyTemplate 使用 AI 判断未授权候选是否应作为误报过滤。
-// 返回：(是否应过滤, 原因, 错误)
-func (c *SensitiveInfoChecker) JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error) {
-	systemPrompt := `你是一个 Web 安全漏洞复核专家。用户会提供一个接口请求报文和响应片段。请结合请求中的路径、查询参数、请求语义与响应内容，判断该未授权访问候选是否应当作为误报过滤。
+// AITruth is a tri-state value used when the request/response does not prove
+// whether a resource is protected or whether sensitive data was returned.
+// The parser accepts both the documented strings and JSON booleans so a model
+// that ignores the string-only instruction does not silently corrupt the
+// review result.
+type AITruth string
 
-判断为 TRUE（应过滤）的情况：
-1. 响应核心语义是未登录、未授权、权限不足、token失效、认证失败、禁止访问、统一网关拒绝
-2. 响应只是通用错误壳子，业务数据为空且没有真实业务字段含义
-3. 响应明显是平台统一封装的拦截结果，而不是该接口自己的业务结果
-4. 请求路径和响应片段共同表明这是无需登录即可调用的公共接口/能力，例如图形验证码、滑块/人机挑战、验证码会话或 challenge、登录/注册/找回密码前的短信或邮箱验证码发送、公开健康检查或公开基础配置。即使响应是 JSON，只要其业务语义是生成验证码、挑战令牌、验证码标识或临时校验材料，也应过滤。
+const (
+	AITruthTrue    AITruth = "true"
+	AITruthFalse   AITruth = "false"
+	AITruthUnknown AITruth = "unknown"
+)
 
-判断为 FALSE（保留为未授权候选）的情况：
-1. 响应明确表示 success / code=0 / ok=true / 查询成功 等正常业务语义
-2. 响应中包含真实业务字段、业务对象、列表、统计值、配置项，即使 data 为空数组也仍可能是正常查询结果
-3. 请求和响应可以对上真实业务接口语义，而不是统一的权限拒绝
-4. 仅凭模糊路径或单个字段无法确认是公共能力时，优先返回 false，避免误伤真实业务数据
-
-只输出 JSON，不要输出其他任何内容，格式固定为：
-{"is_deny_template": true/false, "reason": "简短原因"}`
-
-	if len(requestPreview) > 2000 {
-		requestPreview = requestPreview[:2000] + "...(请求已截断)"
+func (v *AITruth) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err == nil {
+		value = strings.ToLower(strings.TrimSpace(value))
+	} else {
+		var boolean bool
+		if err := json.Unmarshal(data, &boolean); err != nil {
+			return fmt.Errorf("AI truth must be true, false, or unknown")
+		}
+		if boolean {
+			value = string(AITruthTrue)
+		} else {
+			value = string(AITruthFalse)
+		}
 	}
-	if len(responsePreview) > 3000 {
-		responsePreview = responsePreview[:3000] + "...(响应已截断)"
+
+	switch AITruth(value) {
+	case AITruthTrue, AITruthFalse, AITruthUnknown:
+		*v = AITruth(value)
+		return nil
+	default:
+		return fmt.Errorf("invalid AI truth value %q", value)
+	}
+}
+
+// UnauthorizedAIReview is the structured result returned by the unauthorized
+// access reviewer. It is intentionally kept separate from VulnRecord so the
+// model output can be validated before it affects scan results.
+type UnauthorizedAIReview struct {
+	Verdict            string   `json:"verdict"`
+	VulnerabilityType  string   `json:"vulnerability_type"`
+	Confidence         int      `json:"confidence"`
+	ProtectedResource  AITruth  `json:"protected_resource"`
+	SensitiveDataFound AITruth  `json:"sensitive_data_found"`
+	Evidence           []string `json:"evidence"`
+	Reason             string   `json:"reason"`
+	Impact             string   `json:"impact"`
+	RiskLevel          string   `json:"risk_level"`
+	MissingEvidence    []string `json:"missing_evidence"`
+	RecommendedAction  string   `json:"recommended_action"`
+}
+
+func (r UnauthorizedAIReview) IsFalsePositive() bool {
+	return r.Verdict == "FALSE_POSITIVE" ||
+		r.VulnerabilityType == "PUBLIC_API" ||
+		r.VulnerabilityType == "BUSINESS_ERROR"
+}
+
+func validateUnauthorizedAIReview(review UnauthorizedAIReview) error {
+	valid := func(value string, allowed ...string) bool {
+		for _, item := range allowed {
+			if value == item {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !valid(review.Verdict, "CONFIRMED", "FALSE_POSITIVE", "NEEDS_MANUAL_REVIEW") {
+		return fmt.Errorf("invalid unauthorized AI verdict %q", review.Verdict)
+	}
+	if !valid(review.VulnerabilityType,
+		"UNAUTHENTICATED_ACCESS", "PRIVILEGE_ESCALATION", "IDOR",
+		"INFORMATION_DISCLOSURE", "PUBLIC_API", "BUSINESS_ERROR", "UNKNOWN") {
+		return fmt.Errorf("invalid unauthorized AI vulnerability type %q", review.VulnerabilityType)
+	}
+	if review.Confidence < 0 || review.Confidence > 100 {
+		return fmt.Errorf("unauthorized AI confidence must be between 0 and 100")
+	}
+	if !valid(string(review.ProtectedResource), string(AITruthTrue), string(AITruthFalse), string(AITruthUnknown)) {
+		return fmt.Errorf("invalid protected_resource value %q", review.ProtectedResource)
+	}
+	if !valid(string(review.SensitiveDataFound), string(AITruthTrue), string(AITruthFalse), string(AITruthUnknown)) {
+		return fmt.Errorf("invalid sensitive_data_found value %q", review.SensitiveDataFound)
+	}
+	if review.VulnerabilityType == "PUBLIC_API" && review.SensitiveDataFound == AITruthTrue {
+		return fmt.Errorf("public API cannot be marked as returning sensitive data")
+	}
+	if !valid(review.RiskLevel, "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "NONE", "UNKNOWN") {
+		return fmt.Errorf("invalid unauthorized AI risk level %q", review.RiskLevel)
+	}
+	if review.Verdict == "CONFIRMED" {
+		if review.ProtectedResource != AITruthTrue {
+			return fmt.Errorf("confirmed unauthorized access requires protected_resource=true")
+		}
+		if review.VulnerabilityType == "PUBLIC_API" || review.VulnerabilityType == "BUSINESS_ERROR" || review.VulnerabilityType == "UNKNOWN" {
+			return fmt.Errorf("confirmed verdict cannot use vulnerability type %q", review.VulnerabilityType)
+		}
+		if len(review.Evidence) == 0 {
+			return fmt.Errorf("confirmed unauthorized access requires evidence")
+		}
+	}
+	return nil
+}
+
+var requiredUnauthorizedAIReviewFields = []string{
+	"verdict", "vulnerability_type", "confidence", "protected_resource",
+	"sensitive_data_found", "evidence", "reason", "impact", "risk_level",
+	"missing_evidence", "recommended_action",
+}
+
+func decodeUnauthorizedAIReview(data []byte) (UnauthorizedAIReview, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return UnauthorizedAIReview{}, err
+	}
+	for _, field := range requiredUnauthorizedAIReviewFields {
+		value, ok := raw[field]
+		if !ok || strings.TrimSpace(string(value)) == "null" {
+			return UnauthorizedAIReview{}, fmt.Errorf("missing required unauthorized AI review field %q", field)
+		}
+	}
+
+	var review UnauthorizedAIReview
+	if err := json.Unmarshal(data, &review); err != nil {
+		return UnauthorizedAIReview{}, err
+	}
+	if err := validateUnauthorizedAIReview(review); err != nil {
+		return UnauthorizedAIReview{}, err
+	}
+	return review, nil
+}
+
+func extractJSONObject(reply string) ([]byte, error) {
+	jsonStart := strings.Index(reply, "{")
+	jsonEnd := strings.LastIndex(reply, "}")
+	if jsonStart == -1 || jsonEnd <= jsonStart {
+		return nil, fmt.Errorf("AI reply does not contain a JSON object")
+	}
+	return []byte(reply[jsonStart : jsonEnd+1]), nil
+}
+
+// ReviewUnauthorizedAccess independently reviews an unauthenticated API
+// candidate. A public API or a business error is not treated as a finding.
+func (c *SensitiveInfoChecker) ReviewUnauthorizedAccess(targetURL, requestPreview, responsePreview string) (UnauthorizedAIReview, error) {
+	systemPrompt := `你是一名应用安全审计复核专家。请独立判断一个“未授权访问”候选是否是真实安全风险，不要默认接受扫描器结论。
+
+只有同时满足以下条件，才能输出 verdict=CONFIRMED：
+1. 请求未携带有效身份凭证，或当前身份权限不足；
+2. 访问了按接口语义应受保护的资源，或执行了受限操作；
+3. 响应包含敏感数据、他人数据、管理数据，或产生了实际安全影响。
+
+以下情况不能单独证明漏洞成立：HTTP 200、未携带 Cookie/Token、动态加载、响应长度大于 0、路径包含 user/config/policy/admin、响应包含 code=0，或接口被前端调用。
+
+应判定为 FALSE_POSITIVE 的典型情况：
+- 登录前初始化、确实不含敏感字段的公开配置、CDN 地址、客户端版本、页面文案、帮助/协议/政策信息；
+- 验证码、挑战、登录/注册/找回密码前置接口；
+- 公开健康检查、公开字典或公共基础数据；
+- HTTP 200 但业务码明确表示错误、data=null 或 no data；空数组本身不能单独证明是误报。
+
+必须结合响应字段判断是否真的有敏感数据。不要因为出现 config、version、server、trace、user、policy 等关键词就推断高风险。无法证明资源受保护或影响时，输出 NEEDS_MANUAL_REVIEW，不得输出 CONFIRMED。
+
+只输出严格 JSON，不要 Markdown，不要附加解释。所有字段都必须存在；confidence 是 0 到 100 的整数；protected_resource 和 sensitive_data_found 只能是 true、false 或 unknown 字符串；evidence 和 missing_evidence 必须是字符串数组。
+
+JSON 格式：
+{"verdict":"CONFIRMED|FALSE_POSITIVE|NEEDS_MANUAL_REVIEW","vulnerability_type":"UNAUTHENTICATED_ACCESS|PRIVILEGE_ESCALATION|IDOR|INFORMATION_DISCLOSURE|PUBLIC_API|BUSINESS_ERROR|UNKNOWN","confidence":0,"protected_resource":"true|false|unknown","sensitive_data_found":"true|false|unknown","evidence":[],"reason":"","impact":"","risk_level":"CRITICAL|HIGH|MEDIUM|LOW|INFO|NONE|UNKNOWN","missing_evidence":[],"recommended_action":""}`
+
+	if len(targetURL) > 1000 {
+		targetURL = targetURL[:1000] + "...(URL已截断)"
+	}
+	if len(requestPreview) > 2500 {
+		requestPreview = requestPreview[:2500] + "...(请求已截断)"
+	}
+	if len(responsePreview) > 5000 {
+		responsePreview = responsePreview[:5000] + "...(响应已截断)"
 	}
 
 	reply, err := c.chatComplete(
 		systemPrompt,
-		fmt.Sprintf("请判断以下未授权访问候选是否应过滤。务必结合请求路径与响应片段识别公共接口/能力。\n\n请求报文：\n%s\n\n响应报文：\n%s", requestPreview, responsePreview),
+		fmt.Sprintf("目标 URL：%s\n\n请求报文：\n%s\n\n响应报文：\n%s", targetURL, requestPreview, responsePreview),
 		0.1,
-		180,
+		700,
 	)
+	if err != nil {
+		return UnauthorizedAIReview{}, err
+	}
+
+	jsonBytes, err := extractJSONObject(reply)
+	if err != nil {
+		return UnauthorizedAIReview{}, fmt.Errorf("failed to parse unauthorized AI review: %w", err)
+	}
+	review, err := decodeUnauthorizedAIReview(jsonBytes)
+	if err != nil {
+		return UnauthorizedAIReview{}, fmt.Errorf("failed to decode unauthorized AI review: %w", err)
+	}
+	return review, nil
+}
+
+// JudgeDenyTemplate preserves the old API for callers that only need a
+// boolean filter decision. New callers should use ReviewUnauthorizedAccess.
+func (c *SensitiveInfoChecker) JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error) {
+	review, err := c.ReviewUnauthorizedAccess("", requestPreview, responsePreview)
 	if err != nil {
 		return false, "", err
 	}
-
-	var result struct {
-		IsDenyTemplate bool   `json:"is_deny_template"`
-		Reason         string `json:"reason"`
-	}
-
-	jsonStart := strings.Index(reply, "{")
-	jsonEnd := strings.LastIndex(reply, "}")
-	if jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart {
-		jsonStr := reply[jsonStart : jsonEnd+1]
-		if err := json.Unmarshal([]byte(jsonStr), &result); err == nil {
-			return result.IsDenyTemplate, strings.TrimSpace(result.Reason), nil
-		}
-	}
-
-	replyLower := strings.ToLower(reply)
-	if strings.Contains(replyLower, `"is_deny_template":true`) || strings.Contains(replyLower, `"is_deny_template": true`) {
-		return true, "", nil
-	}
-	if strings.Contains(replyLower, `"is_deny_template":false`) || strings.Contains(replyLower, `"is_deny_template": false`) {
-		return false, "", nil
-	}
-
-	return false, "", fmt.Errorf("failed to parse deny template judgement: %s", strings.TrimSpace(reply))
+	return review.IsFalsePositive(), strings.TrimSpace(review.Reason), nil
 }
 
 // CheckFileUpload 使用AI检查文件上传响应是否表示上传成功

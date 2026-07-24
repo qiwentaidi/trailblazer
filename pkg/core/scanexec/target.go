@@ -86,6 +86,10 @@ type denyTemplateAIReviewer interface {
 	JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error)
 }
 
+type unauthorizedAIReviewer interface {
+	ReviewUnauthorizedAccess(targetURL, requestPreview, responsePreview string) (crawl.UnauthorizedAIReview, error)
+}
+
 func asDenyTemplateReviewer(checker *crawl.SensitiveInfoChecker) denyTemplateAIReviewer {
 	if checker == nil {
 		return nil
@@ -1017,19 +1021,61 @@ func annotateUnauthorizedNoise(vulns []database.VulnRecord, reviewer denyTemplat
 			continue
 		}
 
-		denyTemplate, _, err := reviewer.JudgeDenyTemplate(vuln.Request, vuln.Response)
-		if err != nil || denyTemplate {
-			if err == nil && cacheKey != "" {
+		var review crawl.UnauthorizedAIReview
+		var err error
+		if structuredReviewer, ok := reviewer.(unauthorizedAIReviewer); ok {
+			review, err = structuredReviewer.ReviewUnauthorizedAccess(vuln.URL, vuln.Request, vuln.Response)
+		} else {
+			// Compatibility path for callers that provide the old boolean reviewer.
+			var denyTemplate bool
+			var reason string
+			denyTemplate, reason, err = reviewer.JudgeDenyTemplate(vuln.Request, vuln.Response)
+			review = crawl.UnauthorizedAIReview{
+				Verdict:           "CONFIRMED",
+				VulnerabilityType: "UNKNOWN",
+				Confidence:        50,
+				Reason:            reason,
+				RiskLevel:         "UNKNOWN",
+			}
+			if denyTemplate {
+				review.Verdict = "FALSE_POSITIVE"
+				review.VulnerabilityType = "UNKNOWN"
+			}
+		}
+		if err != nil {
+			continue
+		}
+		if review.IsFalsePositive() {
+			if cacheKey != "" {
 				filteredTemplates[cacheKey] = struct{}{}
 			}
 			continue
 		}
 
-		vuln.AIVerified = true
+		vuln.AIVerified = review.Verdict == "CONFIRMED"
+		vuln.AIReviewVerdict = review.Verdict
+		vuln.AIReviewType = review.VulnerabilityType
+		vuln.AIReviewConfidence = review.Confidence
+		vuln.AIReviewReason = strings.TrimSpace(review.Reason)
+		if review.Verdict == "NEEDS_MANUAL_REVIEW" {
+			vuln.ConfidenceReason = appendReviewReason(vuln.ConfidenceReason, "AI复核结论: 需人工复核")
+		}
 		filtered = append(filtered, vuln)
 	}
 
 	return filtered
+}
+
+func appendReviewReason(existing, review string) string {
+	existing = strings.TrimSpace(existing)
+	review = strings.TrimSpace(review)
+	if existing == "" {
+		return review
+	}
+	if review == "" {
+		return existing
+	}
+	return existing + "；" + review
 }
 
 var dynamicURIErrorPattern = regexp.MustCompile(`(?i)((?:错误的|无效的|invalid|bad)\s*(?:uri|url)\s*[:：]?\s*)[^"\\]+`)

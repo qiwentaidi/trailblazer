@@ -938,6 +938,10 @@ type VulnRecord struct {
 	DenyTemplateKind   string              `json:"deny_template_kind,omitempty"`
 	DenyTemplateLabel  string              `json:"deny_template_label,omitempty"`
 	DenyTemplateCount  int                 `json:"deny_template_count,omitempty"`
+	AIReviewVerdict    string              `json:"ai_review_verdict,omitempty"`
+	AIReviewType       string              `json:"ai_review_type,omitempty"`
+	AIReviewConfidence int                 `json:"ai_review_confidence,omitempty"`
+	AIReviewReason     string              `json:"ai_review_reason,omitempty"`
 	StaticContexts     []VulnStaticContext `json:"static_contexts,omitempty"`
 	Description        string              `json:"description"`
 	AIVerified         bool                `json:"ai_verified"` // AI辅助验证标记

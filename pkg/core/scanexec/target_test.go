@@ -20,6 +20,20 @@ func (s *denyTemplateReviewerStub) JudgeDenyTemplate(requestPreview, responsePre
 	return s.confirmed, "stub", nil
 }
 
+type structuredUnauthorizedReviewerStub struct {
+	review crawl.UnauthorizedAIReview
+	calls  int
+}
+
+func (s *structuredUnauthorizedReviewerStub) JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error) {
+	return s.review.IsFalsePositive(), s.review.Reason, nil
+}
+
+func (s *structuredUnauthorizedReviewerStub) ReviewUnauthorizedAccess(targetURL, requestPreview, responsePreview string) (crawl.UnauthorizedAIReview, error) {
+	s.calls++
+	return s.review, nil
+}
+
 func TestBindStaticContexts(t *testing.T) {
 	vulns := []database.VulnRecord{
 		{
@@ -280,6 +294,40 @@ func TestAnnotateUnauthorizedNoiseTreatsTypedNilReviewerAsMissing(t *testing.T) 
 	got := annotateUnauthorizedNoise(vulns, reviewer, make(map[string]struct{}))
 	if len(got) != 0 {
 		t.Fatalf("typed-nil reviewer must be treated as missing, got %#v", got)
+	}
+}
+
+func TestAnnotateUnauthorizedNoisePersistsManualStructuredReview(t *testing.T) {
+	vulns := []database.VulnRecord{{
+		Title:    "未授权访问",
+		Type:     "未授权访问",
+		URL:      "https://example.com/resource/client/getCopywriting",
+		Request:  "GET /resource/client/getCopywriting HTTP/1.1",
+		Response: `{"code":0,"data":{"labelInfo":{"workbenchLabel":"demo"}}}`,
+	}}
+	reviewer := &structuredUnauthorizedReviewerStub{review: crawl.UnauthorizedAIReview{
+		Verdict:            "NEEDS_MANUAL_REVIEW",
+		VulnerabilityType:  "UNKNOWN",
+		Confidence:         45,
+		ProtectedResource:  crawl.AITruthUnknown,
+		SensitiveDataFound: crawl.AITruthUnknown,
+		Evidence:           []string{},
+		Reason:             "缺少接口权限设计证据",
+		Impact:             "无法确认安全影响",
+		RiskLevel:          "UNKNOWN",
+		MissingEvidence:    []string{"登录前后对比"},
+		RecommendedAction:  "人工确认接口是否设计为公开接口",
+	}}
+
+	annotated := annotateUnauthorizedNoise(vulns, reviewer, make(map[string]struct{}))
+	if len(annotated) != 1 {
+		t.Fatalf("manual-review findings = %#v, want one finding", annotated)
+	}
+	if annotated[0].AIVerified {
+		t.Fatal("manual-review finding must not be marked ai verified")
+	}
+	if annotated[0].AIReviewVerdict != "NEEDS_MANUAL_REVIEW" || annotated[0].AIReviewConfidence != 45 {
+		t.Fatalf("structured AI review was not persisted: %#v", annotated[0])
 	}
 }
 
