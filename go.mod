@@ -12,8 +12,8 @@ require (
 	github.com/google/uuid v1.3.1
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/panjf2000/ants/v2 v2.11.3
-	github.com/qiwentaidi/clients v0.0.3
-	github.com/qiwentaidi/utils v0.0.2
+	github.com/qiwentaidi/clients v0.0.7
+	github.com/qiwentaidi/utils v0.0.5
 	golang.org/x/net v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
 )
