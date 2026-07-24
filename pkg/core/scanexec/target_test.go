@@ -266,6 +266,38 @@ func TestAnnotateUnauthorizedNoiseFiltersDeniedOrUncheckedResults(t *testing.T) 
 	}
 }
 
+func TestAnnotateUnauthorizedNoiseTreatsTypedNilReviewerAsMissing(t *testing.T) {
+	vulns := []database.VulnRecord{{
+		Title:    "未授权访问",
+		Type:     "未授权访问",
+		URL:      "https://example.com/api/a",
+		Request:  "GET /api/a HTTP/1.1",
+		Response: `{"data":{"id":1}}`,
+	}}
+
+	var checker *crawl.SensitiveInfoChecker
+	reviewer := asDenyTemplateReviewer(checker)
+	got := annotateUnauthorizedNoise(vulns, reviewer, make(map[string]struct{}))
+	if len(got) != 0 {
+		t.Fatalf("typed-nil reviewer must be treated as missing, got %#v", got)
+	}
+}
+
+func TestBuildJSFindOptionsLeavesAICheckerNilWhenDisabled(t *testing.T) {
+	options := buildJSFindOptions(
+		Options{},
+		"https://example.com",
+		nil,
+		"https://example.com/api",
+		crawl.StaticEndpointHintBundle{},
+		nil,
+		nil,
+	)
+	if options.AIChecker != nil {
+		t.Fatalf("disabled OpenAI checker must remain nil, got %#v", options.AIChecker)
+	}
+}
+
 func TestAnnotateUnauthorizedNoiseReusesFilteredTemplateWithinScan(t *testing.T) {
 	vulns := []database.VulnRecord{
 		{

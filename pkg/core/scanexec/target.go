@@ -86,6 +86,13 @@ type denyTemplateAIReviewer interface {
 	JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error)
 }
 
+func asDenyTemplateReviewer(checker *crawl.SensitiveInfoChecker) denyTemplateAIReviewer {
+	if checker == nil {
+		return nil
+	}
+	return checker
+}
+
 type denyTemplateAIReviewResult struct {
 	confirmed bool
 }
@@ -234,7 +241,8 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	result.Vulnerabilities = dedupeVulnerabilities(collector.items)
 	bindStaticContexts(result.Vulnerabilities, result.JSResources)
 	filteredUnauthorizedTemplates := make(map[string]struct{})
-	result.Vulnerabilities = annotateUnauthorizedNoise(result.Vulnerabilities, aiChecker, filteredUnauthorizedTemplates)
+	aiReviewer := asDenyTemplateReviewer(aiChecker)
+	result.Vulnerabilities = annotateUnauthorizedNoise(result.Vulnerabilities, aiReviewer, filteredUnauthorizedTemplates)
 	result.Vulnerabilities = append(result.Vulnerabilities, runWeakLoginDetections(targetURL, options, mergedAPIRecords, capturedFrontendRoutes)...)
 	result.Vulnerabilities = append(result.Vulnerabilities, buildAssetVulnerabilities(result.Assets)...)
 	result.Vulnerabilities = dedupeVulnerabilities(result.Vulnerabilities)
@@ -253,6 +261,10 @@ func buildJSFindOptions(
 	dataStore database.ScanDataStore,
 ) structs.JSFindOptions {
 	vulnDetection := resolveVulnDetection(options.VulnDetection)
+	var aiCheckerValue interface{}
+	if aiChecker != nil {
+		aiCheckerValue = aiChecker
+	}
 	return structs.JSFindOptions{
 		TaskID:                    options.TaskID,
 		Version:                   options.Version,
@@ -273,7 +285,7 @@ func buildJSFindOptions(
 		SQLInjConfig:              vulnDetection.SQLInjection,
 		XSSConfig:                 vulnDetection.XSS,
 		UploadConfig:              vulnDetection.Upload,
-		AIChecker:                 aiChecker,
+		AIChecker:                 aiCheckerValue,
 		DataStore:                 dataStore,
 	}
 }
