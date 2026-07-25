@@ -86,6 +86,8 @@ type denyTemplateAIReviewer interface {
 	JudgeDenyTemplate(requestPreview, responsePreview string) (bool, string, error)
 }
 
+const manualUnauthorizedReviewConfidenceCap = 59
+
 type unauthorizedAIReviewer interface {
 	ReviewUnauthorizedAccess(targetURL, requestPreview, responsePreview string) (crawl.UnauthorizedAIReview, error)
 }
@@ -1052,18 +1054,36 @@ func annotateUnauthorizedNoise(vulns []database.VulnRecord, reviewer denyTemplat
 			continue
 		}
 
-		vuln.AIVerified = review.Verdict == "CONFIRMED"
+		// AIVerified means the candidate was reviewed by AI. It does not mean
+		// the AI confirmed a vulnerability; manual-review results remain visible
+		// for SDK consumers that already depend on this flag.
+		vuln.AIVerified = review.Verdict == "CONFIRMED" || review.Verdict == "NEEDS_MANUAL_REVIEW"
 		vuln.AIReviewVerdict = review.Verdict
 		vuln.AIReviewType = review.VulnerabilityType
 		vuln.AIReviewConfidence = review.Confidence
 		vuln.AIReviewReason = strings.TrimSpace(review.Reason)
 		if review.Verdict == "NEEDS_MANUAL_REVIEW" {
-			vuln.ConfidenceReason = appendReviewReason(vuln.ConfidenceReason, "AI复核结论: 需人工复核")
+			if vuln.AIReviewConfidence > manualUnauthorizedReviewConfidenceCap {
+				vuln.AIReviewConfidence = manualUnauthorizedReviewConfidenceCap
+			}
+			vuln.Confidence = downgradeUnauthorizedConfidence(vuln.Confidence)
+			vuln.ConfidenceReason = appendReviewReason(vuln.ConfidenceReason, "AI复核结论: 需人工复核，已降低置信度")
 		}
 		filtered = append(filtered, vuln)
 	}
 
 	return filtered
+}
+
+func downgradeUnauthorizedConfidence(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "high":
+		return "medium"
+	case "medium":
+		return "low"
+	default:
+		return level
+	}
 }
 
 func appendReviewReason(existing, review string) string {

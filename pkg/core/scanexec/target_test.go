@@ -299,16 +299,17 @@ func TestAnnotateUnauthorizedNoiseTreatsTypedNilReviewerAsMissing(t *testing.T) 
 
 func TestAnnotateUnauthorizedNoisePersistsManualStructuredReview(t *testing.T) {
 	vulns := []database.VulnRecord{{
-		Title:    "未授权访问",
-		Type:     "未授权访问",
-		URL:      "https://example.com/resource/client/getCopywriting",
-		Request:  "GET /resource/client/getCopywriting HTTP/1.1",
-		Response: `{"code":0,"data":{"labelInfo":{"workbenchLabel":"demo"}}}`,
+		Title:      "未授权访问",
+		Type:       "未授权访问",
+		Confidence: "high",
+		URL:        "https://example.com/resource/client/getCopywriting",
+		Request:    "GET /resource/client/getCopywriting HTTP/1.1",
+		Response:   `{"code":0,"data":{"labelInfo":{"workbenchLabel":"demo"}}}`,
 	}}
 	reviewer := &structuredUnauthorizedReviewerStub{review: crawl.UnauthorizedAIReview{
 		Verdict:            "NEEDS_MANUAL_REVIEW",
 		VulnerabilityType:  "UNKNOWN",
-		Confidence:         45,
+		Confidence:         90,
 		ProtectedResource:  crawl.AITruthUnknown,
 		SensitiveDataFound: crawl.AITruthUnknown,
 		Evidence:           []string{},
@@ -323,11 +324,14 @@ func TestAnnotateUnauthorizedNoisePersistsManualStructuredReview(t *testing.T) {
 	if len(annotated) != 1 {
 		t.Fatalf("manual-review findings = %#v, want one finding", annotated)
 	}
-	if annotated[0].AIVerified {
-		t.Fatal("manual-review finding must not be marked ai verified")
+	if !annotated[0].AIVerified {
+		t.Fatal("manual-review finding must remain marked as AI reviewed")
 	}
-	if annotated[0].AIReviewVerdict != "NEEDS_MANUAL_REVIEW" || annotated[0].AIReviewConfidence != 45 {
+	if annotated[0].AIReviewVerdict != "NEEDS_MANUAL_REVIEW" || annotated[0].AIReviewConfidence != manualUnauthorizedReviewConfidenceCap {
 		t.Fatalf("structured AI review was not persisted: %#v", annotated[0])
+	}
+	if annotated[0].Confidence != "medium" {
+		t.Fatalf("manual review should downgrade high confidence to medium, got %q", annotated[0].Confidence)
 	}
 }
 
