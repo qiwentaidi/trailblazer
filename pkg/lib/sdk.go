@@ -509,6 +509,7 @@ type TargetResult struct {
 	APIRecords      []APIRecord           `json:"apiRecords,omitempty"`
 	ProtocolTraces  []ProtocolTrace       `json:"protocolTraces,omitempty"`
 	Assets          AssetInfo             `json:"assets"`
+	Fingerprints    []FingerprintItem     `json:"fingerprints,omitempty"`
 	Vulnerabilities []VulnerabilityItem   `json:"vulnerabilities"`
 }
 
@@ -643,6 +644,21 @@ type SensitiveItem struct {
 	Value      string `json:"value"`
 	Source     string `json:"source"`
 	AIVerified bool   `json:"aiVerified,omitempty"`
+}
+
+// FingerprintItem identifies a technology or request characteristic; it is
+// deliberately separate from vulnerabilities.
+type FingerprintItem struct {
+	URL          string                 `json:"url"`
+	StatusCode   int                    `json:"statusCode,omitempty"`
+	Length       int                    `json:"length,omitempty"`
+	Title        string                 `json:"title,omitempty"`
+	Fingerprints []FingerprintMatchItem `json:"fingerprints"`
+	Detect       string                 `json:"detect,omitempty"`
+}
+
+type FingerprintMatchItem struct {
+	Name string `json:"name"`
 }
 
 // VulnerabilityItem 漏洞信息（来自AnalyzeAPI检测）
@@ -1469,6 +1485,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			APIRecords:      make([]APIRecord, 0, len(targetScanResult.APIRecords)),
 			ProtocolTraces:  make([]ProtocolTrace, 0, len(targetScanResult.ProtocolTraces)),
 			Assets:          convertSharedAssets(targetScanResult.Assets),
+			Fingerprints:    convertSharedFingerprints(targetScanResult.Fingerprints),
 			Vulnerabilities: convertSharedVulnerabilities(targetScanResult.Vulnerabilities),
 		}
 		for _, resource := range targetScanResult.JSResources {
@@ -1650,6 +1667,25 @@ func convertSharedSensitiveItemsToSDK(items []scanexec.SensitiveItem) []Sensitiv
 			Value:      item.Value,
 			Source:     item.Source,
 			AIVerified: item.AIVerified,
+		})
+	}
+	return result
+}
+
+func convertSharedFingerprints(items []structs.FingerprintResult) []FingerprintItem {
+	result := make([]FingerprintItem, 0, len(items))
+	for _, item := range items {
+		matches := make([]FingerprintMatchItem, 0, len(item.Fingerprints))
+		for _, match := range item.Fingerprints {
+			matches = append(matches, FingerprintMatchItem{Name: match.Name})
+		}
+		result = append(result, FingerprintItem{
+			URL:          item.URL,
+			StatusCode:   item.StatusCode,
+			Length:       item.Length,
+			Title:        item.Title,
+			Fingerprints: matches,
+			Detect:       item.Detect,
 		})
 	}
 	return result

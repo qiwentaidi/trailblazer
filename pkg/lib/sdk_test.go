@@ -299,6 +299,23 @@ func TestBuildSDKTargetOverviewFocusesOnVulnerabilities(t *testing.T) {
 	}
 }
 
+func TestConvertSharedFingerprintsMatchesFingersGrouping(t *testing.T) {
+	items := convertSharedFingerprints([]structs.FingerprintResult{{
+		URL:        "https://example.com/api/session",
+		StatusCode: 200,
+		Detect:     "DiscoveredRequestShiro",
+		Fingerprints: []structs.FingerprintMatch{
+			{Name: "json-request"},
+			{Name: "shiro"},
+		},
+	}})
+	if len(items) != 1 || items[0].URL != "https://example.com/api/session" ||
+		items[0].StatusCode != 200 || items[0].Detect != "DiscoveredRequestShiro" ||
+		len(items[0].Fingerprints) != 2 || items[0].Fingerprints[0].Name != "json-request" || items[0].Fingerprints[1].Name != "shiro" {
+		t.Fatalf("unexpected fingerprints: %#v", items)
+	}
+}
+
 func TestNewTargetResultFromCapturedActivityNormalizesProtocolTraceForView(t *testing.T) {
 	timestamp := time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC)
 

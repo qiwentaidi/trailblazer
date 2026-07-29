@@ -107,6 +107,9 @@ func TestDefaultScanCaptureOptionsUseFiniteWait(t *testing.T) {
 	if got := options.PostInteractionWait; got != defaultScanPostWait {
 		t.Fatalf("PostInteractionWait = %v, want %v", got, defaultScanPostWait)
 	}
+	if !options.AutoTriggerForms {
+		t.Fatal("expected default scan capture to auto-trigger visible forms")
+	}
 }
 
 func TestNormalizeCaptureOptionsZeroValuesRemainManualForControlledSessions(t *testing.T) {
@@ -647,8 +650,8 @@ func TestCaptureNetworkActivityWithOptionsAutoTriggersVisibleForm(t *testing.T) 
 <html>
   <body>
     <form id="login-form">
-      <input type="text" name="username" placeholder="用户名" />
-      <input type="password" name="password" placeholder="密码" />
+      <input type="text" name="username" placeholder="用户名" value="labuser" />
+      <input type="password" name="password" placeholder="密码" value="labpass" />
       <button type="submit">登录</button>
     </form>
     <script>
@@ -698,11 +701,11 @@ func TestCaptureNetworkActivityWithOptionsAutoTriggersVisibleForm(t *testing.T) 
 	for _, record := range records {
 		if strings.HasSuffix(record.URL, "/api/login") && record.Method == "POST" {
 			matched = true
-			if !strings.Contains(record.RequestBody, "trailblazer_") {
-				t.Fatalf("expected randomized username in request body, got %q", record.RequestBody)
+			if !strings.Contains(record.RequestBody, `"username":"labuser"`) {
+				t.Fatalf("expected prefilled username in request body, got %q", record.RequestBody)
 			}
-			if !strings.Contains(record.RequestBody, "Tb!") {
-				t.Fatalf("expected randomized password in request body, got %q", record.RequestBody)
+			if !strings.Contains(record.RequestBody, `"password":"labpass"`) {
+				t.Fatalf("expected prefilled password in request body, got %q", record.RequestBody)
 			}
 			if !strings.Contains(record.ResponseBody, `"SUCCESS"`) {
 				t.Fatalf("expected login response to be captured, got %q", record.ResponseBody)

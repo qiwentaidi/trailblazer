@@ -74,3 +74,38 @@ type APIRequest struct {
 	PayloadCarrier string            `json:"payloadCarrier,omitempty"`
 	PayloadFormat  string            `json:"payloadFormat,omitempty"`
 }
+
+// DiscoveredRequest is a request observed while the browser loads or interacts
+// with a target.  Special-purpose detectors use this evidence instead of
+// guessing paths, methods, or request payloads.
+//
+// A detector must explicitly choose the fields it needs.  For example, the
+// Shiro detector intentionally uses URL only, whereas a future Fastjson
+// detector can use the request body and Content-Type to select JSON requests.
+type DiscoveredRequest struct {
+	URL              string            `json:"url"`
+	Method           string            `json:"method"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	Body             string            `json:"body,omitempty"`
+	ContentType      string            `json:"contentType,omitempty"`
+	ResponseHeaders  map[string]string `json:"-"`
+	ResponseBody     string            `json:"-"`
+	ResponseCode     int               `json:"-"`
+	ResponseMIMEType string            `json:"-"`
+	Source           string            `json:"source,omitempty"`
+}
+
+// FingerprintMatch is the minimal useful subset of fingers.FingerprintMatch.
+type FingerprintMatch struct {
+	Name string `json:"name"`
+}
+
+// FingerprintResult mirrors the fields used by fingers' default output.
+type FingerprintResult struct {
+	URL          string             `json:"url"`
+	StatusCode   int                `json:"statusCode,omitempty"`
+	Length       int                `json:"length,omitempty"`
+	Title        string             `json:"title,omitempty"`
+	Fingerprints []FingerprintMatch `json:"fingerprints"`
+	Detect       string             `json:"detect,omitempty"`
+}

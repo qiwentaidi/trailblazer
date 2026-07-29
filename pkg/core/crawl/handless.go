@@ -226,6 +226,7 @@ func defaultScanCaptureOptions() CaptureOptions {
 		InitialWait:               defaultScanInitialWait,
 		PostInteractionWait:       defaultScanPostWait,
 		BypassFrontendRouteGuards: true,
+		AutoTriggerForms:          true,
 		AutoExploreRoutes:         true,
 		MaxExploreRoutes:          8,
 		MaxRouteClicks:            8,
@@ -1079,6 +1080,11 @@ const autoTriggerFormsScript = `(function () {
       var tag = String(el.tagName || "").toLowerCase();
       var type = String(el.type || "").toLowerCase();
       if (tag === "select") {
+        if (String(el.value || "").trim() !== "") {
+          dispatchInputEvents(el);
+          filled += 1;
+          return;
+        }
         var nextOption = Array.prototype.slice.call(el.options || []).find(function (option) {
           return !option.disabled && String(option.value || "").trim() !== "";
         });
@@ -1099,7 +1105,9 @@ const autoTriggerFormsScript = `(function () {
       try {
         el.focus();
       } catch (err) {}
-      el.value = value;
+      if (String(el.value || "").trim() === "") {
+        el.value = value;
+      }
       dispatchInputEvents(el);
       filled += 1;
     });
