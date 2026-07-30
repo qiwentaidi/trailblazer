@@ -9,7 +9,6 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
-	"github.com/qiwentaidi/trailblazer/pkg/core/vuln"
 	weaklogin "github.com/qiwentaidi/trailblazer/pkg/core/vuln/weaklogin"
 	"net/http"
 	"net/url"
@@ -252,12 +251,6 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	filteredUnauthorizedTemplates := make(map[string]struct{})
 	aiReviewer := asDenyTemplateReviewer(aiChecker)
 	result.Vulnerabilities = annotateUnauthorizedNoise(result.Vulnerabilities, aiReviewer, filteredUnauthorizedTemplates)
-	result.Fingerprints = vuln.ScanDiscoveredRequests(
-		targetURL,
-		buildDiscoveredRequests(mergedAPIRecords),
-		options.VulnDetection.Enabled,
-		result.Assets.APIRoots,
-	)
 	result.Vulnerabilities = append(result.Vulnerabilities, runWeakLoginDetections(targetURL, options, mergedAPIRecords, capturedFrontendRoutes)...)
 	result.Vulnerabilities = append(result.Vulnerabilities, buildAssetVulnerabilities(result.Assets)...)
 	result.Vulnerabilities = dedupeVulnerabilities(result.Vulnerabilities)
@@ -552,37 +545,6 @@ func resolveVulnDetection(options config.VulnDetection) config.VulnDetection {
 	options.XSS.Enabled = false
 	options.Upload.Enabled = false
 	return options
-}
-
-func buildDiscoveredRequests(records []crawl.NetworkRecord) []structs.DiscoveredRequest {
-	requests := make([]structs.DiscoveredRequest, 0, len(records))
-	for _, record := range records {
-		requestURL := strings.TrimSpace(record.URL)
-		if requestURL == "" {
-			continue
-		}
-		headers := make(map[string]string, len(record.RequestHeaders))
-		contentType := ""
-		for key, value := range record.RequestHeaders {
-			headers[key] = value
-			if strings.EqualFold(key, "Content-Type") {
-				contentType = value
-			}
-		}
-		requests = append(requests, structs.DiscoveredRequest{
-			URL:              requestURL,
-			Method:           record.Method,
-			Headers:          headers,
-			Body:             record.RequestBody,
-			ContentType:      contentType,
-			ResponseHeaders:  record.ResponseHeaders,
-			ResponseBody:     record.ResponseBody,
-			ResponseCode:     record.ResponseCode,
-			ResponseMIMEType: record.MIMEType,
-			Source:           "dynamic-browser-capture",
-		})
-	}
-	return requests
 }
 
 func buildWorkingDataStore(

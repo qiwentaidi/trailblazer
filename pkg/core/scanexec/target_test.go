@@ -425,36 +425,6 @@ func TestBuildWeakLoginVulnerabilityRecordsPrefilledCredentialSuccess(t *testing
 	}
 }
 
-func TestBuildDiscoveredRequestsPreservesDynamicRequestEvidence(t *testing.T) {
-	requests := buildDiscoveredRequests([]crawl.NetworkRecord{{
-		URL:    "https://example.com/api/orders",
-		Method: "POST",
-		RequestHeaders: map[string]string{
-			"Content-Type": "application/json",
-			"X-Trace":      "captured",
-		},
-		RequestBody:     `{"id":1}`,
-		ResponseHeaders: map[string]string{"Server": "unit-test"},
-		ResponseBody:    `{"ok":true}`,
-		ResponseCode:    http.StatusCreated,
-		MIMEType:        "application/json",
-	}})
-
-	if len(requests) != 1 {
-		t.Fatalf("expected one discovered request, got %#v", requests)
-	}
-	if requests[0].ContentType != "application/json" || requests[0].Body != `{"id":1}` {
-		t.Fatalf("unexpected discovered request: %#v", requests[0])
-	}
-	if requests[0].Headers["X-Trace"] != "captured" || requests[0].Source != "dynamic-browser-capture" {
-		t.Fatalf("expected captured evidence to be retained: %#v", requests[0])
-	}
-	if requests[0].ResponseCode != http.StatusCreated || requests[0].ResponseMIMEType != "application/json" ||
-		requests[0].ResponseHeaders["Server"] != "unit-test" || requests[0].ResponseBody != `{"ok":true}` {
-		t.Fatalf("expected captured response metadata to be retained: %#v", requests[0])
-	}
-}
-
 func TestInferWeakLoginTargetURLsPrefersCapturedLoginPages(t *testing.T) {
 	targets := inferWeakLoginTargetURLs(
 		"https://example.com/",

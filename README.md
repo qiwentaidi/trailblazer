@@ -32,18 +32,8 @@ Trailblazer 的浏览器运行时能力依赖 `chromedp`。如果目标站点需
 Go 程序依赖 SDK：
 
 ```bash
-go get github.com/qiwentaidi/trailblazer@v0.1.0
+go get github.com/qiwentaidi/trailblazer@lastest
 ```
-
-如果当前还没有发布 tag，可在本地联调时使用 `replace`：
-
-```go
-require github.com/qiwentaidi/trailblazer v0.1.0
-
-replace github.com/qiwentaidi/trailblazer => ../trailblazer
-```
-
-正式环境建议始终依赖明确的 SemVer tag，例如 `v0.1.0`，不要长期依赖 `main` 或未固定的 pseudo-version。
 
 ## 3. SDK 最小调用
 
@@ -317,42 +307,5 @@ result, err := sdk.DecryptProtocolTrace(trace, keyHex, ciphertext)
 ```
 
 密钥、密文和响应内容可能包含敏感信息，生产环境中应限制日志输出并做好访问控制。
-
-## 11. 与 trailblazer-server 的关系
-
-如果需要 Web 任务管理、Gin API、登录认证、数据库持久化或管理前端，请使用独立的 `trailblazer-server` 项目。
-
-服务端项目通过 Go module 依赖核心 SDK：
-
-```text
-trailblazer-server -> github.com/qiwentaidi/trailblazer
-```
-
-服务端不应复制 SDK 的扫描实现；升级时只需要更新 SDK 的 Git tag，并在服务端执行依赖更新和回归测试。
-
-## 12. 开发与发布
-
-本地验证：
-
-```bash
-go test ./...
-go vet ./...
-go build ./cmd/trailblazer
-```
-
-发布版本：
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-发布新版本前建议确认：
-
-1. SDK 公共 API 没有无意变更
-2. CLI 参数仍然兼容
-3. `config.example.yaml` 不包含密钥、密码、真实地址或内部域名
-4. `go test ./...` 和 `go vet ./...` 通过
-5. `trailblazer-server` 已使用目标 tag 完成联调
 
 更细的接口说明见 [`docs/sdk-usage.md`](./docs/sdk-usage.md)。
