@@ -60,8 +60,58 @@ func TestIsSuccessfulLoginResponse(t *testing.T) {
 	if !isSuccessfulLoginResponse("http://example.com/api/login", `{"access_token":"abc"}`) {
 		t.Fatal("expected token response to be treated as login success")
 	}
+	if !isSuccessfulLoginResponse("http://example.com/api/login", `{"message":"authenticated","authenticated":true,"principal":"labuser"}`) {
+		t.Fatal("expected authenticated=true response to be treated as login success")
+	}
+	if !isSuccessfulLoginResponse("http://example.com/login", `HTTP 200 { "message": "authenticated", "authenticated": true, "principal": "labuser" }`) {
+		t.Fatal("expected rendered authenticated=true response to be treated as login success")
+	}
 	if isSuccessfulLoginResponse("http://example.com/api/login", `{"error":"invalid password"}`) {
 		t.Fatal("expected invalid password response to be treated as login failure")
+	}
+	if isSuccessfulLoginResponse("http://example.com/api/login", `{"message":"invalid credentials","authenticated":false,"principal":null}`) {
+		t.Fatal("expected authenticated=false response to be treated as login failure")
+	}
+}
+
+func TestAssessLoginAgainstNegativeControlPromotesDistinctStructuredSuccess(t *testing.T) {
+	negative := &WeakFormLoginResult{
+		Vulnerable: false,
+		Response:   `{"message":"invalid credentials","authenticated":false,"principal":null}`,
+	}
+	candidate := &WeakFormLoginResult{
+		Vulnerable:        false,
+		Username:          "<prefilled>",
+		Password:          "<prefilled>",
+		Response:          `HTTP 200 { "message": "authenticated", "authenticated": true, "principal": "labuser" }`,
+		Reason:            "登录失败（clicked_submit_control_with_prefilled_credentials）",
+		UsedPrefilledCred: true,
+	}
+
+	result := assessLoginAgainstNegativeControl(candidate, negative)
+	if result == nil || !result.Vulnerable {
+		t.Fatalf("expected candidate to be promoted to vulnerable, got %#v", result)
+	}
+	if !result.UsedPrefilledCred {
+		t.Fatalf("expected prefilled marker to be preserved, got %#v", result)
+	}
+}
+
+func TestAssessLoginAgainstNegativeControlRejectsSameSuccessfulBaseline(t *testing.T) {
+	negative := &WeakFormLoginResult{
+		Vulnerable: true,
+		Response:   `{"authenticated":true,"principal":"anyone"}`,
+	}
+	candidate := &WeakFormLoginResult{
+		Vulnerable: true,
+		Username:   "admin",
+		Password:   "admin",
+		Response:   `{"authenticated":true,"principal":"anyone"}`,
+	}
+
+	result := assessLoginAgainstNegativeControl(candidate, negative)
+	if result == nil || result.Vulnerable {
+		t.Fatalf("expected random-success baseline to suppress weak-login finding, got %#v", result)
 	}
 }
 

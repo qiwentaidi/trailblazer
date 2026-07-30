@@ -65,6 +65,8 @@ type loginRequestRecord struct {
 	ResponseReady bool
 }
 
+const negativeControlReasonPrefix = "随机凭据基线"
+
 func buildWeakLoginChromeFlags() map[string]any {
 	return map[string]any{
 		"headless":              true,
@@ -413,6 +415,7 @@ const weakLoginPageStateScript = `(function () {
 
 // TestWeakFormLogin 使用 chromedp 模拟弱表单登录漏洞检测
 func TestWeakFormLogin(targetURL string, weakCreds []string) (*WeakFormLoginResult, error) {
+	negativeControl := runNegativeControlLogin(targetURL)
 	for _, cred := range weakCreds {
 		parts := strings.SplitN(cred, ":", 2)
 		if len(parts) != 2 {
@@ -435,6 +438,7 @@ func TestWeakFormLogin(targetURL string, weakCreds []string) (*WeakFormLoginResu
 			}, nil
 		}
 
+		result = assessLoginAgainstNegativeControl(result, negativeControl)
 		if result.Vulnerable {
 			return result, nil
 		}
@@ -451,6 +455,7 @@ func TestWeakFormLogin(targetURL string, weakCreds []string) (*WeakFormLoginResu
 
 // TestPrefilledFormLogin 尝试直接使用页面已有的自动填充值触发登录。
 func TestPrefilledFormLogin(targetURL string) (*WeakFormLoginResult, error) {
+	negativeControl := runNegativeControlLogin(targetURL)
 	result, err := attemptLoginWithChromedp(targetURL, "", "", true)
 	if err != nil {
 		return &WeakFormLoginResult{
@@ -466,7 +471,76 @@ func TestPrefilledFormLogin(targetURL string) (*WeakFormLoginResult, error) {
 			Reason:     "未检测到预填充凭据登录",
 		}, nil
 	}
-	return result, nil
+	return assessLoginAgainstNegativeControl(result, negativeControl), nil
+}
+
+func runNegativeControlLogin(targetURL string) *WeakFormLoginResult {
+	username, password := buildNegativeControlCredential()
+	result, err := attemptLoginWithChromedp(targetURL, username, password, false)
+	if err != nil || result == nil {
+		return nil
+	}
+	return result
+}
+
+func buildNegativeControlCredential() (string, string) {
+	seed := time.Now().UnixNano()
+	return fmt.Sprintf("trailblazer_negative_%d", seed), fmt.Sprintf("Tb!negative%dAa1", seed%1000000)
+}
+
+func assessLoginAgainstNegativeControl(candidate, negative *WeakFormLoginResult) *WeakFormLoginResult {
+	if candidate == nil {
+		return nil
+	}
+	if negative == nil {
+		return candidate
+	}
+
+	negativeSuccess := loginResultIndicatesSuccess(negative)
+	candidateSuccess := loginResultIndicatesSuccess(candidate)
+	sameResponse := equivalentLoginResponses(candidate.Response, negative.Response)
+	if negativeSuccess && (sameResponse || candidateSuccess) {
+		return &WeakFormLoginResult{
+			Vulnerable:        false,
+			Username:          candidate.Username,
+			Password:          candidate.Password,
+			Response:          candidate.Response,
+			Reason:            negativeControlReasonPrefix + "也可登录，不能判定为弱口令",
+			UsedPrefilledCred: candidate.UsedPrefilledCred,
+		}
+	}
+	if candidate.Vulnerable {
+		return candidate
+	}
+	if !negativeSuccess && candidateSuccess && !sameResponse {
+		result := *candidate
+		result.Vulnerable = true
+		if strings.TrimSpace(result.Reason) == "" || strings.HasPrefix(result.Reason, "登录失败") {
+			result.Reason = negativeControlReasonPrefix + "失败，候选凭据响应表现为认证成功"
+		}
+		return &result
+	}
+	return candidate
+}
+
+func loginResultIndicatesSuccess(result *WeakFormLoginResult) bool {
+	if result == nil {
+		return false
+	}
+	if result.Vulnerable {
+		return true
+	}
+	return isSuccessfulLoginResponse("", result.Response)
+}
+
+func equivalentLoginResponses(left, right string) bool {
+	left = normalizeLoginComparisonBody(left)
+	right = normalizeLoginComparisonBody(right)
+	return left != "" && left == right
+}
+
+func normalizeLoginComparisonBody(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
 }
 
 // attemptLoginWithChromedp 使用 chromedp 尝试登录
@@ -630,7 +704,8 @@ func attemptLoginWithChromedp(targetURL, username, password string, preferExisti
 
 	authStateEstablished := inferAuthStateEstablished(initialState, finalState, authoritativeResult.AuthCookieCount > 0)
 	pageStateSupport := inferSuccessFromPageState(initialState, finalState)
-	if authoritativeResult.Success || authStateEstablished {
+	bodyStateSuccess := isSuccessfulLoginResponse(finalState.URL, finalState.BodyPreview)
+	if authoritativeResult.Success || authStateEstablished || bodyStateSuccess {
 		body := authoritativeResult.ResponseBody
 		if body == "" {
 			body = finalState.BodyPreview
@@ -641,6 +716,8 @@ func attemptLoginWithChromedp(targetURL, username, password string, preferExisti
 			reason = "弱口令登录成功（通过登录接口响应和认证态建立判断）"
 		case authoritativeResult.Success:
 			reason = "弱口令登录成功（通过登录接口响应判断）"
+		case bodyStateSuccess:
+			reason = "弱口令登录成功（通过页面响应内容判断）"
 		case authStateEstablished && authoritativeResult.LoginRequestSeen:
 			reason = "弱口令登录成功（通过登录后认证态建立判断）"
 		case authStateEstablished && pageStateSupport:
@@ -761,6 +838,9 @@ func isSuccessfulLoginResponse(responseURL, body string) bool {
 	if strings.HasSuffix(urlLower, ".js") || strings.HasSuffix(urlLower, ".css") || strings.HasSuffix(urlLower, ".map") || strings.HasSuffix(urlLower, ".svg") || strings.HasSuffix(urlLower, ".png") || strings.HasSuffix(urlLower, ".jpg") || strings.HasSuffix(urlLower, ".jpeg") || strings.HasSuffix(urlLower, ".woff") || strings.HasSuffix(urlLower, ".woff2") {
 		return false
 	}
+	if success, decisive := assessStructuredLoginResponse(body); decisive {
+		return success
+	}
 
 	successSignals := []string{
 		"access_token", "refresh_token", "jwt", "\"token\"", "\"accessToken\"", "\"access_token\"",
@@ -804,6 +884,156 @@ func isSuccessfulLoginResponse(responseURL, body string) bool {
 		}
 	}
 	return false
+}
+
+func assessStructuredLoginResponse(body string) (bool, bool) {
+	var value any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &value); err == nil {
+		return assessLoginJSONValue(value)
+	}
+
+	compact := compactLowerASCII(body)
+	switch {
+	case strings.Contains(compact, `"authenticated":false`) ||
+		strings.Contains(compact, `"success":false`) ||
+		strings.Contains(compact, `"login":false`) ||
+		strings.Contains(compact, `"loggedin":false`):
+		return false, true
+	case strings.Contains(compact, `"authenticated":true`) ||
+		strings.Contains(compact, `"success":true`) ||
+		strings.Contains(compact, `"login":true`) ||
+		strings.Contains(compact, `"loggedin":true`):
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func assessLoginJSONValue(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, raw := range typed {
+			normalizedKey := normalizeLoginJSONKey(key)
+			if isLoginFailureKey(normalizedKey) {
+				if boolValue, ok := raw.(bool); ok && !boolValue {
+					return false, true
+				}
+				if textValue, ok := raw.(string); ok && isFailureText(textValue) {
+					return false, true
+				}
+			}
+			if isLoginSuccessBoolKey(normalizedKey) {
+				if boolValue, ok := raw.(bool); ok {
+					return boolValue, true
+				}
+				if textValue, ok := raw.(string); ok {
+					switch strings.ToLower(strings.TrimSpace(textValue)) {
+					case "true", "success", "ok", "authenticated", "logged_in", "loggedin":
+						return true, true
+					case "false", "fail", "failed", "invalid", "unauthorized":
+						return false, true
+					}
+				}
+			}
+		}
+		for key, raw := range typed {
+			if isLoginPrincipalKey(normalizeLoginJSONKey(key)) && hasNonEmptyJSONValue(raw) {
+				return true, true
+			}
+		}
+		for _, raw := range typed {
+			if success, decisive := assessLoginJSONValue(raw); decisive {
+				return success, true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if success, decisive := assessLoginJSONValue(item); decisive {
+				return success, true
+			}
+		}
+	}
+	return false, false
+}
+
+func normalizeLoginJSONKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "_", "")
+	key = strings.ReplaceAll(key, "-", "")
+	return key
+}
+
+func isLoginSuccessBoolKey(key string) bool {
+	switch key {
+	case "authenticated", "auth", "success", "login", "loggedin", "ok":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLoginFailureKey(key string) bool {
+	switch key {
+	case "authenticated", "auth", "success", "login", "loggedin", "ok", "valid":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLoginPrincipalKey(key string) bool {
+	switch key {
+	case "principal", "user", "userid", "username", "account", "token", "accesstoken", "session", "sessionid", "role", "roles":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasNonEmptyJSONValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		text := strings.TrimSpace(typed)
+		return text != "" && strings.ToLower(text) != "null"
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func isFailureText(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.Contains(value, "invalid") ||
+		strings.Contains(value, "failed") ||
+		strings.Contains(value, "failure") ||
+		strings.Contains(value, "unauthorized") ||
+		strings.Contains(value, "forbidden") ||
+		strings.Contains(value, "incorrect") ||
+		strings.Contains(value, "wrong") ||
+		strings.Contains(value, "错误") ||
+		strings.Contains(value, "失败")
+}
+
+func compactLowerASCII(value string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(value) {
+		switch r {
+		case ' ', '\n', '\r', '\t':
+			continue
+		default:
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func isLoginRequestCandidate(requestURL, method, postData string) bool {

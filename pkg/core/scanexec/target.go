@@ -331,6 +331,7 @@ func runWeakLoginDetections(
 			fmt.Printf("[警告] 预填充凭据登录探测失败: %s err=%v\n", candidateURL, err)
 		} else if prefilledResult != nil && prefilledResult.Vulnerable && prefilledResult.UsedPrefilledCred {
 			fmt.Printf("[信息] 登录页已存在预填充凭据并可直接登录: %s\n", candidateURL)
+			vulns = append(vulns, buildWeakLoginVulnerability(options, candidateURL, prefilledResult))
 			break
 		}
 
@@ -344,26 +345,40 @@ func runWeakLoginDetections(
 		}
 
 		fmt.Printf("[信息] 发现弱口令漏洞: %s（账号: %s）\n", candidateURL, result.Username)
-		vulns = append(vulns, database.VulnRecord{
-			TaskID:         options.TaskID,
-			Version:        options.Version,
-			VulnID:         uuid.New().String(),
-			Title:          "弱口令登录",
-			Level:          "high",
-			Type:           "WEAK_PASSWORD",
-			URL:            candidateURL,
-			Method:         "FORM",
-			Request:        buildWeakLoginRequestPreview(candidateURL, result.Username, result.Password),
-			Response:       result.Response,
-			ResponseLength: len(result.Response),
-			Description:    fmt.Sprintf("发现弱口令登录漏洞，登录页: %s，用户名: %s，密码: %s，原因: %s", candidateURL, result.Username, result.Password, result.Reason),
-			AIVerified:     false,
-			CreatedAt:      time.Now(),
-		})
+		vulns = append(vulns, buildWeakLoginVulnerability(options, candidateURL, result))
 		break
 	}
 
 	return vulns
+}
+
+func buildWeakLoginVulnerability(options Options, candidateURL string, result *weaklogin.WeakFormLoginResult) database.VulnRecord {
+	username := ""
+	password := ""
+	response := ""
+	reason := ""
+	if result != nil {
+		username = result.Username
+		password = result.Password
+		response = result.Response
+		reason = result.Reason
+	}
+	return database.VulnRecord{
+		TaskID:         options.TaskID,
+		Version:        options.Version,
+		VulnID:         uuid.New().String(),
+		Title:          "弱口令登录",
+		Level:          "high",
+		Type:           "WEAK_PASSWORD",
+		URL:            candidateURL,
+		Method:         "FORM",
+		Request:        buildWeakLoginRequestPreview(candidateURL, username, password),
+		Response:       response,
+		ResponseLength: len(response),
+		Description:    fmt.Sprintf("发现弱口令登录漏洞，登录页: %s，用户名: %s，密码: %s，原因: %s", candidateURL, username, password, reason),
+		AIVerified:     false,
+		CreatedAt:      time.Now(),
+	}
 }
 
 func resolveWeakCreds(configured []string) []string {
