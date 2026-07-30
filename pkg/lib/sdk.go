@@ -44,6 +44,7 @@ type VulnRecord struct {
 	ResponseType       string                       `json:"response_type,omitempty"`
 	TraceID            string                       `json:"trace_id,omitempty"`
 	HasProtocolTrace   bool                         `json:"has_protocol_trace,omitempty"`
+	ResponsePlaintext  string                       `json:"response_plaintext,omitempty"`
 	ResponseCiphertext string                       `json:"response_ciphertext,omitempty"`
 	DecryptionStatus   string                       `json:"decryption_status,omitempty"`
 	DecryptionDetail   string                       `json:"decryption_detail,omitempty"`
@@ -192,7 +193,6 @@ func LoadScanOptionsFromFile(configPath string) (*ScanOptions, error) {
 	if raw.VulnDetection.Enabled != nil {
 		vulnDetectionEnabled = *raw.VulnDetection.Enabled
 	}
-
 	return &ScanOptions{
 		OpenAI: OpenAIOptions{
 			APIKey:  cfg.OpenAI.APIKey,
@@ -674,6 +674,7 @@ type VulnerabilityItem struct {
 	ResponseType       string                       `json:"responseType,omitempty"`
 	TraceID            string                       `json:"traceId,omitempty"`
 	HasProtocolTrace   bool                         `json:"hasProtocolTrace,omitempty"`
+	ResponsePlaintext  string                       `json:"responsePlaintext,omitempty"`
 	ResponseCiphertext string                       `json:"responseCiphertext,omitempty"`
 	DecryptionStatus   string                       `json:"decryptionStatus,omitempty"`
 	DecryptionDetail   string                       `json:"decryptionDetail,omitempty"`
@@ -1706,6 +1707,7 @@ func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityIt
 			ResponseType:       vuln.ResponseType,
 			TraceID:            vuln.TraceID,
 			HasProtocolTrace:   vuln.HasProtocolTrace,
+			ResponsePlaintext:  vuln.ResponsePlaintext,
 			ResponseCiphertext: vuln.ResponseCiphertext,
 			DecryptionStatus:   vuln.DecryptionStatus,
 			DecryptionDetail:   vuln.DecryptionDetail,

@@ -70,6 +70,11 @@ type UnauthorizedAssessment struct {
 	ResponseType     string
 }
 
+// ResponseDecoder transforms an encrypted response into the body that should
+// be used for unauthorized-access analysis. attempted distinguishes a normal
+// plaintext response from a response for which a decryption path was found.
+type ResponseDecoder func(rawBody string) (decodedBody string, attempted bool, err error)
+
 type responseRepeatObservation struct {
 	ExactCount          int
 	SimilarCount        int
@@ -84,6 +89,17 @@ type responseTemplateCluster struct {
 
 // 发送请求测试未授权访问
 func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authentication []string) (bool, string, UnauthorizedAssessment, error) {
+	return testUnauthorizedAccess(homeBody, apiReq, authentication, nil)
+}
+
+// TestUnauthorizedAccessWithDecoder runs unauthorized-access detection after
+// optionally decoding the raw response. A decoder error is treated as a
+// non-vulnerable result by the caller because the response cannot be verified.
+func TestUnauthorizedAccessWithDecoder(homeBody string, apiReq structs.APIRequest, authentication []string, decoder ResponseDecoder) (bool, string, UnauthorizedAssessment, error) {
+	return testUnauthorizedAccess(homeBody, apiReq, authentication, decoder)
+}
+
+func testUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authentication []string, decoder ResponseDecoder) (bool, string, UnauthorizedAssessment, error) {
 	// 0. 检查URL路径，排除登录、验证码等本身就无需鉴权的接口
 	if shouldSkipUnauthTest(apiReq.URL) {
 		return false, "", UnauthorizedAssessment{}, errors.New("跳过测试：该接口本身就无需鉴权")
@@ -95,6 +111,15 @@ func TestUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 	}
 	body := string(resp.Body())
 	responseType := normalizeUnauthorizedResponseType(resp.Header().Get("Content-Type"))
+	if decoder != nil {
+		decodedBody, attempted, decodeErr := decoder(body)
+		if decodeErr != nil && attempted {
+			return false, "", UnauthorizedAssessment{}, fmt.Errorf("响应解密失败，无法验证未授权访问: %w", decodeErr)
+		}
+		if attempted {
+			body = decodedBody
+		}
+	}
 	if reject, reason := shouldRejectUnauthorizedPayload(body); reject {
 		return false, "", UnauthorizedAssessment{}, errors.New(reason)
 	}

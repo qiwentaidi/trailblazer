@@ -926,6 +926,7 @@ type VulnRecord struct {
 	ResponseType       string              `json:"response_type,omitempty"`
 	TraceID            string              `json:"trace_id,omitempty"`
 	HasProtocolTrace   bool                `json:"has_protocol_trace,omitempty"`
+	ResponsePlaintext  string              `json:"response_plaintext,omitempty"`
 	ResponseCiphertext string              `json:"response_ciphertext,omitempty"`
 	DecryptionStatus   string              `json:"decryption_status,omitempty"`
 	DecryptionDetail   string              `json:"decryption_detail,omitempty"`

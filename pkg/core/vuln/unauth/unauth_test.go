@@ -1,6 +1,7 @@
 package unauth
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -203,6 +204,62 @@ func TestShouldRejectUnauthorizedPayloadRequiresStructuredBusinessResponse(t *te
 				t.Fatalf("shouldRejectUnauthorizedPayload(%q) = %t, want %t", tt.body, reject, tt.reject)
 			}
 		})
+	}
+}
+
+func TestTestUnauthorizedAccessDecodesResponseBeforePayloadFiltering(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("4f2a6b8c4f2a6b8c4f2a6b8c4f2a6b8c"))
+	}))
+	defer server.Close()
+
+	vulnerable, body, _, err := TestUnauthorizedAccessWithDecoder("", structs.APIRequest{
+		URL:     server.URL + "/api/orders",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil, func(rawBody string) (string, bool, error) {
+		if rawBody == "" {
+			t.Fatal("expected raw ciphertext to reach decoder")
+		}
+		return `{"data":{"order_id":1}}`, true, nil
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !vulnerable {
+		t.Fatal("expected decoded structured response to remain eligible for unauthorized detection")
+	}
+	if body != `{"data":{"order_id":1}}` {
+		t.Fatalf("expected analyzer body to be decoded plaintext, got %q", body)
+	}
+}
+
+func TestTestUnauthorizedAccessTreatsDecryptFailureAsNonVulnerable(t *testing.T) {
+	resetUnauthorizedTestState(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("4f2a6b8c4f2a6b8c4f2a6b8c4f2a6b8c"))
+	}))
+	defer server.Close()
+
+	vulnerable, _, _, err := TestUnauthorizedAccessWithDecoder("", structs.APIRequest{
+		URL:     server.URL + "/api/orders",
+		Method:  http.MethodGet,
+		Headers: map[string]string{},
+	}, nil, func(rawBody string) (string, bool, error) {
+		return "", true, errors.New("invalid key")
+	})
+
+	if err == nil {
+		t.Fatal("expected decrypt failure to be surfaced while treating response as non-vulnerable")
+	}
+	if vulnerable {
+		t.Fatal("expected decrypt failure not to produce an unauthorized finding")
 	}
 }
 

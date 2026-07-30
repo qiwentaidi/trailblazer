@@ -2,6 +2,7 @@ package crawl
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -1007,19 +1008,39 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			protocolTraceIndex,
 		)
 
+		var (
+			probeProtocolContext          unauthorizedProtocolContext
+			rawUnauthorizedResponse       string
+			plaintextUnauthorizedResponse string
+		)
+		responseDecoder := unauth.ResponseDecoder(func(rawBody string) (string, bool, error) {
+			rawUnauthorizedResponse = rawBody
+			decodedBody, context, attempted, decryptErr := decryptUnauthorizedResponse(
+				apiReq,
+				rawBody,
+				apiResourceIndex,
+				protocolTraceIndex,
+			)
+			probeProtocolContext = context
+			if attempted {
+				plaintextUnauthorizedResponse = decodedBody
+			}
+			return decodedBody, attempted, decryptErr
+		})
+
 		// 测试未授权访问
-		vulnerable, body, assessment, err := unauth.TestUnauthorizedAccess(homeBody, unauthorizedProbeReq, o.Authentication)
+		vulnerable, body, assessment, err := unauth.TestUnauthorizedAccessWithDecoder(homeBody, unauthorizedProbeReq, o.Authentication, responseDecoder)
 		if err != nil {
 			return
 		}
 
 		if vulnerable && len(body) > 0 {
-			protocolContext := resolveUnauthorizedProtocolContext(
-				apiReq,
-				body,
-				apiResourceIndex,
-				protocolTraceIndex,
-			)
+			if rawUnauthorizedResponse == "" {
+				rawUnauthorizedResponse = body
+			}
+			if plaintextUnauthorizedResponse == "" && probeProtocolContext.DecryptionStatus == "decrypted" {
+				plaintextUnauthorizedResponse = body
+			}
 
 			// 存在未授权，记录漏洞信息
 			result := structs.JSFindResult{
@@ -1028,8 +1049,8 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				Method:   method,
 				Request:  vuln.BuildRawRequest(unauthorizedProbeReq),
 				Source:   fullURL,
-				Response: httputil.LimitResponse(body, maxResponseSize, "响应包长度过大，请手动打开链接查看。"),
-				Length:   len(body),
+				Response: httputil.LimitResponse(rawUnauthorizedResponse, maxResponseSize, "响应包长度过大，请手动打开链接查看。"),
+				Length:   len(rawUnauthorizedResponse),
 			}
 
 			fmt.Printf("[+] %s | %s | %s | 风险等级: %s | 响应长度: %d\n",
@@ -1047,14 +1068,15 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				URL:                fullURL,
 				Method:             method,
 				Request:            result.Request,
-				Response:           result.Response,
+				Response:           rawUnauthorizedResponse,
+				ResponsePlaintext:  plaintextUnauthorizedResponse,
 				ResponseType:       assessment.ResponseType,
-				TraceID:            protocolContext.TraceID,
-				HasProtocolTrace:   protocolContext.HasProtocolTrace,
-				ResponseCiphertext: protocolContext.ResponseCiphertext,
-				DecryptionStatus:   protocolContext.DecryptionStatus,
-				DecryptionDetail:   protocolContext.DecryptionDetail,
-				ResponseLength:     result.Length,
+				TraceID:            probeProtocolContext.TraceID,
+				HasProtocolTrace:   probeProtocolContext.HasProtocolTrace,
+				ResponseCiphertext: probeProtocolContext.ResponseCiphertext,
+				DecryptionStatus:   probeProtocolContext.DecryptionStatus,
+				DecryptionDetail:   probeProtocolContext.DecryptionDetail,
+				ResponseLength:     len(rawUnauthorizedResponse),
 				Confidence:         assessment.Confidence,
 				ConfidenceReason:   assessment.ConfidenceReason,
 				DataExposure:       assessment.DataExposure,
@@ -1530,6 +1552,7 @@ func applyStaticHeaderHints(apiPath string, headers map[string]string, hints map
 type unauthorizedProtocolContext struct {
 	TraceID            string
 	HasProtocolTrace   bool
+	ResponsePlaintext  string
 	ResponseCiphertext string
 	DecryptionStatus   string
 	DecryptionDetail   string
@@ -1644,6 +1667,38 @@ func buildUnauthorizedAPIResourceIndex(apiResources []database.APIResource) *una
 		}
 	}
 	return index
+}
+
+func decryptUnauthorizedResponse(apiReq structs.APIRequest, rawBody string, apiResourceIndex *unauthorizedAPIResourceIndex, traceIndex *unauthorizedProtocolTraceIndex) (string, unauthorizedProtocolContext, bool, error) {
+	context := resolveUnauthorizedProtocolContext(apiReq, rawBody, apiResourceIndex, traceIndex)
+	if context.ResponseCiphertext == "" || !context.HasProtocolTrace {
+		return rawBody, context, false, nil
+	}
+
+	trace, ok := findUnauthorizedProtocolTrace(context.TraceID, traceIndex)
+	if !ok || trace == nil {
+		return rawBody, context, false, nil
+	}
+
+	decryptResult, decryptErr := protocoltool.DecryptWithTrace(trace, "", context.ResponseCiphertext)
+	if decryptErr != nil || decryptResult == nil || strings.TrimSpace(decryptResult.Plaintext) == "" {
+		context.DecryptionStatus = "failed"
+		detail := "解密结果为空"
+		if decryptErr != nil {
+			detail = decryptErr.Error()
+		}
+		context.DecryptionDetail = strings.TrimSpace(context.DecryptionDetail + "；响应解密失败: " + detail)
+		if decryptErr == nil {
+			decryptErr = errors.New("解密结果为空")
+		}
+		return "", context, true, decryptErr
+	}
+
+	plaintext := strings.TrimSpace(decryptResult.Plaintext)
+	context.ResponsePlaintext = plaintext
+	context.DecryptionStatus = "decrypted"
+	context.DecryptionDetail = strings.TrimSpace(context.DecryptionDetail + "；响应已成功解密，后续使用明文进行未授权判定")
+	return plaintext, context, true, nil
 }
 
 func resolveUnauthorizedProtocolContext(apiReq structs.APIRequest, responseBody string, apiResourceIndex *unauthorizedAPIResourceIndex, traceIndex *unauthorizedProtocolTraceIndex) unauthorizedProtocolContext {

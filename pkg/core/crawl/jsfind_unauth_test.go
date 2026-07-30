@@ -3,6 +3,7 @@ package crawl
 import (
 	"encoding/json"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
+	"github.com/qiwentaidi/trailblazer/pkg/core/protocoltool"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	"net/url"
 	"strings"
@@ -44,6 +45,78 @@ func TestResolveUnauthorizedProtocolContextUsesMatchedTraceAndCiphertext(t *test
 	}
 	if !strings.Contains(context.DecryptionDetail, "密文来源: 当前未授权探测响应") {
 		t.Fatalf("expected decryption detail to include probe ciphertext source, got %q", context.DecryptionDetail)
+	}
+}
+
+func TestDecryptUnauthorizedResponseUsesProtocolTraceBeforePayloadFiltering(t *testing.T) {
+	const keyHex = "00112233445566778899aabbccddeeff"
+	plaintext := `{"data":{"order_id":1}}`
+	ciphertext, err := protocoltool.EncryptSM4Hex(plaintext, keyHex)
+	if err != nil {
+		t.Fatalf("failed to create test ciphertext: %v", err)
+	}
+
+	apiReq := structs.APIRequest{Method: "GET", URL: "https://example.com/api/orders"}
+	apiResourceIndex := buildUnauthorizedAPIResourceIndex([]database.APIResource{
+		{Method: "GET", URL: apiReq.URL, TraceID: "trace-decrypt-1", HasProtocolTrace: true},
+	})
+	traceIndex := &unauthorizedProtocolTraceIndex{
+		byTraceID: map[string]database.ProtocolTraceRecord{
+			"trace-decrypt-1": {
+				TraceID:                "trace-decrypt-1",
+				RequestURL:             apiReq.URL,
+				RequestBeforeTransform: `{"id":1}`,
+				SessionMaterials:       map[string]string{"sm4_key_hex": keyHex},
+				Algorithms:             []string{"sm4.decrypt"},
+			},
+		},
+	}
+
+	decoded, context, attempted, err := decryptUnauthorizedResponse(apiReq, ciphertext, apiResourceIndex, traceIndex)
+	if err != nil {
+		t.Fatalf("expected response decryption to succeed, got %v", err)
+	}
+	if !attempted || decoded != plaintext {
+		t.Fatalf("unexpected decoded response: attempted=%v body=%q", attempted, decoded)
+	}
+	if context.ResponseCiphertext != ciphertext || context.ResponsePlaintext != plaintext {
+		t.Fatalf("expected raw ciphertext and plaintext to be preserved, got %#v", context)
+	}
+	if context.DecryptionStatus != "decrypted" {
+		t.Fatalf("expected decrypted status, got %q", context.DecryptionStatus)
+	}
+}
+
+func TestDecryptUnauthorizedResponseTreatsDecryptFailureAsNonVulnerable(t *testing.T) {
+	const keyHex = "00112233445566778899aabbccddeeff"
+	wrongKeyHex := "ffeeddccbbaa99887766554433221100"
+	ciphertext, err := protocoltool.EncryptSM4Hex(`{"data":{"order_id":1}}`, keyHex)
+	if err != nil {
+		t.Fatalf("failed to create test ciphertext: %v", err)
+	}
+
+	apiReq := structs.APIRequest{Method: "GET", URL: "https://example.com/api/orders"}
+	apiResourceIndex := buildUnauthorizedAPIResourceIndex([]database.APIResource{
+		{Method: "GET", URL: apiReq.URL, TraceID: "trace-decrypt-fail", HasProtocolTrace: true},
+	})
+	traceIndex := &unauthorizedProtocolTraceIndex{
+		byTraceID: map[string]database.ProtocolTraceRecord{
+			"trace-decrypt-fail": {
+				TraceID:                "trace-decrypt-fail",
+				RequestURL:             apiReq.URL,
+				RequestBeforeTransform: `{"id":1}`,
+				SessionMaterials:       map[string]string{"sm4_key_hex": wrongKeyHex},
+				Algorithms:             []string{"sm4.decrypt"},
+			},
+		},
+	}
+
+	decoded, context, attempted, err := decryptUnauthorizedResponse(apiReq, ciphertext, apiResourceIndex, traceIndex)
+	if err == nil || !attempted || decoded != "" {
+		t.Fatalf("expected failed decryption, got body=%q attempted=%v err=%v", decoded, attempted, err)
+	}
+	if context.DecryptionStatus != "failed" {
+		t.Fatalf("expected failed decryption status, got %q", context.DecryptionStatus)
 	}
 }
 
