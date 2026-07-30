@@ -24,6 +24,37 @@ func TestSelectShiroCandidatesUsesOnlyDynamicNonRootEndpointURLs(t *testing.T) {
 	}
 }
 
+func TestSelectShiroCandidatesIncludesAPIRootJoinedEndpointURLs(t *testing.T) {
+	candidates := SelectShiroCandidates("https://example.com", []structs.DiscoveredRequest{
+		{URL: "https://example.com/security/session?token=do-not-replay"},
+		{URL: "/users/current?token=do-not-replay"},
+	}, []string{"/api", "https://example.com/api", "https://other.example/api"})
+
+	expected := []string{
+		"https://example.com/api/security/session",
+		"https://example.com/api/users/current",
+		"https://example.com/security/session",
+	}
+	if len(candidates) != len(expected) {
+		t.Fatalf("unexpected Shiro candidate count: got %#v want %#v", candidates, expected)
+	}
+	for i := range expected {
+		if candidates[i] != expected[i] {
+			t.Fatalf("unexpected Shiro candidates: got %#v want %#v", candidates, expected)
+		}
+	}
+}
+
+func TestSelectShiroCandidatesDoesNotDuplicateExistingAPIRootPath(t *testing.T) {
+	candidates := SelectShiroCandidates("https://example.com", []structs.DiscoveredRequest{
+		{URL: "https://example.com/api/security/session?token=do-not-replay"},
+	}, []string{"/api"})
+
+	if len(candidates) != 1 || candidates[0] != "https://example.com/api/security/session" {
+		t.Fatalf("unexpected Shiro candidates: %#v", candidates)
+	}
+}
+
 func TestSelectFastjsonCandidatesKeepsOnlyUniqueJSONRequests(t *testing.T) {
 	requests := []structs.DiscoveredRequest{
 		{URL: "https://example.com/api/orders", Method: http.MethodPost, ContentType: "application/json", Body: `{"id":1}`},
@@ -65,7 +96,7 @@ func TestScanDiscoveredRequestsShiroProbeSkipsRootAndPreservesCookieEvidence(t *
 		t.Fatalf("expected one Shiro fingerprint match, got %#v", fingerprints)
 	}
 	if fingerprints[0].URL != server.URL+"/api/security/session" ||
-		len(fingerprints[0].Fingerprints) != 1 || fingerprints[0].Fingerprints[0].Name != "shiro" {
+		len(fingerprints[0].Fingerprints) != 1 || fingerprints[0].Fingerprints[0].Name != "Shiro" {
 		t.Fatalf("unexpected Shiro fingerprint: %#v", fingerprints[0])
 	}
 	if fingerprints[0].StatusCode != http.StatusOK || fingerprints[0].Detect != "DiscoveredRequestShiro" {
@@ -156,7 +187,7 @@ func TestScanDiscoveredRequestsKeepsJSONRequestFingerprintWithoutFastjsonHit(t *
 	}, true)
 
 	if len(fingerprints) != 1 || fingerprints[0].URL != server.URL+"/api/orders" ||
-		len(fingerprints[0].Fingerprints) != 1 || fingerprints[0].Fingerprints[0].Name != "json-request" {
+		len(fingerprints[0].Fingerprints) != 1 || fingerprints[0].Fingerprints[0].Name != "json-payload-required" {
 		t.Fatalf("expected JSON request fingerprint without Fastjson probe evidence, got %#v", fingerprints)
 	}
 	if fingerprints[0].StatusCode != http.StatusCreated || fingerprints[0].Length != len(`{"accepted":true}`) ||

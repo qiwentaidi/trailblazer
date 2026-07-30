@@ -256,6 +256,7 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 		targetURL,
 		buildDiscoveredRequests(mergedAPIRecords),
 		options.VulnDetection.Enabled,
+		result.Assets.APIRoots,
 	)
 	result.Vulnerabilities = append(result.Vulnerabilities, runWeakLoginDetections(targetURL, options, mergedAPIRecords, capturedFrontendRoutes)...)
 	result.Vulnerabilities = append(result.Vulnerabilities, buildAssetVulnerabilities(result.Assets)...)

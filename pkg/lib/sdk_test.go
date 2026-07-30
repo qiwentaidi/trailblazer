@@ -305,13 +305,13 @@ func TestConvertSharedFingerprintsMatchesFingersGrouping(t *testing.T) {
 		StatusCode: 200,
 		Detect:     "DiscoveredRequestShiro",
 		Fingerprints: []structs.FingerprintMatch{
-			{Name: "json-request"},
-			{Name: "shiro"},
+			{Name: "json-payload-required"},
+			{Name: "Shiro"},
 		},
 	}})
 	if len(items) != 1 || items[0].URL != "https://example.com/api/session" ||
 		items[0].StatusCode != 200 || items[0].Detect != "DiscoveredRequestShiro" ||
-		len(items[0].Fingerprints) != 2 || items[0].Fingerprints[0].Name != "json-request" || items[0].Fingerprints[1].Name != "shiro" {
+		len(items[0].Fingerprints) != 2 || items[0].Fingerprints[0].Name != "json-payload-required" || items[0].Fingerprints[1].Name != "Shiro" {
 		t.Fatalf("unexpected fingerprints: %#v", items)
 	}
 }

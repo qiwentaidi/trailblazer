@@ -19,43 +19,41 @@ const fastjsonProbeBody = `{"\u0040\u0074\u0079\u0070\u0065":"java.lang.AutoClos
 // by the dynamic browser capture.  It is deliberately separate from the
 // generic API replay scanner: each detector can use only the evidence that is
 // appropriate for it and avoid path guessing.
-func ScanDiscoveredRequests(targetURL string, requests []structs.DiscoveredRequest, enabled bool) []structs.FingerprintResult {
+func ScanDiscoveredRequests(targetURL string, requests []structs.DiscoveredRequest, enabled bool, apiRoots ...[]string) []structs.FingerprintResult {
 	if !enabled || len(requests) == 0 {
 		return nil
 	}
 
 	results := scanFastjsonDiscoveredEndpoints(requests)
-	results = append(results, scanShiroDiscoveredEndpoints(targetURL, requests)...)
+	results = append(results, scanShiroDiscoveredEndpoints(targetURL, requests, flattenAPIRoots(apiRoots)...)...)
 	return mergeFingerprintResults(results)
 }
 
 // SelectShiroCandidates returns only concrete, same-origin, non-root endpoint
 // URLs.  Shiro's rememberMe probe must not inherit a captured method, headers,
 // body, or query values, and it must never create a root-path probe.
-func SelectShiroCandidates(targetURL string, requests []structs.DiscoveredRequest) []string {
+func SelectShiroCandidates(targetURL string, requests []structs.DiscoveredRequest, apiRoots ...[]string) []string {
 	target, err := url.Parse(strings.TrimSpace(targetURL))
 	if err != nil || target.Scheme == "" || target.Host == "" {
 		return nil
 	}
 
 	seen := make(map[string]struct{}, len(requests))
+	roots := normalizeShiroAPIRoots(target, flattenAPIRoots(apiRoots))
 	for _, request := range requests {
 		candidate, err := url.Parse(strings.TrimSpace(request.URL))
-		if err != nil || candidate.Scheme == "" || candidate.Host == "" {
+		if err != nil {
 			continue
 		}
-		if !sameOrigin(target, candidate) || isRootPath(candidate.Path) {
-			continue
+		if candidate.Scheme != "" && candidate.Host != "" {
+			addShiroCandidate(target, candidate, seen)
 		}
 
-		// The probe models the reference implementation's URL-only behavior:
-		// request-specific query parameters and fragments are never replayed.
-		candidate.RawQuery = ""
-		candidate.ForceQuery = false
-		candidate.Fragment = ""
-		candidate.RawFragment = ""
-		candidate.RawPath = ""
-		seen[candidate.String()] = struct{}{}
+		for _, root := range roots {
+			if joined := buildShiroAPIRootCandidate(root, candidate.Path); joined != nil {
+				addShiroCandidate(target, joined, seen)
+			}
+		}
 	}
 
 	result := make([]string, 0, len(seen))
@@ -64,6 +62,95 @@ func SelectShiroCandidates(targetURL string, requests []structs.DiscoveredReques
 	}
 	sort.Strings(result)
 	return result
+}
+
+func flattenAPIRoots(groups [][]string) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	var result []string
+	for _, group := range groups {
+		result = append(result, group...)
+	}
+	return result
+}
+
+func normalizeShiroAPIRoots(target *url.URL, apiRoots []string) []*url.URL {
+	roots := make([]*url.URL, 0, len(apiRoots))
+	seen := make(map[string]struct{}, len(apiRoots))
+	for _, rawRoot := range apiRoots {
+		root := strings.TrimSpace(rawRoot)
+		if root == "" {
+			continue
+		}
+
+		parsed, err := url.Parse(root)
+		if err != nil {
+			continue
+		}
+		if parsed.Scheme != "" || parsed.Host != "" {
+			if parsed.Scheme == "" || parsed.Host == "" || !sameOrigin(target, parsed) {
+				continue
+			}
+		} else {
+			parsed = target.ResolveReference(parsed)
+		}
+
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		parsed.RawFragment = ""
+		parsed.RawPath = ""
+		if parsed.Path == "" {
+			parsed.Path = "/"
+		}
+		key := parsed.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		roots = append(roots, parsed)
+	}
+	return roots
+}
+
+func buildShiroAPIRootCandidate(root *url.URL, requestPath string) *url.URL {
+	if root == nil {
+		return nil
+	}
+	path := strings.TrimSpace(requestPath)
+	if path == "" || isRootPath(path) {
+		return nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	rootPath := strings.TrimRight(root.Path, "/")
+	if rootPath != "" && rootPath != "/" && path != rootPath && !strings.HasPrefix(path, rootPath+"/") {
+		path = rootPath + "/" + strings.TrimLeft(path, "/")
+	}
+
+	candidate := *root
+	candidate.Path = path
+	candidate.RawPath = ""
+	return &candidate
+}
+
+func addShiroCandidate(target, candidate *url.URL, seen map[string]struct{}) {
+	if target == nil || candidate == nil || !sameOrigin(target, candidate) || isRootPath(candidate.Path) {
+		return
+	}
+
+	// The probe models the reference implementation's URL-only behavior:
+	// request-specific query parameters and fragments are never replayed.
+	candidateCopy := *candidate
+	candidateCopy.RawQuery = ""
+	candidateCopy.ForceQuery = false
+	candidateCopy.Fragment = ""
+	candidateCopy.RawFragment = ""
+	candidateCopy.RawPath = ""
+	seen[candidateCopy.String()] = struct{}{}
 }
 
 // SelectFastjsonCandidates is the selection boundary for the future Fastjson
@@ -115,8 +202,8 @@ func DiscoveredRequestFingerprint(request structs.DiscoveredRequest) string {
 	}, "\x00")
 }
 
-func scanShiroDiscoveredEndpoints(targetURL string, requests []structs.DiscoveredRequest) []structs.FingerprintResult {
-	candidates := SelectShiroCandidates(targetURL, requests)
+func scanShiroDiscoveredEndpoints(targetURL string, requests []structs.DiscoveredRequest, apiRoots ...string) []structs.FingerprintResult {
+	candidates := SelectShiroCandidates(targetURL, requests, apiRoots)
 	findings := make([]structs.FingerprintResult, 0, len(candidates))
 	for _, candidate := range candidates {
 		response, err := clients.DoRequest(http.MethodGet, candidate, map[string]string{"Cookie": shiroRememberMeProbeCookie}, nil, 10, clients.NewRestyClient(nil, true))
@@ -135,7 +222,7 @@ func scanShiroDiscoveredEndpoints(targetURL string, requests []structs.Discovere
 		result.Length = len(body)
 		result.Title = clients.GetTitle(body)
 		result.Detect = "DiscoveredRequestShiro"
-		result.Fingerprints = []structs.FingerprintMatch{{Name: "shiro"}}
+		result.Fingerprints = []structs.FingerprintMatch{{Name: "Shiro"}}
 		findings = append(findings, result)
 	}
 	return findings
@@ -160,7 +247,7 @@ func scanFastjsonDiscoveredEndpoints(requests []structs.DiscoveredRequest) []str
 		result.Length = len(candidate.ResponseBody)
 		result.Title = clients.GetTitle([]byte(candidate.ResponseBody))
 		result.Detect = candidate.Source
-		result.Fingerprints = []structs.FingerprintMatch{{Name: "json-request"}}
+		result.Fingerprints = []structs.FingerprintMatch{{Name: "json-payload-required"}}
 
 		response, err := clients.DoRequest(
 			http.MethodPost,
