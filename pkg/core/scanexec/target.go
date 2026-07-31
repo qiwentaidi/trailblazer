@@ -204,6 +204,13 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	filter := crawl.Filter{}
 
 	allNetworkURLs, capturedAPIRecords, capturedProtocolTraces, capturedFrontendRoutes := crawl.CaptureNetworkActivity(targetURL)
+	knownFileLinks := crawl.DiscoverKnownFileLinks(targetURL, options.BlackDomain)
+	frontierLinks := crawl.DiscoverFrontierLinks(targetURL, append(append([]string{}, allNetworkURLs...), knownFileLinks...), crawl.DiscoveryFrontierOptions{
+		MaxDepth:    1,
+		MaxPages:    12,
+		BlackDomain: options.BlackDomain,
+	})
+	allNetworkURLs = arrayutil.RemoveDuplicates(append(append(allNetworkURLs, knownFileLinks...), frontierLinks...))
 	for i := range capturedProtocolTraces {
 		if strings.TrimSpace(capturedProtocolTraces[i].TaskID) == "" {
 			capturedProtocolTraces[i].TaskID = options.TaskID
