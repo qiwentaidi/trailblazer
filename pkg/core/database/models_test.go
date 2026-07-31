@@ -214,8 +214,8 @@ func TestNormalizeForViewSkipsPlaintextOnlyResponseEvidence(t *testing.T) {
 
 	trace.NormalizeForView()
 
-	if got := trace.Algorithms; len(got) != 1 || got[0] != "base64-encoded-payload" {
-		t.Fatalf("expected weak algorithm label to be preserved, got %#v", got)
+	if got := trace.Algorithms; len(got) != 0 {
+		t.Fatalf("expected weak algorithm label to be filtered, got %#v", got)
 	}
 	if len(trace.RequestSteps) != 0 || len(trace.ResponseSteps) != 0 {
 		t.Fatalf("expected protocol steps to be cleared, got request=%#v response=%#v", trace.RequestSteps, trace.ResponseSteps)
@@ -232,7 +232,57 @@ func TestNormalizeForViewDropsWeakInferredAlgorithms(t *testing.T) {
 
 	trace.NormalizeForView()
 
-	if got := trace.Algorithms; len(got) != 2 {
-		t.Fatalf("expected weak inferred algorithms to be preserved, got %#v", got)
+	if got := trace.Algorithms; len(got) != 0 {
+		t.Fatalf("expected weak inferred algorithms to be filtered, got %#v", got)
+	}
+}
+
+func TestNormalizeForViewDropsBareModuleSEWithoutCryptoTransform(t *testing.T) {
+	trace := ProtocolTraceRecord{
+		TraceID:                "trace-module-se-helper",
+		RequestBeforeTransform: `{"page":1}`,
+		FinalRequestBody:       `{"page":1}`,
+		RequestSteps: []ProtocolCryptoStep{
+			{
+				Source:        "module.se",
+				Algorithm:     "module.se",
+				InputPreview:  `{"page":1}`,
+				OutputPreview: `{"page":1}`,
+			},
+		},
+		Algorithms: []string{"module.se"},
+	}
+
+	trace.NormalizeForView()
+
+	if len(trace.RequestSteps) != 0 || len(trace.ResponseSteps) != 0 {
+		t.Fatalf("expected bare module.se helper steps to be filtered, got request=%#v response=%#v", trace.RequestSteps, trace.ResponseSteps)
+	}
+	if len(trace.Algorithms) != 0 {
+		t.Fatalf("expected bare module.se algorithm to be filtered, got %#v", trace.Algorithms)
+	}
+}
+
+func TestNormalizeForViewKeepsModuleSDCiphertextToPlaintextTransform(t *testing.T) {
+	trace := ProtocolTraceRecord{
+		TraceID: "trace-module-sd-transform",
+		ResponseSteps: []ProtocolCryptoStep{
+			{
+				Source:        "module.sd",
+				Algorithm:     "module.sd",
+				InputPreview:  `c4e860c7fe76e44c9d0dda90a71770dc`,
+				OutputPreview: `{"code":0}`,
+			},
+		},
+		Algorithms: []string{"module.sd"},
+	}
+
+	trace.NormalizeForView()
+
+	if len(trace.ResponseSteps) != 1 {
+		t.Fatalf("expected module.sd ciphertext-to-plaintext transform to be preserved, got %#v", trace.ResponseSteps)
+	}
+	if len(trace.Algorithms) != 0 {
+		t.Fatalf("expected bare module.sd algorithm label to be filtered, got %#v", trace.Algorithms)
 	}
 }

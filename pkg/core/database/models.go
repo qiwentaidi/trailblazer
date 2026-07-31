@@ -212,6 +212,7 @@ func (r *ProtocolTraceRecord) NormalizeForView() {
 		r.RequestSteps = nil
 		r.ResponseSteps = nil
 	}
+	r.Algorithms = filterMeaningfulProtocolAlgorithms(r.Algorithms)
 }
 
 func suppressMirroredRequestPlaintext(trace *ProtocolTraceRecord) {
@@ -625,7 +626,7 @@ func normalizeProtocolAlgorithms(algorithms []string) []string {
 func filterMeaningfulProtocolAlgorithms(algorithms []string) []string {
 	filtered := make([]string, 0, len(algorithms))
 	for _, algorithm := range normalizeProtocolAlgorithms(algorithms) {
-		if isIgnorableProtocolAlgorithm(strings.ToLower(strings.TrimSpace(algorithm))) {
+		if !isMeaningfulProtocolAlgorithm(algorithm) {
 			continue
 		}
 		filtered = append(filtered, algorithm)
@@ -676,34 +677,71 @@ func isIgnorableProtocolAlgorithm(value string) bool {
 		"json.stringify()",
 		"base64-encoded-payload",
 		"hex-encoded-payload",
-		"encrypted-field(inferred)":
+		"encrypted-field(inferred)",
+		"se",
+		"sd",
+		"module.se",
+		"module.sd":
 		return true
 	default:
 		return false
 	}
 }
 
-func isMeaningfulProtocolStep(step ProtocolCryptoStep) bool {
-	source := strings.ToLower(strings.TrimSpace(step.Source))
-	algorithm := strings.ToLower(strings.TrimSpace(step.Algorithm))
-	if isIgnorableProtocolAlgorithm(source) && isIgnorableProtocolAlgorithm(algorithm) {
+func isMeaningfulProtocolAlgorithm(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if isIgnorableProtocolAlgorithm(value) {
 		return false
 	}
-	if isProtocolHelperOnlyStep(step) {
-		return false
-	}
-	if strings.Contains(source, "encrypt") || strings.Contains(source, "decrypt") || strings.Contains(source, "sign") {
-		return true
-	}
-	if strings.Contains(algorithm, "encrypt") || strings.Contains(algorithm, "decrypt") || strings.Contains(algorithm, "sign") {
+	if strings.Contains(value, "encrypt") || strings.Contains(value, "decrypt") || strings.Contains(value, "sign") {
 		return true
 	}
 	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5"} {
-		if strings.Contains(source, token) || strings.Contains(algorithm, token) {
+		if strings.Contains(value, token) {
 			return true
 		}
 	}
 	return false
+}
+
+func isMeaningfulProtocolStep(step ProtocolCryptoStep) bool {
+	source := strings.ToLower(strings.TrimSpace(step.Source))
+	algorithm := strings.ToLower(strings.TrimSpace(step.Algorithm))
+	if isProtocolHelperOnlyStep(step) {
+		return false
+	}
+	if isMeaningfulProtocolAlgorithm(source) || isMeaningfulProtocolAlgorithm(algorithm) {
+		return true
+	}
+	return isMeaningfulRuntimeTransformStep(step)
+}
+
+func isMeaningfulRuntimeTransformStep(step ProtocolCryptoStep) bool {
+	source := strings.ToLower(strings.TrimSpace(firstNonEmptyString(step.Source, step.FunctionPath)))
+	input := strings.TrimSpace(step.InputPreview)
+	output := strings.TrimSpace(step.OutputPreview)
+	if input == "" || output == "" || input == output {
+		return false
+	}
+	switch {
+	case source == "se" || strings.HasSuffix(source, ".se"):
+		return isLikelyCiphertext(output)
+	case source == "sd" || strings.HasSuffix(source, ".sd"):
+		return isLikelyCiphertext(input) && !isLikelyCiphertext(output)
+	default:
+		return false
+	}
+}
+
+func isLikelyCiphertext(text string) bool {
+	text = strings.TrimSpace(text)
+	if len(text) >= 2 && strings.HasPrefix(text, `"`) && strings.HasSuffix(text, `"`) {
+		text = strings.TrimSpace(text[1 : len(text)-1])
+	}
+	if len(text) < 24 || strings.ContainsAny(text, "{[") {
+		return false
+	}
+	return isHexCiphertext(text) || isBase64Like(text)
 }
 
 func hasPlaintextOnlyProtocolEvidence(trace *ProtocolTraceRecord) bool {

@@ -26,8 +26,19 @@ import (
 )
 
 var sdkIgnoredProtocolAlgorithms = map[string]struct{}{
-	"json.stringify": {},
-	"json.parse":     {},
+	"json.stringify":            {},
+	"json.parse":                {},
+	"json.parse(inferred)":      {},
+	"json.stringify(inferred)":  {},
+	"json.parse()":              {},
+	"json.stringify()":          {},
+	"base64-encoded-payload":    {},
+	"hex-encoded-payload":       {},
+	"encrypted-field(inferred)": {},
+	"se":                        {},
+	"sd":                        {},
+	"module.se":                 {},
+	"module.sd":                 {},
 }
 
 // VulnRecord 漏洞记录（SDK独立定义，避免ES依赖）
@@ -1034,7 +1045,7 @@ func filterSDKProtocolSteps(steps []ProtocolCryptoStep) []ProtocolCryptoStep {
 
 	filtered := make([]ProtocolCryptoStep, 0, len(steps))
 	for _, step := range steps {
-		if shouldIgnoreSDKProtocolAlgorithm(step.Algorithm) {
+		if !isMeaningfulSDKProtocolStep(step) {
 			continue
 		}
 		filtered = append(filtered, step)
@@ -1050,7 +1061,7 @@ func filterSDKProtocolAlgorithms(algorithms []string) []string {
 	filtered := make([]string, 0, len(algorithms))
 	seen := make(map[string]struct{}, len(algorithms))
 	for _, algorithm := range algorithms {
-		if shouldIgnoreSDKProtocolAlgorithm(algorithm) {
+		if !isMeaningfulSDKProtocolAlgorithm(algorithm) {
 			continue
 		}
 		if _, ok := seen[algorithm]; ok {
@@ -1065,6 +1076,98 @@ func filterSDKProtocolAlgorithms(algorithms []string) []string {
 func shouldIgnoreSDKProtocolAlgorithm(algorithm string) bool {
 	_, ignored := sdkIgnoredProtocolAlgorithms[strings.ToLower(strings.TrimSpace(algorithm))]
 	return ignored
+}
+
+func isMeaningfulSDKProtocolAlgorithm(algorithm string) bool {
+	algorithm = strings.ToLower(strings.TrimSpace(algorithm))
+	if shouldIgnoreSDKProtocolAlgorithm(algorithm) {
+		return false
+	}
+	if strings.Contains(algorithm, "encrypt") || strings.Contains(algorithm, "decrypt") || strings.Contains(algorithm, "sign") {
+		return true
+	}
+	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5"} {
+		if strings.Contains(algorithm, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMeaningfulSDKProtocolStep(step ProtocolCryptoStep) bool {
+	if isMeaningfulSDKProtocolAlgorithm(step.Source) || isMeaningfulSDKProtocolAlgorithm(step.Algorithm) {
+		return true
+	}
+	source := strings.ToLower(strings.TrimSpace(firstNonEmptySDKProtocolString(step.Source, step.FunctionPath)))
+	input := strings.TrimSpace(step.InputPreview)
+	output := strings.TrimSpace(step.OutputPreview)
+	if input == "" || output == "" || input == output {
+		return false
+	}
+	switch {
+	case source == "se" || strings.HasSuffix(source, ".se"):
+		return isLikelySDKCiphertext(output)
+	case source == "sd" || strings.HasSuffix(source, ".sd"):
+		return isLikelySDKCiphertext(input) && !isLikelySDKCiphertext(output)
+	default:
+		return false
+	}
+}
+
+func isLikelySDKCiphertext(text string) bool {
+	text = strings.TrimSpace(text)
+	if len(text) >= 2 && strings.HasPrefix(text, `"`) && strings.HasSuffix(text, `"`) {
+		text = strings.TrimSpace(text[1 : len(text)-1])
+	}
+	if len(text) < 24 || strings.ContainsAny(text, "{[") {
+		return false
+	}
+	if len(text) >= 32 && len(text)%2 == 0 && isSDKHexString(text) {
+		return true
+	}
+	return isSDKBase64Like(text)
+}
+
+func isSDKHexString(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, ch := range text {
+		switch {
+		case ch >= '0' && ch <= '9':
+		case ch >= 'a' && ch <= 'f':
+		case ch >= 'A' && ch <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isSDKBase64Like(text string) bool {
+	if len(text) < 24 || len(text)%4 != 0 {
+		return false
+	}
+	for _, ch := range text {
+		switch {
+		case ch >= 'A' && ch <= 'Z':
+		case ch >= 'a' && ch <= 'z':
+		case ch >= '0' && ch <= '9':
+		case ch == '+' || ch == '/' || ch == '=':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func firstNonEmptySDKProtocolString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func toDatabaseProtocolTrace(trace ProtocolTrace) *database.ProtocolTraceRecord {

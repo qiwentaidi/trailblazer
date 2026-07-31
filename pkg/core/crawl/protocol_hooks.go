@@ -104,6 +104,7 @@ func (r *ProtocolTraceRecord) normalize() {
 		r.RequestSteps = nil
 		r.ResponseSteps = nil
 	}
+	r.Algorithms = filterMeaningfulCapturedProtocolAlgorithms(r.Algorithms)
 
 	if r.CreatedAt.IsZero() {
 		if r.CapturedAtMS > 0 {
@@ -132,7 +133,7 @@ func normalizeCapturedProtocolAlgorithms(algorithms []string) []string {
 func filterMeaningfulCapturedProtocolAlgorithms(algorithms []string) []string {
 	filtered := make([]string, 0, len(algorithms))
 	for _, algorithm := range normalizeCapturedProtocolAlgorithms(algorithms) {
-		if isIgnorableCapturedProtocolAlgorithm(strings.ToLower(strings.TrimSpace(algorithm))) {
+		if !isMeaningfulCapturedProtocolAlgorithm(algorithm) {
 			continue
 		}
 		filtered = append(filtered, algorithm)
@@ -151,11 +152,31 @@ func isIgnorableCapturedProtocolAlgorithm(value string) bool {
 		"json.stringify()",
 		"base64-encoded-payload",
 		"hex-encoded-payload",
-		"encrypted-field(inferred)":
+		"encrypted-field(inferred)",
+		"se",
+		"sd",
+		"module.se",
+		"module.sd":
 		return true
 	default:
 		return false
 	}
+}
+
+func isMeaningfulCapturedProtocolAlgorithm(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if isIgnorableCapturedProtocolAlgorithm(value) {
+		return false
+	}
+	if strings.Contains(value, "encrypt") || strings.Contains(value, "decrypt") || strings.Contains(value, "sign") {
+		return true
+	}
+	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5"} {
+		if strings.Contains(value, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasMeaningfulCapturedProtocolSignal(trace *ProtocolTraceRecord) bool {
@@ -176,21 +197,50 @@ func hasMeaningfulCapturedProtocolSignal(trace *ProtocolTraceRecord) bool {
 func isMeaningfulCapturedProtocolStep(step ProtocolCryptoStep) bool {
 	source := strings.ToLower(strings.TrimSpace(step.Source))
 	algorithm := strings.ToLower(strings.TrimSpace(step.Algorithm))
-	if isIgnorableCapturedProtocolAlgorithm(source) && isIgnorableCapturedProtocolAlgorithm(algorithm) {
+	if isMeaningfulCapturedProtocolAlgorithm(source) || isMeaningfulCapturedProtocolAlgorithm(algorithm) {
+		return true
+	}
+	return isMeaningfulCapturedRuntimeTransformStep(step)
+}
+
+func isMeaningfulCapturedRuntimeTransformStep(step ProtocolCryptoStep) bool {
+	source := strings.ToLower(strings.TrimSpace(firstNonEmptyCapturedProtocolString(step.Source, step.FunctionPath)))
+	input := strings.TrimSpace(step.InputPreview)
+	output := strings.TrimSpace(step.OutputPreview)
+	if input == "" || output == "" || input == output {
 		return false
 	}
-	if strings.Contains(source, "encrypt") || strings.Contains(source, "decrypt") || strings.Contains(source, "sign") {
+	switch {
+	case source == "se" || strings.HasSuffix(source, ".se"):
+		return isLikelyCapturedCiphertext(output)
+	case source == "sd" || strings.HasSuffix(source, ".sd"):
+		return isLikelyCapturedCiphertext(input) && !isLikelyCapturedCiphertext(output)
+	default:
+		return false
+	}
+}
+
+func isLikelyCapturedCiphertext(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	if len(value) < 24 || strings.ContainsAny(value, "{[") {
+		return false
+	}
+	if len(value) >= 32 && len(value)%2 == 0 && isHexString(value) {
 		return true
 	}
-	if strings.Contains(algorithm, "encrypt") || strings.Contains(algorithm, "decrypt") || strings.Contains(algorithm, "sign") {
-		return true
-	}
-	for _, token := range []string{"rsa", "sm2", "sm3", "sm4", "aes", "des", "tripledes", "rc4", "rabbit", "hmac", "sha", "md5"} {
-		if strings.Contains(source, token) || strings.Contains(algorithm, token) {
-			return true
+	return isBase64Like(value)
+}
+
+func firstNonEmptyCapturedProtocolString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
-	return false
+	return ""
 }
 
 func hasPlaintextOnlyCapturedProtocolEvidence(trace *ProtocolTraceRecord) bool {

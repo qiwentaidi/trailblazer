@@ -68,6 +68,64 @@ func TestUpsertProtocolTraceRecordMergesLateResponseMaterials(t *testing.T) {
 	}
 }
 
+func TestUpsertProtocolTraceRecordDropsBareModuleSEWithoutCryptoTransform(t *testing.T) {
+	var traces []ProtocolTraceRecord
+	traceIndex := map[string]int{}
+
+	upsertProtocolTraceRecord(traceIndex, &traces, ProtocolTraceRecord{
+		TraceID:                "trace-module-se-helper",
+		RequestURL:             "https://example.com/api/list",
+		Method:                 "POST",
+		RequestBeforeTransform: `{"page":1}`,
+		FinalRequestBody:       `{"page":1}`,
+		RequestSteps: []ProtocolCryptoStep{
+			{
+				Source:        "module.se",
+				Algorithm:     "module.se",
+				InputPreview:  `{"page":1}`,
+				OutputPreview: `{"page":1}`,
+			},
+		},
+		Algorithms: []string{"module.se"},
+	})
+
+	if len(traces) != 0 {
+		t.Fatalf("expected bare module.se helper trace not to be output, got %#v", traces)
+	}
+}
+
+func TestUpsertProtocolTraceRecordKeepsModuleSECiphertextTransform(t *testing.T) {
+	var traces []ProtocolTraceRecord
+	traceIndex := map[string]int{}
+
+	upsertProtocolTraceRecord(traceIndex, &traces, ProtocolTraceRecord{
+		TraceID:                "trace-module-se-transform",
+		RequestURL:             "https://example.com/api/list",
+		Method:                 "POST",
+		RequestBeforeTransform: `{"page":1}`,
+		FinalRequestBody:       `c4e860c7fe76e44c9d0dda90a71770dc`,
+		RequestSteps: []ProtocolCryptoStep{
+			{
+				Source:        "module.se",
+				Algorithm:     "module.se",
+				InputPreview:  `{"page":1}`,
+				OutputPreview: `c4e860c7fe76e44c9d0dda90a71770dc`,
+			},
+		},
+		Algorithms: []string{"module.se"},
+	})
+
+	if len(traces) != 1 {
+		t.Fatalf("expected module.se ciphertext transform to be output, got %#v", traces)
+	}
+	if len(traces[0].RequestSteps) != 1 {
+		t.Fatalf("expected module.se ciphertext transform step to be preserved, got %#v", traces[0].RequestSteps)
+	}
+	if len(traces[0].Algorithms) != 0 {
+		t.Fatalf("expected bare module.se algorithm label to be filtered, got %#v", traces[0].Algorithms)
+	}
+}
+
 func TestBuildCaptureChromeFlagsIncludesProxySettings(t *testing.T) {
 	flags := buildCaptureChromeFlags(CaptureOptions{
 		BrowserVisible:  true,
@@ -162,8 +220,8 @@ func TestProtocolTraceNormalizeSkipsPlaintextOnlyResponseEvidence(t *testing.T) 
 
 	trace.normalize()
 
-	if got := trace.Algorithms; len(got) != 1 || got[0] != "base64-encoded-payload" {
-		t.Fatalf("expected weak algorithm label to be preserved, got %#v", got)
+	if got := trace.Algorithms; len(got) != 0 {
+		t.Fatalf("expected weak algorithm label to be filtered, got %#v", got)
 	}
 	if len(trace.RequestSteps) != 0 || len(trace.ResponseSteps) != 0 {
 		t.Fatalf("expected protocol steps to be cleared, got request=%#v response=%#v", trace.RequestSteps, trace.ResponseSteps)
@@ -178,8 +236,8 @@ func TestProtocolTraceNormalizeDropsWeakInferredAlgorithms(t *testing.T) {
 
 	trace.normalize()
 
-	if got := trace.Algorithms; len(got) != 2 {
-		t.Fatalf("expected weak inferred algorithms to be preserved, got %#v", got)
+	if got := trace.Algorithms; len(got) != 0 {
+		t.Fatalf("expected weak inferred algorithms to be filtered, got %#v", got)
 	}
 }
 
@@ -724,15 +782,8 @@ func TestCaptureNetworkActivityWithOptionsAutoTriggersVisibleForm(t *testing.T) 
 		t.Fatalf("expected /api/login request to be captured, got %#v", records)
 	}
 
-	var foundTrace bool
-	for _, trace := range traces {
-		if strings.HasSuffix(trace.RequestURL, "/api/login") {
-			foundTrace = true
-			break
-		}
-	}
-	if !foundTrace {
-		t.Fatalf("expected protocol trace for auto-triggered login request, got %#v", traces)
+	if len(traces) != 0 {
+		t.Fatalf("expected plain auto-triggered login request not to output protocol traces, got %#v", traces)
 	}
 }
 

@@ -1775,9 +1775,52 @@ func upsertProtocolTraceRecord(traceIndex map[string]int, traces *[]ProtocolTrac
 		mergeProtocolTraceRecord(&(*traces)[idx], record)
 		return
 	}
+	if !shouldOutputProtocolTraceRecord(record) {
+		return
+	}
 
 	traceIndex[traceKey] = len(*traces)
 	*traces = append(*traces, record)
+}
+
+func shouldOutputProtocolTraceRecord(record ProtocolTraceRecord) bool {
+	if hasMeaningfulCapturedProtocolSignal(&record) {
+		return true
+	}
+	return hasCapturedProtocolCryptoMaterial(&record)
+}
+
+func hasCapturedProtocolCryptoMaterial(record *ProtocolTraceRecord) bool {
+	if record == nil {
+		return false
+	}
+
+	hasKeyMaterial := false
+	for _, key := range []string{"sm4_key_hex", "crypto_key_raw", "key_exchange_public_key"} {
+		if strings.TrimSpace(record.SessionMaterials[key]) != "" {
+			hasKeyMaterial = true
+			break
+		}
+	}
+
+	requestCiphertext := firstNonEmptyCapturedProtocolString(
+		record.SessionMaterials["latest_ciphertext"],
+		record.FinalRequestBody,
+	)
+	requestPlaintext := firstNonEmptyCapturedProtocolString(
+		record.SessionMaterials["latest_plaintext"],
+		record.RequestBeforeTransform,
+	)
+	responseCiphertext := strings.TrimSpace(record.SessionMaterials["latest_response_ciphertext"])
+	responsePlaintext := strings.TrimSpace(record.SessionMaterials["latest_response_plaintext"])
+
+	if hasKeyMaterial && (requestCiphertext != "" || responseCiphertext != "" || requestPlaintext != "" || responsePlaintext != "") {
+		return true
+	}
+	if responseCiphertext != "" && responsePlaintext != "" && responseCiphertext != responsePlaintext {
+		return true
+	}
+	return requestCiphertext != "" && requestPlaintext != "" && requestCiphertext != requestPlaintext && isLikelyCapturedCiphertext(requestCiphertext)
 }
 
 func upsertFrontendRouteRecord(routeIndex map[string]int, routes *[]FrontendRouteRecord, record FrontendRouteRecord) {
