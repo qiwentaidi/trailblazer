@@ -1029,21 +1029,80 @@ const autoTriggerFormsScript = `(function () {
   function dispatchInputEvents(el) {
     ["input", "change", "blur"].forEach(function (name) {
       try {
-        el.dispatchEvent(new Event(name, { bubbles: true }));
+        if (name === "input" && typeof InputEvent === "function") {
+          el.dispatchEvent(new InputEvent(name, { bubbles: true, inputType: "insertText", data: String(el.value || "") }));
+        } else {
+          el.dispatchEvent(new Event(name, { bubbles: true }));
+        }
       } catch (err) {}
     });
   }
 
+  function setNativeValue(el, value) {
+    var proto = el && el.constructor && el.constructor.prototype;
+    var descriptor = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(el, value);
+    } else {
+      el.value = value;
+    }
+  }
+
+  function textFromAssociatedLabel(el) {
+    if (!el) {
+      return "";
+    }
+    var parts = [];
+    var id = String(el.id || "").trim();
+    if (id) {
+      var direct = document.querySelector("label[for='" + id.replace(/'/g, "\\'") + "']");
+      if (direct) {
+        parts.push(direct.innerText || direct.textContent || "");
+      }
+    }
+    var wrapper = el.closest ? el.closest("label, .ant-form-item, .el-form-item, .ivu-form-item, .n-form-item, .van-field, .form-item") : null;
+    if (wrapper) {
+      var label = wrapper.querySelector ? wrapper.querySelector("label, .ant-form-item-label, .el-form-item__label, .ivu-form-item-label, .n-form-item-label, .van-field__label") : null;
+      if (label) {
+        parts.push(label.innerText || label.textContent || "");
+      }
+    }
+    return parts.join(" ");
+  }
+
   function deriveFieldLabel(el) {
-    return String(el.name || el.id || el.placeholder || el.type || "").toLowerCase();
+    return [
+      el.name,
+      el.id,
+      el.placeholder,
+      el.getAttribute && el.getAttribute("aria-label"),
+      el.getAttribute && el.getAttribute("title"),
+      el.getAttribute && el.getAttribute("data-testid"),
+      el.getAttribute && el.getAttribute("data-field"),
+      el.getAttribute && el.getAttribute("autocomplete"),
+      textFromAssociatedLabel(el),
+      el.className,
+      el.type
+    ].map(function (value) {
+      return String(value || "");
+    }).join(" ").toLowerCase();
   }
 
   function buildValue(el, index) {
     var label = deriveFieldLabel(el);
     var type = String(el.type || "").toLowerCase();
     var seed = Date.now().toString(36).slice(-6) + String(index || 0);
+    if (type === "url" || label.indexOf("url") >= 0 || label.indexOf("endpoint") >= 0 || label.indexOf("link") >= 0 || label.indexOf("地址") >= 0) {
+      return "https://example.com";
+    }
+    if (label.indexOf("target") >= 0 || label.indexOf("host") >= 0 || label.indexOf("domain") >= 0 || label.indexOf("ip") >= 0 || label.indexOf("目标") >= 0 || label.indexOf("主机") >= 0 || label.indexOf("域名") >= 0) {
+      return "127.0.0.1";
+    }
     if (type === "email" || label.indexOf("mail") >= 0 || label.indexOf("邮箱") >= 0) {
       return "trailblazer+" + seed + "@example.com";
+    }
+    if (label.indexOf("user") >= 0 || label.indexOf("account") >= 0 || label.indexOf("login") >= 0 || label.indexOf("用户名") >= 0 || label.indexOf("账号") >= 0 || label.indexOf("账户") >= 0) {
+      return "trailblazer_user";
     }
     if (type === "password" || label.indexOf("pass") >= 0 || label.indexOf("pwd") >= 0 || label.indexOf("密码") >= 0) {
       return "Tb!" + seed + "Aa1";
@@ -1051,14 +1110,47 @@ const autoTriggerFormsScript = `(function () {
     if (type === "tel" || label.indexOf("phone") >= 0 || label.indexOf("mobile") >= 0 || label.indexOf("tel") >= 0 || label.indexOf("手机") >= 0) {
       return "13800138" + String((10 + index) % 90).padStart(2, "0");
     }
-    if (type === "number") {
-      return String(1000 + index);
+    if (type === "number" || /\b(id|count|page|size|num|limit|offset)\b/.test(label) || label.indexOf("页码") >= 0 || label.indexOf("数量") >= 0) {
+      var min = Number(el.getAttribute && el.getAttribute("min"));
+      var max = Number(el.getAttribute && el.getAttribute("max"));
+      var numeric = isFinite(min) ? Math.max(min, 1) : (label.indexOf("page") >= 0 || label.indexOf("页码") >= 0 ? 1 : 10);
+      if (isFinite(max)) {
+        numeric = Math.min(numeric, max);
+      }
+      return String(numeric);
+    }
+    if (type === "date") {
+      return "2026-01-01";
+    }
+    if (type === "datetime-local") {
+      return "2026-01-01T00:00";
+    }
+    if (type === "time") {
+      return "00:00";
+    }
+    if (type === "month") {
+      return "2026-01";
+    }
+    if (label.indexOf("keyword") >= 0 || label.indexOf("search") >= 0 || label.indexOf("query") >= 0 || label.indexOf("filter") >= 0 || label.indexOf("关键词") >= 0 || label.indexOf("搜索") >= 0 || label.indexOf("查询") >= 0 || label.indexOf("筛选") >= 0) {
+      return "test";
+    }
+    if (label.indexOf("code") >= 0 || label.indexOf("captcha") >= 0 || label.indexOf("verify") >= 0 || label.indexOf("验证码") >= 0 || label.indexOf("校验") >= 0) {
+      return "1234";
+    }
+    if (label.indexOf("city") >= 0 || label.indexOf("城市") >= 0) {
+      return "Hangzhou";
+    }
+    if (label.indexOf("province") >= 0 || label.indexOf("省份") >= 0) {
+      return "Zhejiang";
+    }
+    if (label.indexOf("name") >= 0 || label.indexOf("名称") >= 0 || label.indexOf("姓名") >= 0) {
+      return "trailblazer";
     }
     return "trailblazer_" + seed;
   }
 
   function candidateFields(root) {
-    return Array.prototype.slice.call(root.querySelectorAll("input, textarea, select")).filter(function (el) {
+    return Array.prototype.slice.call(root.querySelectorAll("input, textarea, select, [contenteditable='true'], [role='textbox']")).filter(function (el) {
       if (el.disabled || el.readOnly) {
         return false;
       }
@@ -1069,7 +1161,7 @@ const autoTriggerFormsScript = `(function () {
       if (isVisible(el)) {
         return true;
       }
-      var wrapper = el.closest(".ant-form-item, .ant-input-affix-wrapper, .ant-input, .login-form, .login, .form-item");
+      var wrapper = el.closest(".ant-form-item, .ant-input-affix-wrapper, .ant-input, .el-form-item, .el-input, .ivu-form-item, .n-form-item, .van-field, .login-form, .query-form, .search-form, .filter-form, .login, .search, .query, .filter, .form-item");
       return !!(wrapper && isVisible(wrapper));
     });
   }
@@ -1105,13 +1197,31 @@ const autoTriggerFormsScript = `(function () {
       try {
         el.focus();
       } catch (err) {}
+      if (el.isContentEditable) {
+        if (String(el.innerText || el.textContent || "").trim() === "") {
+          el.textContent = value;
+        }
+        dispatchInputEvents(el);
+        filled += 1;
+        return;
+      }
       if (String(el.value || "").trim() === "") {
-        el.value = value;
+        setNativeValue(el, value);
       }
       dispatchInputEvents(el);
       filled += 1;
     });
     return filled;
+  }
+
+  function buttonText(el) {
+    return String(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.title || "").replace(/\s+/g, " ").trim();
+  }
+
+  function isDangerousButton(el) {
+    var text = buttonText(el);
+    var cls = String((el && el.className) || "").toLowerCase();
+    return /(delete|remove|clear|drop|disable|shutdown|logout|log out|run|execute|exec|poc|attack|exploit|删除|移除|清空|禁用|退出|运行|执行|攻击|利用)/i.test(text + " " + cls);
   }
 
   function chooseSubmitButton(root) {
@@ -1120,19 +1230,22 @@ const autoTriggerFormsScript = `(function () {
         if (el.disabled) {
           return false;
         }
+        if (isDangerousButton(el)) {
+          return false;
+        }
         if (isVisible(el)) {
           return true;
         }
-        var wrapper = el.closest(".ant-btn, .login-form, .login, .form-item");
+        var wrapper = el.closest(".ant-btn, .el-button, .ivu-btn, .n-button, .van-button, .login-form, .query-form, .search-form, .filter-form, .login, .search, .query, .filter, .form-item");
         return !!(wrapper && isVisible(wrapper));
       });
     if (!candidates.length) {
       return null;
     }
     var preferred = candidates.find(function (el) {
-      var text = String(el.innerText || el.textContent || el.value || "").toLowerCase();
+      var text = buttonText(el).toLowerCase();
       var type = String(el.type || "").toLowerCase();
-      return type === "submit" || /(login|sign in|signin|submit|next|continue|confirm|登录|提交|确定|继续)/i.test(text);
+      return type === "submit" || /(login|sign in|signin|submit|next|continue|confirm|query|search|filter|find|refresh|登录|提交|确定|继续|查询|搜索|筛选|查找|刷新)/i.test(text);
     });
     return preferred || candidates[0];
   }
@@ -1146,6 +1259,19 @@ const autoTriggerFormsScript = `(function () {
       ".login-account-pwd form",
       ".ggd-gateway__login form",
       ".ggd-gateway__login",
+      "form.search-form",
+      "form.query-form",
+      "form.filter-form",
+      ".search-form",
+      ".query-form",
+      ".filter-form",
+      ".search form",
+      ".query form",
+      ".filter form",
+      ".el-form",
+      ".ivu-form",
+      ".n-form",
+      ".van-form",
       ".login",
       "[role='form']"
     ];
@@ -1172,12 +1298,12 @@ const autoTriggerFormsScript = `(function () {
     }
     var anchorField = Array.prototype.slice.call(document.querySelectorAll("input, textarea, select"))
       .find(function (el) {
-        return !el.disabled && candidateFields(el.form || el.closest("form, .login-form, .login, .ant-form, [role='form']") || document.body).length > 0;
+        return !el.disabled && candidateFields(el.form || el.closest("form, .login-form, .query-form, .search-form, .filter-form, .login, .query, .search, .filter, .ant-form, .el-form, .ivu-form, .n-form, .van-form, [role='form']") || document.body).length > 0;
       });
     if (!anchorField) {
       return [];
     }
-    var container = anchorField.closest("[role='form'], .ant-form, .el-form, .login, .login-form, .form") ||
+    var container = anchorField.closest("[role='form'], .ant-form, .el-form, .ivu-form, .n-form, .van-form, .login, .query, .search, .filter, .login-form, .query-form, .search-form, .filter-form, .form") ||
       anchorField.parentElement || document.body;
     return container ? [container] : [];
   }
