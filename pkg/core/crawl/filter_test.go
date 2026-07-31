@@ -231,3 +231,29 @@ func TestAPIRootsKeepsPrefixedVersionedAPISegment(t *testing.T) {
 		t.Fatalf("expected versioned prefixed api roots to be preserved, missing %#v from %#v", expected, roots)
 	}
 }
+
+func TestDeduplicateSimilarAPIRoutesKeepsOneDynamicPathRepresentative(t *testing.T) {
+	routes := DeduplicateSimilarAPIRoutes([]string{
+		"https://example.com/api/users/123",
+		"https://example.com/api/users/456",
+		"https://example.com/api/users/789?detail=true",
+		"https://example.com/api/users/789?brief=true",
+		"/api/orders/550e8400-e29b-41d4-a716-446655440000",
+		"/api/orders/550e8400-e29b-41d4-a716-446655440001",
+	})
+
+	want := []string{
+		"https://example.com/api/users/123",
+		"https://example.com/api/users/789?detail=true",
+		"https://example.com/api/users/789?brief=true",
+		"/api/orders/550e8400-e29b-41d4-a716-446655440000",
+	}
+	if len(routes) != len(want) {
+		t.Fatalf("expected %d deduped routes, got %#v", len(want), routes)
+	}
+	for idx, expected := range want {
+		if routes[idx] != expected {
+			t.Fatalf("route[%d] = %q, want %q; all routes %#v", idx, routes[idx], expected, routes)
+		}
+	}
+}

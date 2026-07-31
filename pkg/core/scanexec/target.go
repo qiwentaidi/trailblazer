@@ -860,6 +860,7 @@ func finalizeAPIRoutes(routes []string, filter crawl.Filter) []string {
 	routes = preferAbsoluteRuntimeRoutes(routes)
 	routes = arrayutil.RemoveDuplicates(routes)
 	routes = filter.FilterAPIRoutes(routes)
+	routes = crawl.DeduplicateSimilarAPIRoutes(routes)
 
 	sort.Slice(routes, func(i, j int) bool {
 		iIsFullURL := strings.HasPrefix(routes[i], "http://") || strings.HasPrefix(routes[i], "https://")

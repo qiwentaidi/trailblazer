@@ -264,6 +264,96 @@ func (f *Filter) FilterAPIRoutes(routes []string) []string {
 	return arrayutil.RemoveDuplicates(accepted)
 }
 
+func DeduplicateSimilarAPIRoutes(routes []string) []string {
+	seen := make(map[string]int, len(routes))
+	result := make([]string, 0, len(routes))
+
+	for _, route := range routes {
+		trimmed := strings.TrimSpace(route)
+		if trimmed == "" {
+			continue
+		}
+
+		key := similarAPIRouteKey(trimmed)
+		if key == "" {
+			key = trimmed
+		}
+		if existingIdx, ok := seen[key]; ok {
+			if shouldPreferSimilarAPIRoute(trimmed, result[existingIdx]) {
+				result[existingIdx] = trimmed
+			}
+			continue
+		}
+
+		seen[key] = len(result)
+		result = append(result, trimmed)
+	}
+
+	return arrayutil.RemoveDuplicates(result)
+}
+
+func similarAPIRouteKey(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+
+	pathValue := parsed.EscapedPath()
+	if pathValue == "" {
+		pathValue = parsed.Path
+	}
+	if pathValue == "" && strings.HasPrefix(raw, "/") {
+		pathValue = routeCandidatePath(raw)
+	}
+	if pathValue == "" {
+		return ""
+	}
+
+	queryValues := parsed.Query()
+	queryKeys := make([]string, 0, len(queryValues))
+	for key := range queryValues {
+		queryKeys = append(queryKeys, key)
+	}
+	sort.Strings(queryKeys)
+
+	hostKey := ""
+	if parsed.Scheme != "" && parsed.Host != "" {
+		hostKey = strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
+	}
+	return hostKey + buildSimilarRoutePathTemplate(pathValue) + "?" + strings.Join(queryKeys, "&")
+}
+
+func buildSimilarRoutePathTemplate(pathValue string) string {
+	parts := strings.Split(pathValue, "/")
+	for idx, part := range parts {
+		if part == "" {
+			continue
+		}
+		decoded, err := url.PathUnescape(part)
+		if err == nil {
+			part = decoded
+		}
+		if isDynamicUnauthorizedPathSegment(part) {
+			parts[idx] = ":var"
+		}
+	}
+	return strings.TrimRight(strings.Join(parts, "/"), "/")
+}
+
+func shouldPreferSimilarAPIRoute(candidate, current string) bool {
+	candidateParsed, candidateErr := url.Parse(strings.TrimSpace(candidate))
+	currentParsed, currentErr := url.Parse(strings.TrimSpace(current))
+	candidateAbsolute := candidateErr == nil && candidateParsed.Scheme != "" && candidateParsed.Host != ""
+	currentAbsolute := currentErr == nil && currentParsed.Scheme != "" && currentParsed.Host != ""
+	if candidateAbsolute != currentAbsolute {
+		return candidateAbsolute
+	}
+	if strings.HasPrefix(strings.ToLower(candidate), "https://") != strings.HasPrefix(strings.ToLower(current), "https://") {
+		return strings.HasPrefix(strings.ToLower(candidate), "https://")
+	}
+	return len(candidate) < len(current)
+}
+
 func (f *Filter) shouldKeepAPIRoute(raw string) bool {
 	route := strings.TrimSpace(raw)
 	if route == "" {

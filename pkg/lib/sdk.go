@@ -1323,7 +1323,7 @@ func preferAbsoluteRuntimeRoutes(routes []string) []string {
 		}
 		result = append(result, trimmed)
 	}
-	return arrayutil.RemoveDuplicates(result)
+	return crawl.DeduplicateSimilarAPIRoutes(arrayutil.RemoveDuplicates(result))
 }
 
 func sdkEnsureTrailingSlash(value string) string {
