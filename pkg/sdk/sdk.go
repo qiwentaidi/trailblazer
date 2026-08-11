@@ -52,6 +52,11 @@ type (
 	StaticProtocolEndpoint       = lib.StaticProtocolEndpoint
 	StaticProtocolProfile        = lib.StaticProtocolProfile
 	StaticProtocolAnalysisResult = lib.StaticProtocolAnalysisResult
+	RequestBlueprint             = lib.RequestBlueprint
+	RequestBlueprintParam        = lib.RequestBlueprintParam
+	RequestBlueprintHeader       = lib.RequestBlueprintHeader
+	RequestBlueprintInterceptor  = lib.RequestBlueprintInterceptor
+	RequestBlueprintSource       = lib.RequestBlueprintSource
 	VulnCollector                = lib.VulnCollector
 	CLIVulnCollector             = lib.CLIVulnCollector
 )
@@ -72,6 +77,7 @@ var (
 	PerformScanWithConfigFile         = lib.PerformScanWithConfigFile
 	AnalyzeProtocolTrace              = lib.AnalyzeProtocolTrace
 	AnalyzeStoredJSProtocolsWithStore = lib.AnalyzeStoredJSProtocolsWithStore
+	BuildJSRequestBlueprints          = lib.BuildJSRequestBlueprints
 	DecryptProtocolTrace              = lib.DecryptProtocolTrace
 	NewCLIVulnCollector               = lib.NewCLIVulnCollector
 	NewSDKVulnCollectorAdapter        = lib.NewSDKVulnCollectorAdapter

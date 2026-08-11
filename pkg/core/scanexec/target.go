@@ -57,16 +57,17 @@ type AssetInfo struct {
 }
 
 type TargetResult struct {
-	Target           string
-	TreeData         []crawl.ElTreeNode
-	NetworkURLs      []string
-	APIRecords       []crawl.NetworkRecord
-	ProtocolTraces   []crawl.ProtocolTraceRecord
-	JSResources      []database.JSResource
-	StaticHintBundle crawl.StaticEndpointHintBundle
-	Assets           AssetInfo
-	Fingerprints     []structs.FingerprintResult
-	Vulnerabilities  []database.VulnRecord
+	Target            string
+	TreeData          []crawl.ElTreeNode
+	NetworkURLs       []string
+	APIRecords        []crawl.NetworkRecord
+	ProtocolTraces    []crawl.ProtocolTraceRecord
+	JSResources       []database.JSResource
+	RequestBlueprints []crawl.RequestBlueprint
+	StaticHintBundle  crawl.StaticEndpointHintBundle
+	Assets            AssetInfo
+	Fingerprints      []structs.FingerprintResult
+	Vulnerabilities   []database.VulnRecord
 }
 
 type vulnSliceCollector struct {
@@ -189,7 +190,7 @@ func (s compositeScanDataStore) ListProtocolTraces(taskID string, versions ...in
 }
 
 func RunTarget(targetURL string, options Options) (*TargetResult, error) {
-	if _, err := clients.SimpleGet(targetURL, clients.DefaultRestyClient()); err != nil {
+	if _, err := clients.SimpleGet(targetURL, clients.NewRestyClient(nil, true)); err != nil {
 		return nil, err
 	}
 
@@ -228,6 +229,7 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	allJS := mergeJSLinks(targetURL, classified, options.BlackDomain)
 	result.JSResources = fetchStaticHintJSResources(options.TaskID, options.Version, targetURL, allJS, options.BlackDomain)
 	result.StaticHintBundle = crawl.BuildStaticEndpointHintBundle(result.JSResources)
+	result.RequestBlueprints = crawl.BuildJSRequestBlueprints(result.JSResources)
 
 	var aiChecker *crawl.SensitiveInfoChecker
 	if options.OpenAI.Enabled && strings.TrimSpace(options.OpenAI.APIKey) != "" {
@@ -250,8 +252,10 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 
 	workingStore := buildWorkingDataStore(options, targetURL, result.JSResources, mergedAPIRecords, capturedProtocolTraces)
 	collector := &vulnSliceCollector{}
-	for _, root := range result.Assets.APIRoots {
-		crawl.AnalyzeAPIWithCollector(buildJSFindOptions(options, targetURL, apiRouter, root, result.StaticHintBundle, aiChecker, workingStore), collector)
+	if options.VulnDetection.Enabled {
+		for _, root := range result.Assets.APIRoots {
+			crawl.AnalyzeAPIWithCollector(buildJSFindOptions(options, targetURL, apiRouter, root, result.StaticHintBundle, aiChecker, workingStore), collector)
+		}
 	}
 	result.Vulnerabilities = dedupeVulnerabilities(collector.items)
 	bindStaticContexts(result.Vulnerabilities, result.JSResources)
@@ -692,16 +696,24 @@ func fetchStaticHintJSResources(taskID string, version int, homeURL string, jsLi
 	defer os.RemoveAll(tempDir)
 
 	result := make([]database.JSResource, 0, maxStaticHintJS)
-	for _, jsURL := range jsLinks {
+	queue := append([]string(nil), jsLinks...)
+	seen := make(map[string]struct{}, len(jsLinks))
+	for len(queue) > 0 {
 		if len(result) >= maxStaticHintJS {
 			break
 		}
+		jsURL := queue[0]
+		queue = queue[1:]
 		resolvedURL := normalizeJSURL(homeURL, jsURL)
 		if strings.TrimSpace(resolvedURL) == "" || filter.IsBlacklist(resolvedURL, blackDomain) {
 			continue
 		}
+		if _, exists := seen[resolvedURL]; exists {
+			continue
+		}
+		seen[resolvedURL] = struct{}{}
 
-		resp, err := clients.SimpleGet(resolvedURL, clients.DefaultRestyClient())
+		resp, err := clients.SimpleGet(resolvedURL, clients.NewRestyClient(nil, true))
 		if err != nil {
 			continue
 		}
@@ -716,15 +728,28 @@ func fetchStaticHintJSResources(taskID string, version int, homeURL string, jsLi
 			continue
 		}
 
+		content := string(fileContent)
 		result = append(result, database.JSResource{
 			TaskID:       taskID,
 			Version:      version,
 			URL:          resolvedURL,
-			Content:      string(fileContent),
+			Content:      content,
 			ResponseCode: resp.StatusCode(),
 			Size:         len(fileContent),
 			FetchedAt:    time.Now(),
 		})
+		for _, chunkURL := range extractWebpackChunkJSLinks(resolvedURL, content) {
+			if len(result)+len(queue) >= maxStaticHintJS {
+				break
+			}
+			if filter.IsBlacklist(chunkURL, blackDomain) {
+				continue
+			}
+			if _, exists := seen[chunkURL]; exists {
+				continue
+			}
+			queue = append(queue, chunkURL)
+		}
 	}
 
 	return result
@@ -735,6 +760,12 @@ func normalizeJSURL(homeURL, jsLink string) string {
 	if jsLink == "" {
 		return ""
 	}
+	if strings.HasPrefix(jsLink, "//") {
+		if parsed, err := url.Parse(strings.TrimSpace(homeURL)); err == nil && parsed != nil && parsed.Scheme != "" {
+			return parsed.Scheme + ":" + jsLink
+		}
+		return "https:" + jsLink
+	}
 	if strings.HasPrefix(jsLink, "http://") || strings.HasPrefix(jsLink, "https://") {
 		return jsLink
 	}
@@ -744,6 +775,76 @@ func normalizeJSURL(homeURL, jsLink string) string {
 		return parsed.Scheme + "://" + parsed.Host + "/" + strings.TrimLeft(jsLink, "/")
 	}
 	return jsLink
+}
+
+func extractWebpackChunkJSLinks(parentURL, content string) []string {
+	if !strings.Contains(content, ".js") {
+		return nil
+	}
+
+	pattern := regexp.MustCompile(`([A-Za-z0-9_-]+)\s*:\s*"([A-Za-z0-9_-]{6,})"`)
+	matches := pattern.FindAllStringSubmatch(content, -1)
+	result := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := strings.TrimSpace(match[1])
+		hash := strings.TrimSpace(match[2])
+		if name == "" || hash == "" {
+			continue
+		}
+		chunkName := name + "." + hash + ".js"
+		if resolved := resolveSiblingAssetURL(parentURL, chunkName); resolved != "" {
+			result = appendUniqueStringLocal(result, resolved)
+		}
+	}
+	return result
+}
+
+func resolveSiblingAssetURL(parentURL, assetName string) string {
+	parsed, err := url.Parse(strings.TrimSpace(parentURL))
+	if err != nil || parsed == nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	assetName = strings.TrimSpace(assetName)
+	if assetName == "" {
+		return ""
+	}
+	basePath := strings.TrimSpace(parsed.Path)
+	if basePath == "" || strings.HasSuffix(basePath, "/") {
+		parsed.Path = strings.TrimRight(basePath, "/") + "/" + strings.TrimLeft(assetName, "/")
+	} else {
+		dir := pathDir(basePath)
+		parsed.Path = strings.TrimRight(dir, "/") + "/" + strings.TrimLeft(assetName, "/")
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func pathDir(value string) string {
+	index := strings.LastIndex(value, "/")
+	if index < 0 {
+		return "/"
+	}
+	if index == 0 {
+		return "/"
+	}
+	return value[:index]
+}
+
+func appendUniqueStringLocal(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return items
+	}
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
 }
 
 func buildTempJSFileName(jsURL string) string {

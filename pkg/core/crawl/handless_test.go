@@ -148,6 +148,12 @@ func TestBuildCaptureChromeFlagsIncludesProxySettings(t *testing.T) {
 	if got := flags["enable-automation"]; got != false {
 		t.Fatalf("expected enable-automation=false, got %#v", got)
 	}
+	if got := flags["ignore-certificate-errors"]; got != true {
+		t.Fatalf("expected ignore-certificate-errors=true, got %#v", got)
+	}
+	if got := flags["allow-insecure-localhost"]; got != true {
+		t.Fatalf("expected allow-insecure-localhost=true, got %#v", got)
+	}
 	if got := flags["window-size"]; got != "1440,900" {
 		t.Fatalf("expected window-size flag, got %#v", got)
 	}

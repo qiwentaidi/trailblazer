@@ -28,6 +28,11 @@ type (
 	StaticProtocolEndpoint       = crawl.StaticProtocolEndpoint
 	StaticProtocolProfile        = crawl.StaticProtocolProfile
 	StaticProtocolAnalysisResult = crawl.StaticProtocolAnalysisResult
+	RequestBlueprint             = crawl.RequestBlueprint
+	RequestBlueprintParam        = crawl.RequestBlueprintParam
+	RequestBlueprintHeader       = crawl.RequestBlueprintHeader
+	RequestBlueprintInterceptor  = crawl.RequestBlueprintInterceptor
+	RequestBlueprintSource       = crawl.RequestBlueprintSource
 )
 
 // NewMemoryScanDataStore creates an in-memory store for one scan session.
@@ -37,4 +42,8 @@ var NewMemoryScanDataStore = database.NewMemoryScanDataStore
 // requiring callers to import the crawl implementation package directly.
 func AnalyzeStoredJSProtocolsWithStore(taskID string, store ScanDataStore, versions ...int) (*StaticProtocolAnalysisResult, error) {
 	return crawl.AnalyzeStoredJSProtocolsWithStore(taskID, store, versions...)
+}
+
+func BuildJSRequestBlueprints(jsResources []JSResource) []RequestBlueprint {
+	return crawl.BuildJSRequestBlueprints(jsResources)
 }

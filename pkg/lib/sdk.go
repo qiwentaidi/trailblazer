@@ -280,7 +280,7 @@ func buildSDKJSFindOptions(
 type sdkJSFetcher func(string) ([]byte, error)
 
 func defaultSDKJSFetcher(jsURL string) ([]byte, error) {
-	resp, err := clients.SimpleGet(jsURL, clients.DefaultRestyClient())
+	resp, err := clients.SimpleGet(jsURL, clients.NewRestyClient(nil, true))
 	if err != nil {
 		return nil, err
 	}
@@ -513,15 +513,17 @@ type VulnerabilityOverview struct {
 
 // TargetResult 单个目标的扫描结果
 type TargetResult struct {
-	Target          string                `json:"target"`
-	Overview        VulnerabilityOverview `json:"overview"`
-	SiteTree        []crawl.ElTreeNode    `json:"siteTree"`
-	JSResources     []tbdb.JSResource     `json:"jsResources,omitempty"`
-	APIRecords      []APIRecord           `json:"apiRecords,omitempty"`
-	ProtocolTraces  []ProtocolTrace       `json:"protocolTraces,omitempty"`
-	Assets          AssetInfo             `json:"assets"`
-	Fingerprints    []FingerprintItem     `json:"fingerprints,omitempty"`
-	Vulnerabilities []VulnerabilityItem   `json:"vulnerabilities"`
+	Target                string                   `json:"target"`
+	Overview              VulnerabilityOverview    `json:"overview"`
+	SiteTree              []crawl.ElTreeNode       `json:"siteTree"`
+	JSResources           []tbdb.JSResource        `json:"jsResources,omitempty"`
+	RequestBlueprintCount int                      `json:"requestBlueprintCount"`
+	RequestBlueprints     []crawl.RequestBlueprint `json:"requestBlueprints,omitempty"`
+	APIRecords            []APIRecord              `json:"apiRecords,omitempty"`
+	ProtocolTraces        []ProtocolTrace          `json:"protocolTraces,omitempty"`
+	Assets                AssetInfo                `json:"assets"`
+	Fingerprints          []FingerprintItem        `json:"fingerprints,omitempty"`
+	Vulnerabilities       []VulnerabilityItem      `json:"vulnerabilities"`
 }
 
 func sdkVulnerabilityDedupKey(vuln VulnRecord) string {
@@ -1583,14 +1585,16 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		}
 
 		targetResult := TargetResult{
-			Target:          targetURL,
-			SiteTree:        targetScanResult.TreeData,
-			JSResources:     make([]tbdb.JSResource, 0, len(targetScanResult.JSResources)),
-			APIRecords:      make([]APIRecord, 0, len(targetScanResult.APIRecords)),
-			ProtocolTraces:  make([]ProtocolTrace, 0, len(targetScanResult.ProtocolTraces)),
-			Assets:          convertSharedAssets(targetScanResult.Assets),
-			Fingerprints:    convertSharedFingerprints(targetScanResult.Fingerprints),
-			Vulnerabilities: convertSharedVulnerabilities(targetScanResult.Vulnerabilities),
+			Target:                targetURL,
+			SiteTree:              targetScanResult.TreeData,
+			JSResources:           make([]tbdb.JSResource, 0, len(targetScanResult.JSResources)),
+			RequestBlueprintCount: len(targetScanResult.RequestBlueprints),
+			RequestBlueprints:     append([]crawl.RequestBlueprint(nil), targetScanResult.RequestBlueprints...),
+			APIRecords:            make([]APIRecord, 0, len(targetScanResult.APIRecords)),
+			ProtocolTraces:        make([]ProtocolTrace, 0, len(targetScanResult.ProtocolTraces)),
+			Assets:                convertSharedAssets(targetScanResult.Assets),
+			Fingerprints:          convertSharedFingerprints(targetScanResult.Fingerprints),
+			Vulnerabilities:       convertSharedVulnerabilities(targetScanResult.Vulnerabilities),
 		}
 		for _, resource := range targetScanResult.JSResources {
 			targetResult.JSResources = append(targetResult.JSResources, resource)

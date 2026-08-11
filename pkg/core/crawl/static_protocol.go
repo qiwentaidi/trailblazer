@@ -21,8 +21,12 @@ type StaticProtocolEvidence struct {
 }
 
 type StaticProtocolParam struct {
-	Name   string `json:"name"`
-	Source string `json:"source,omitempty"`
+	Name         string `json:"name"`
+	Source       string `json:"source,omitempty"`
+	Value        string `json:"value,omitempty"`
+	ValueExpr    string `json:"value_expr,omitempty"`
+	Resolved     bool   `json:"resolved,omitempty"`
+	ResolvedFrom string `json:"resolved_from,omitempty"`
 }
 
 type StaticAPIContextParam struct {
@@ -768,6 +772,9 @@ func resolveStaticIdentifierRoots(content, identifier string) []string {
 	if identifier == "" {
 		return nil
 	}
+	if len(identifier) < 2 {
+		return nil
+	}
 
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?:var|let|const)\s+` + regexp.QuoteMeta(identifier) + `\s*=\s*([^;\n]+)`),
@@ -1264,6 +1271,10 @@ func decodeBase64(value string) string {
 }
 
 func extractHTTPContextEndpoints(fileURL, content string) []StaticProtocolEndpoint {
+	return extractHTTPContextEndpointsWithScope(fileURL, content, content)
+}
+
+func extractHTTPContextEndpointsWithScope(fileURL, content, resolverContent string) []StaticProtocolEndpoint {
 	var endpoints []StaticProtocolEndpoint
 
 	endpoints = append(endpoints, extractCallStyleEndpoints(fileURL, content, "axios.get", "axios.get", "GET")...)
@@ -1273,14 +1284,17 @@ func extractHTTPContextEndpoints(fileURL, content string) []StaticProtocolEndpoi
 	endpoints = append(endpoints, extractCallStyleEndpoints(fileURL, content, "axios.patch", "axios.patch", "PATCH")...)
 	endpoints = append(endpoints, extractAxiosConfigEndpoints(fileURL, content)...)
 	endpoints = append(endpoints, extractAxiosInstanceEndpoints(fileURL, content)...)
+	endpoints = append(endpoints, extractWebpackAxiosDefaultEndpoints(fileURL, content)...)
+	endpoints = append(endpoints, extractGenericHTTPMethodWrapperEndpoints(fileURL, content)...)
 	endpoints = append(endpoints, extractFetchEndpoints(fileURL, content)...)
-	endpoints = append(endpoints, extractObjectRequestEndpoints(fileURL, content, "$.ajax", "$.ajax")...)
-	endpoints = append(endpoints, extractObjectRequestEndpoints(fileURL, content, "jQuery.ajax", "jQuery.ajax")...)
-	endpoints = append(endpoints, extractObjectRequestEndpoints(fileURL, content, "uni.request", "uni.request")...)
+	endpoints = append(endpoints, extractObjectRequestEndpointsWithScope(fileURL, content, resolverContent, "$.ajax", "$.ajax")...)
+	endpoints = append(endpoints, extractObjectRequestEndpointsWithScope(fileURL, content, resolverContent, "jQuery.ajax", "jQuery.ajax")...)
+	endpoints = append(endpoints, extractObjectRequestEndpointsWithScope(fileURL, content, resolverContent, "uni.request", "uni.request")...)
 	endpoints = append(endpoints, extractNamedWrapperContextEndpoints(fileURL, content)...)
-	endpoints = append(endpoints, extractObjectRequestEndpoints(fileURL, content, "rn", "rn")...)
+	endpoints = append(endpoints, extractObjectRequestEndpointsWithScope(fileURL, content, resolverContent, "rn", "rn")...)
 	endpoints = append(endpoints, extractPostRequestContextEndpoints(fileURL, content)...)
 	endpoints = append(endpoints, extractConfigLikeCallEndpoints(fileURL, content)...)
+	endpoints = append(endpoints, extractGenericObjectRequestWrapperEndpoints(fileURL, content, resolverContent)...)
 
 	return endpoints
 }
@@ -1311,15 +1325,110 @@ func extractAxiosInstanceEndpoints(fileURL, content string) []StaticProtocolEndp
 	return results
 }
 
-func findAxiosInstanceNames(content string) []string {
-	pattern := regexp.MustCompile(`(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\s*\.\s*create\(\s*\{`)
-	matches := pattern.FindAllStringSubmatch(content, -1)
-	names := make([]string, 0, len(matches))
+func extractWebpackAxiosDefaultEndpoints(fileURL, content string) []StaticProtocolEndpoint {
+	pattern := regexp.MustCompile(`([A-Za-z_$][\w$]*__WEBPACK_IMPORTED_MODULE_\d+__)\s*\[\s*["']default["']\s*\]\s*\.\s*(get|post|put|delete|patch)\s*\(`)
+	matches := pattern.FindAllStringSubmatchIndex(content, -1)
+	results := make([]StaticProtocolEndpoint, 0, len(matches))
 	for _, match := range matches {
-		if len(match) < 2 {
+		if len(match) < 6 {
 			continue
 		}
-		names = appendUniqueStrings(names, strings.TrimSpace(match[1]))
+		moduleName := strings.TrimSpace(content[match[2]:match[3]])
+		methodName := strings.TrimSpace(content[match[4]:match[5]])
+		openIndex := match[1] - 1
+		if openIndex < 0 || openIndex >= len(content) || content[openIndex] != '(' {
+			continue
+		}
+		args, endIndex, ok := extractBalancedJS(content, openIndex, '(', ')')
+		if !ok {
+			continue
+		}
+		callText := content[match[0] : endIndex+1]
+		results = append(results, staticEndpointFromCallArgs(
+			fileURL,
+			content,
+			callExpression{
+				Index:    match[0],
+				Args:     args,
+				CallText: callText,
+				Callee:   moduleName + `["default"].` + methodName,
+			},
+			"webpack-axios:"+methodName,
+			strings.ToUpper(methodName),
+		)...)
+	}
+	return results
+}
+
+func extractGenericHTTPMethodWrapperEndpoints(fileURL, content string) []StaticProtocolEndpoint {
+	matches := findGenericHTTPMethodWrapperCallExpressions(content)
+	axiosInstances := make(map[string]struct{})
+	for _, name := range findAxiosInstanceNames(content) {
+		axiosInstances[name] = struct{}{}
+	}
+	results := make([]StaticProtocolEndpoint, 0, len(matches))
+	for _, match := range matches {
+		receiver := strings.TrimSpace(match.Callee[:strings.Index(match.Callee, ".")])
+		if receiver == "axios" {
+			continue
+		}
+		if _, exists := axiosInstances[receiver]; exists {
+			continue
+		}
+		methodName := strings.TrimSpace(match.Callee[strings.LastIndex(match.Callee, ".")+1:])
+		defaultMethod := strings.ToUpper(strings.TrimPrefix(strings.ToLower(methodName), "silent"))
+		switch defaultMethod {
+		case "GET", "POST", "PUT", "DELETE", "PATCH":
+		case "UPLOAD":
+			defaultMethod = "POST"
+		case "DOWNLOAD":
+			defaultMethod = "GET"
+		default:
+			continue
+		}
+		results = append(results, staticEndpointFromCallArgs(fileURL, content, match, "wrapper-method:"+match.Callee, defaultMethod)...)
+	}
+	return results
+}
+
+func findGenericHTTPMethodWrapperCallExpressions(content string) []callExpression {
+	pattern := regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\.\s*(get|post|put|delete|patch|silentGet|silentPost|silentPut|silentDelete|upload|download)\s*\(`)
+	matches := pattern.FindAllStringSubmatchIndex(content, -1)
+	results := make([]callExpression, 0, len(matches))
+	seen := make(map[int]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) < 6 {
+			continue
+		}
+		callStart := match[2]
+		if _, exists := seen[callStart]; exists {
+			continue
+		}
+		openIndex := match[1] - 1
+		if openIndex < 0 || openIndex >= len(content) || content[openIndex] != '(' {
+			continue
+		}
+		args, endIndex, ok := extractBalancedJS(content, openIndex, '(', ')')
+		if !ok {
+			continue
+		}
+		callee := normalizeJSMemberExpression(content[match[2]:match[5]])
+		results = append(results, callExpression{
+			Index:    callStart,
+			Args:     args,
+			CallText: content[callStart : endIndex+1],
+			Callee:   callee,
+		})
+		seen[callStart] = struct{}{}
+	}
+	return results
+}
+
+func findAxiosInstanceNames(content string) []string {
+	createCalls := findAxiosLikeCreateCalls(content)
+	names := make([]string, 0, len(createCalls))
+	for _, call := range createCalls {
+		names = appendUniqueStrings(names, call.InstanceName)
 	}
 	return names
 }
@@ -1328,53 +1437,209 @@ func extractCallStyleEndpoints(fileURL, content, callee, client, defaultMethod s
 	matches := findCallExpressions(content, callee)
 	results := make([]StaticProtocolEndpoint, 0, len(matches))
 	for _, match := range matches {
-		args := splitTopLevelCSV(match.Args)
-		if len(args) == 0 {
-			continue
-		}
-		path := parseRequestPath(args[0])
-		if path == "" {
-			continue
-		}
-		params := collectPathAndQueryParams(path)
-		context := extractNearbyFunctionContext(content, match.Index)
-		payloadCarrier := ""
-		payloadFormat := ""
-		payloadPreview := ""
-		if len(args) > 1 {
-			secondArg := strings.TrimSpace(args[1])
-			resolvedSecondArg := resolveStaticArgumentExpression(content, secondArg)
-			if defaultMethod == "GET" || defaultMethod == "DELETE" {
-				params = mergeStaticParams(params, collectParamsFromConfigArg(resolvedSecondArg))
-				payloadCarrier, payloadFormat, payloadPreview = detectGETCallPayloadMetadata(resolvedSecondArg)
-				context = appendStaticHeaderContext(context, resolvedSecondArg, content)
-			} else {
-				params = mergeStaticParams(params, collectParamsFromBodyArg(resolvedSecondArg))
-				payloadCarrier, payloadFormat, payloadPreview = detectPayloadMetadata("body", resolvedSecondArg)
-				if len(args) > 2 {
-					resolvedThirdArg := resolveStaticArgumentExpression(content, args[2])
-					params = mergeStaticParams(params, collectParamsFromConfigArg(resolvedThirdArg))
-					context = appendStaticHeaderContext(context, resolvedThirdArg, content)
-				}
-			}
-			if identifierPattern.MatchString(secondArg) {
-				context = appendUniqueStrings(context, "数据变量: "+secondArg)
-			}
-		}
-		results = append(results, StaticProtocolEndpoint{
-			Path:                  path,
-			Method:                defaultMethod,
-			Client:                client,
-			Params:                params,
-			RequestPayloadCarrier: payloadCarrier,
-			RequestPayloadFormat:  payloadFormat,
-			RequestPayloadPreview: payloadPreview,
-			Context:               context,
-			SourceFile:            fileURL,
-			Snippet:               normalizeSnippet(match.CallText),
-		})
+		results = append(results, staticEndpointFromCallArgs(fileURL, content, match, client, defaultMethod)...)
 	}
 	return results
+}
+
+func staticEndpointFromCallArgs(fileURL, content string, match callExpression, client, defaultMethod string) []StaticProtocolEndpoint {
+	args := splitTopLevelCSV(match.Args)
+	if len(args) == 0 {
+		return nil
+	}
+	path := parseRequestPathWithContent(content, args[0])
+	if path == "" {
+		return nil
+	}
+	params := collectPathAndQueryParams(path)
+	context := extractNearbyFunctionContext(content, match.Index)
+	payloadCarrier := ""
+	payloadFormat := ""
+	payloadPreview := ""
+	if len(args) > 1 {
+		secondArg := strings.TrimSpace(args[1])
+		resolvedSecondArg := resolveStaticArgumentExpression(content, secondArg)
+		if defaultMethod == "GET" || defaultMethod == "DELETE" {
+			params = mergeStaticParams(params, collectParamsFromConfigArg(resolvedSecondArg))
+			params = mergeStaticParams(params, inferStaticParamsFromCallArgumentVariables(content, match.Index, secondArg, "query"))
+			params = mergeStaticParams(params, inferStaticParamsFromCallArgumentVariables(content, match.Index, resolvedSecondArg, "query"))
+			payloadCarrier, payloadFormat, payloadPreview = detectGETCallPayloadMetadata(resolvedSecondArg)
+			context = appendStaticHeaderContext(context, resolvedSecondArg, content)
+		} else {
+			params = mergeStaticParams(params, collectParamsFromBodyArg(resolvedSecondArg))
+			params = mergeStaticParams(params, inferStaticParamsFromCallArgumentVariables(content, match.Index, secondArg, "body"))
+			params = mergeStaticParams(params, inferStaticParamsFromCallArgumentVariables(content, match.Index, resolvedSecondArg, "body"))
+			payloadCarrier, payloadFormat, payloadPreview = detectPayloadMetadata("body", resolvedSecondArg)
+			if len(args) > 2 {
+				resolvedThirdArg := resolveStaticArgumentExpression(content, args[2])
+				params = mergeStaticParams(params, collectParamsFromConfigArg(resolvedThirdArg))
+				params = mergeStaticParams(params, inferStaticParamsFromCallArgumentVariables(content, match.Index, args[2], "query"))
+				params = mergeStaticParams(params, inferStaticParamsFromCallArgumentVariables(content, match.Index, resolvedThirdArg, "query"))
+				context = appendStaticHeaderContext(context, resolvedThirdArg, content)
+			}
+		}
+		if identifierPattern.MatchString(secondArg) {
+			context = appendUniqueStrings(context, "数据变量: "+secondArg)
+		}
+	}
+	return []StaticProtocolEndpoint{{
+		Path:                  path,
+		Method:                defaultMethod,
+		Client:                client,
+		Params:                params,
+		RequestPayloadCarrier: payloadCarrier,
+		RequestPayloadFormat:  payloadFormat,
+		RequestPayloadPreview: payloadPreview,
+		Context:               context,
+		SourceFile:            fileURL,
+		Snippet:               normalizeSnippet(match.CallText),
+	}}
+}
+
+func inferStaticParamsFromCallArgumentVariables(content string, callIndex int, expr string, source string) []StaticProtocolParam {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil
+	}
+	var names []string
+	if identifierPattern.MatchString(expr) {
+		names = append(names, expr)
+	}
+	if fields := extractTopLevelObjectFields(expr); len(fields) > 0 {
+		for _, field := range []string{"params", "data", "body"} {
+			value := strings.TrimSpace(fields[field])
+			if identifierPattern.MatchString(value) {
+				names = appendUniqueStrings(names, value)
+			}
+		}
+	}
+	var params []StaticProtocolParam
+	for _, name := range names {
+		params = mergeStaticParams(params, inferStaticParamsFromLocalVariable(content, callIndex, name, source))
+	}
+	return params
+}
+
+func inferStaticParamsFromLocalVariable(content string, callIndex int, variableName string, source string) []StaticProtocolParam {
+	variableName = strings.TrimSpace(variableName)
+	if len(variableName) < 3 || !identifierPattern.MatchString(variableName) {
+		return nil
+	}
+	if callIndex < 0 || callIndex > len(content) {
+		return nil
+	}
+	start := callIndex - 5000
+	if start < 0 {
+		start = 0
+	}
+	window := content[start:callIndex]
+	expr := findLastLocalVariableAssignmentExpression(window, variableName)
+	params := collectParamsFromObjectLikeExpression(expr, source)
+	params = mergeStaticParams(params, collectStaticParamsFromPropertyAssignments(window, variableName, source))
+	if len(params) == 0 {
+		return nil
+	}
+	for index := range params {
+		if params[index].ResolvedFrom == "" {
+			params[index].ResolvedFrom = "local-variable:" + variableName
+		}
+	}
+	return params
+}
+
+func findLastLocalVariableAssignmentExpression(window string, variableName string) string {
+	pattern := regexp.MustCompile(`(?:^|[^A-Za-z0-9_$\.])(?:(?:var|let|const)\s+)?` + regexp.QuoteMeta(variableName) + `\s*=`)
+	matches := pattern.FindAllStringIndex(window, -1)
+	for index := len(matches) - 1; index >= 0; index-- {
+		match := matches[index]
+		eqIndex := strings.LastIndex(window[match[0]:match[1]], "=")
+		if eqIndex < 0 {
+			continue
+		}
+		start := match[0] + eqIndex + 1
+		expr, ok := readJSAssignmentExpression(window, start, 1800)
+		if ok {
+			return expr
+		}
+	}
+	return ""
+}
+
+func collectParamsFromObjectLikeExpression(expr string, source string) []StaticProtocolParam {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil
+	}
+	if params := collectParamsFromObjectFields(extractTopLevelObjectFields(expr), source); len(params) > 0 {
+		return params
+	}
+	var params []StaticProtocolParam
+	for _, fields := range extractNestedObjectFieldMaps(expr) {
+		params = mergeStaticParams(params, collectParamsFromObjectFields(fields, source))
+	}
+	return params
+}
+
+func collectParamsFromObjectFields(fields map[string]string, source string) []StaticProtocolParam {
+	if len(fields) == 0 {
+		return nil
+	}
+	params := make([]StaticProtocolParam, 0, len(fields))
+	for key, valueExpr := range fields {
+		key = strings.TrimSpace(key)
+		if key == "" || strings.HasPrefix(key, "...") {
+			continue
+		}
+		params = appendStaticParamWithValue(params, StaticProtocolParam{
+			Name:         key,
+			Source:       source,
+			ValueExpr:    strings.TrimSpace(valueExpr),
+			ResolvedFrom: "local-object",
+		})
+	}
+	return params
+}
+
+func extractNestedObjectFieldMaps(expr string) []map[string]string {
+	result := make([]map[string]string, 0, 2)
+	for index := 0; index < len(expr); index++ {
+		if expr[index] != '{' {
+			continue
+		}
+		inner, endIndex, ok := extractBalancedJS(expr, index, '{', '}')
+		if !ok {
+			continue
+		}
+		fields := extractTopLevelObjectFields("{" + inner + "}")
+		if len(fields) > 0 {
+			result = append(result, fields)
+		}
+		index = endIndex
+	}
+	return result
+}
+
+func collectStaticParamsFromPropertyAssignments(window string, variableName string, source string) []StaticProtocolParam {
+	pattern := regexp.MustCompile(regexp.QuoteMeta(variableName) + `\s*\.\s*([A-Za-z_$][\w$]*)\s*=`)
+	matches := pattern.FindAllStringSubmatchIndex(window, -1)
+	params := make([]StaticProtocolParam, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 4 {
+			continue
+		}
+		field := strings.TrimSpace(window[match[2]:match[3]])
+		if field == "" {
+			continue
+		}
+		valueExpr, _ := readJSAssignmentExpression(window, match[1], 500)
+		params = appendStaticParamWithValue(params, StaticProtocolParam{
+			Name:         field,
+			Source:       source,
+			ValueExpr:    strings.TrimSpace(valueExpr),
+			ResolvedFrom: "local-property:" + variableName,
+		})
+	}
+	return params
 }
 
 func extractAxiosConfigEndpoints(fileURL, content string) []StaticProtocolEndpoint {
@@ -1476,18 +1741,28 @@ func extractFetchEndpoints(fileURL, content string) []StaticProtocolEndpoint {
 }
 
 func extractObjectRequestEndpoints(fileURL, content, callee, client string) []StaticProtocolEndpoint {
+	return extractObjectRequestEndpointsWithScope(fileURL, content, content, callee, client)
+}
+
+func extractObjectRequestEndpointsWithScope(fileURL, content, resolverContent, callee, client string) []StaticProtocolEndpoint {
 	matches := findCallExpressions(content, callee)
 	results := make([]StaticProtocolEndpoint, 0, len(matches))
+	if strings.TrimSpace(resolverContent) == "" {
+		resolverContent = content
+	}
+	if resolverContent != content {
+		resolverContent = content + "\n" + resolverContent
+	}
 	for _, match := range matches {
 		args := splitTopLevelCSV(match.Args)
 		if len(args) == 0 {
 			continue
 		}
-		config := extractResolvedTopLevelObjectFields(content, args[0])
+		config := extractResolvedTopLevelObjectFields(resolverContent, args[0])
 		if len(config) == 0 {
 			continue
 		}
-		path := parseRequestPath(config["url"])
+		path := parseRequestPathWithContent(resolverContent, config["url"])
 		if path == "" {
 			continue
 		}
@@ -1499,13 +1774,15 @@ func extractObjectRequestEndpoints(fileURL, content, callee, client string) []St
 			method = "GET"
 		}
 		params := collectPathAndQueryParams(path)
-		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(content, config["data"])))
-		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(content, config["body"])))
-		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(content, config["params"])))
-		config = resolveStaticConfigFields(content, config)
+		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(resolverContent, config["data"])))
+		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(resolverContent, config["body"])))
+		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(resolverContent, config["params"])))
+		params = mergeStaticParams(params, collectParamsFromSerializedForm(resolverContent, config["data"], "body.form"))
+		params = mergeStaticParams(params, collectParamsFromSerializedForm(resolverContent, config["body"], "body.form"))
+		config = resolveStaticConfigFields(resolverContent, config)
 		payloadCarrier, payloadFormat, payloadPreview := detectPayloadMetadataFromConfig(config)
 		context := extractNearbyFunctionContext(content, match.Index)
-		context = appendStaticHeaderContext(context, args[0], content)
+		context = appendStaticHeaderContext(context, args[0], resolverContent)
 		for _, field := range []string{"data", "params", "body"} {
 			value := strings.TrimSpace(config[field])
 			if identifierPattern.MatchString(value) {
@@ -1573,6 +1850,12 @@ func extractConfigLikeCallEndpoints(fileURL, content string) []StaticProtocolEnd
 	matches := findConfigLikeCallExpressions(content)
 	results := make([]StaticProtocolEndpoint, 0, len(matches))
 	for _, match := range matches {
+		if isStaticFrontendNavigationCallee(match.Callee) {
+			continue
+		}
+		if isExplicitStaticObjectRequestCallee(match.Callee) {
+			continue
+		}
 		args := splitTopLevelCSV(match.Args)
 		if len(args) == 0 {
 			continue
@@ -1600,6 +1883,8 @@ func extractConfigLikeCallEndpoints(fileURL, content string) []StaticProtocolEnd
 		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(content, config["data"])))
 		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(content, config["body"])))
 		params = mergeStaticParams(params, collectParamsFromBodyArg(resolveStaticArgumentExpression(content, config["params"])))
+		params = mergeStaticParams(params, collectParamsFromSerializedForm(content, config["data"], "body.form"))
+		params = mergeStaticParams(params, collectParamsFromSerializedForm(content, config["body"], "body.form"))
 
 		config = resolveStaticConfigFields(content, config)
 		payloadCarrier, payloadFormat, payloadPreview := detectPayloadMetadataFromConfig(config)
@@ -1626,6 +1911,165 @@ func extractConfigLikeCallEndpoints(fileURL, content string) []StaticProtocolEnd
 		})
 	}
 	return results
+}
+
+func isExplicitStaticObjectRequestCallee(callee string) bool {
+	switch strings.TrimSpace(callee) {
+	case "$.ajax", "jQuery.ajax", "uni.request", "rn":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStaticFrontendNavigationCallee(callee string) bool {
+	lower := strings.ToLower(strings.TrimSpace(callee))
+	for _, suffix := range []string{
+		".navigate", ".navigateto", ".redirectto", ".relaunch", ".switchtab", ".navigateback",
+		"navigate", "navigateto", "redirectto", "relaunch", "switchtab", "navigateback",
+	} {
+		if lower == suffix || strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractGenericObjectRequestWrapperEndpoints(fileURL, content, resolverContent string) []StaticProtocolEndpoint {
+	matches := findObjectRequestWrapperCallExpressions(content)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	if strings.TrimSpace(resolverContent) == "" {
+		resolverContent = content
+	}
+	if resolverContent != content {
+		resolverContent = content + "\n" + resolverContent
+	}
+
+	results := make([]StaticProtocolEndpoint, 0, len(matches))
+	for _, match := range matches {
+		args := splitTopLevelCSV(match.Args)
+		if len(args) == 0 {
+			continue
+		}
+
+		config := extractTopLevelObjectFields(resolveStaticArgumentExpression(resolverContent, args[0]))
+		if len(config) == 0 || !isLikelyRequestConfigObject(config) {
+			continue
+		}
+
+		path := parseRequestPathWithContent(resolverContent, config["url"])
+		if path == "" {
+			continue
+		}
+
+		method := strings.ToUpper(parseStringLiteral(config["method"]))
+		if method == "" {
+			method = strings.ToUpper(parseStringLiteral(config["type"]))
+		}
+		if method == "" {
+			method = "GET"
+		}
+
+		params := collectPathAndQueryParams(path)
+		for _, field := range []string{"data", "body", "params"} {
+			source := "body"
+			if field == "params" || method == "GET" || method == "DELETE" {
+				source = "query"
+			}
+			raw := strings.TrimSpace(config[field])
+			resolved := resolveStaticArgumentExpression(resolverContent, raw)
+			params = mergeStaticParams(params, collectParamsFromObjectLikeExpression(resolved, source))
+			params = mergeStaticParams(params, inferStaticParamsFromCallArgumentVariables(resolverContent, match.Index, raw, source))
+			if len(params) == 0 {
+				params = mergeStaticParams(params, collectParamsFromBodyArg(resolved))
+			}
+		}
+
+		config = resolveStaticConfigFields(resolverContent, config)
+		payloadCarrier, payloadFormat, payloadPreview := detectPayloadMetadataFromConfig(config)
+		if method == "GET" || method == "DELETE" {
+			if payloadCarrier == "body" || payloadCarrier == "data" {
+				payloadCarrier = "params"
+				payloadFormat = "query"
+			}
+		}
+
+		context := extractNearbyFunctionContext(content, match.Index)
+		context = appendStaticHeaderContext(context, args[0], resolverContent)
+		context = appendGenericWrapperHeaderContext(context, resolverContent)
+		context = appendUniqueStrings(context, "请求封装: "+match.Callee+"({url,type,body,config})")
+		for _, field := range []string{"data", "params", "body"} {
+			value := strings.TrimSpace(config[field])
+			if identifierPattern.MatchString(value) {
+				context = appendUniqueStrings(context, "数据变量: "+value)
+			}
+		}
+
+		results = append(results, StaticProtocolEndpoint{
+			Path:                  path,
+			Method:                method,
+			Client:                "object-request-wrapper:" + match.Callee,
+			Params:                params,
+			RequestPayloadCarrier: payloadCarrier,
+			RequestPayloadFormat:  payloadFormat,
+			RequestPayloadPreview: payloadPreview,
+			Context:               context,
+			SourceFile:            fileURL,
+			Snippet:               normalizeSnippet(match.CallText),
+		})
+	}
+	return results
+}
+
+func findObjectRequestWrapperCallExpressions(content string) []callExpression {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`Object\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)\s*\(`),
+	}
+	results := make([]callExpression, 0, 8)
+	seen := make(map[int]struct{})
+	for _, pattern := range patterns {
+		matches := pattern.FindAllStringSubmatchIndex(content, -1)
+		for _, match := range matches {
+			if len(match) < 4 {
+				continue
+			}
+			callee := strings.TrimSpace(content[match[2]:match[3]])
+			callStart := match[2]
+			openIndex := strings.Index(content[callStart:], "(")
+			if openIndex < 0 {
+				continue
+			}
+			openIndex += callStart
+			args, endIndex, ok := extractBalancedJS(content, openIndex, '(', ')')
+			if !ok {
+				continue
+			}
+			if _, exists := seen[callStart]; exists {
+				continue
+			}
+			seen[callStart] = struct{}{}
+			results = append(results, callExpression{
+				Index:    callStart,
+				Args:     args,
+				CallText: content[callStart : endIndex+1],
+				Callee:   callee,
+			})
+		}
+	}
+	return results
+}
+
+func appendGenericWrapperHeaderContext(context []string, content string) []string {
+	if strings.Contains(content, "X-SAAS-TOKEN") {
+		context = appendUniqueStrings(context, "请求头动态: X-SAAS-TOKEN <- localStorage")
+	}
+	if strings.Contains(content, "X-Requested-With") && strings.Contains(content, "XMLHttpRequest") {
+		context = appendUniqueStrings(context, "请求头常量: X-Requested-With = XMLHttpRequest")
+	}
+	return context
 }
 
 type namedWrapperDefinition struct {
@@ -2070,6 +2514,8 @@ func detectPayloadMetadata(carrier, raw string) (string, string, string) {
 		format = "json"
 	case strings.Contains(raw, "FormData("):
 		format = "form-data"
+	case strings.Contains(raw, ".serialize()") || strings.Contains(raw, ".serializeArray()"):
+		format = "form"
 	case strings.Contains(raw, "URLSearchParams("):
 		format = "query"
 	}
@@ -2270,17 +2716,27 @@ func parseStringLiteral(value string) string {
 }
 
 func parseRequestPath(value string) string {
+	return parseRequestPathWithContent("", value)
+}
+
+func parseRequestPathWithContent(content, value string) string {
 	if literal := parseStringLiteral(value); literal != "" {
 		if isLikelyStaticRequestPath(literal) {
-			return literal
+			return normalizeStaticResolvedRequestPath(literal)
 		}
 		return ""
 	}
 
 	trimmed := strings.TrimSpace(value)
-	if template := resolveStaticTemplateLiteral("", trimmed, 0); template != "" {
+	if resolvedValues := resolveStaticStringExpression(content, trimmed, 0); len(resolvedValues) == 1 {
+		resolvedPath := normalizeStaticResolvedRequestPath(resolvedValues[0])
+		if isLikelyStaticRequestPath(resolvedPath) {
+			return resolvedPath
+		}
+	}
+	if template := resolveStaticTemplateLiteral(content, trimmed, 0); template != "" {
 		if isLikelyStaticRequestPath(template) {
-			return template
+			return normalizeStaticResolvedRequestPath(template)
 		}
 		return ""
 	}
@@ -2288,11 +2744,21 @@ func parseRequestPath(value string) string {
 	if len(match) > 1 {
 		resolved := strings.TrimSpace(match[1])
 		if isLikelyStaticRequestPath(resolved) {
-			return resolved
+			return normalizeStaticResolvedRequestPath(resolved)
 		}
 	}
 
 	return ""
+}
+
+func normalizeStaticResolvedRequestPath(path string) string {
+	path = strings.TrimSpace(path)
+	if strings.HasPrefix(path, "{") {
+		if end := strings.Index(path, "}"); end >= 0 && end+1 < len(path) && path[end+1] == '/' {
+			path = path[end+1:]
+		}
+	}
+	return path
 }
 
 func isLikelyStaticRequestPath(value string) bool {
@@ -2343,6 +2809,10 @@ func resolveStaticStringExpression(content interface{}, expr string, depth int) 
 		return resolveStaticStringExpression(source, inner, depth+1)
 	}
 
+	if values := resolveStaticConcatCallExpression(source, expr, depth+1); len(values) > 0 {
+		return values
+	}
+
 	if parts := splitStaticConcatenation(expr); len(parts) > 1 {
 		acc := []string{""}
 		for _, part := range parts {
@@ -2369,6 +2839,9 @@ func resolveStaticStringExpression(content interface{}, expr string, depth int) 
 		return resolveStaticClientBaseRoots(source, strings.TrimSuffix(expr, ".baseURL"))
 	}
 	if identifierPattern.MatchString(expr) {
+		if len(expr) < 2 {
+			return nil
+		}
 		return resolveStaticIdentifierRoots(source, expr)
 	}
 	if strings.Contains(expr, ".") {
@@ -2385,6 +2858,88 @@ func resolveStaticStringExpression(content interface{}, expr string, depth int) 
 	return nil
 }
 
+func resolveStaticConcatCallExpression(content, expr string, depth int) []string {
+	if depth > 6 {
+		return nil
+	}
+	expr = strings.TrimSpace(expr)
+	openIndex := strings.Index(expr, ".concat(")
+	if openIndex < 0 {
+		return nil
+	}
+	closeOpenIndex := openIndex + len(".concat")
+	args, endIndex, ok := extractBalancedJS(expr, closeOpenIndex, '(', ')')
+	if !ok {
+		return nil
+	}
+	tail := strings.TrimSpace(expr[endIndex+1:])
+	if tail != "" && strings.HasPrefix(tail, ".concat(") {
+		prefixValues := resolveStaticConcatCallExpression(content, expr[:endIndex+1], depth+1)
+		if len(prefixValues) != 1 {
+			return nil
+		}
+		return resolveStaticConcatCallExpression(content, strconv.Quote(prefixValues[0])+tail, depth+1)
+	}
+	if tail != "" {
+		return nil
+	}
+
+	receiver := strings.TrimSpace(expr[:openIndex])
+	acc := []string{""}
+	if receiver != "" {
+		if literal := parseStringLiteralAllowEmpty(receiver); literal != "" || isQuotedEmptyString(receiver) {
+			acc[0] = literal
+		} else {
+			resolved := resolveStaticStringExpression(content, receiver, depth+1)
+			if len(resolved) == 0 {
+				resolved = []string{staticExpressionPlaceholder(receiver)}
+			}
+			acc = resolved
+		}
+	}
+
+	for _, part := range splitTopLevelCSV(args) {
+		resolved := resolveStaticStringExpression(content, part, depth+1)
+		if len(resolved) == 0 {
+			resolved = []string{staticExpressionPlaceholder(part)}
+		}
+		next := make([]string, 0, len(acc)*len(resolved))
+		for _, prefix := range acc {
+			for _, item := range resolved {
+				next = appendUniqueStrings(next, prefix+item)
+			}
+		}
+		acc = next
+	}
+	return acc
+}
+
+func staticExpressionPlaceholder(expr string) string {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return "{}"
+	}
+	if strings.HasPrefix(expr, "encodeURIComponent(") {
+		if inner, _, ok := extractBalancedJS(expr, len("encodeURIComponent"), '(', ')'); ok {
+			expr = strings.TrimSpace(inner)
+		}
+	}
+	return "{" + expr + "}"
+}
+
+func parseStringLiteralAllowEmpty(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if isQuotedEmptyString(trimmed) {
+		return ""
+	}
+	return parseStringLiteral(trimmed)
+}
+
+func isQuotedEmptyString(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == `""` || value == `''` || value == "``"
+}
+
 func resolveStaticMemberExpression(content, expr string, depth int) []string {
 	expr = strings.TrimSpace(expr)
 	if !strings.Contains(expr, ".") {
@@ -2399,6 +2954,10 @@ func resolveStaticMemberExpression(content, expr string, depth int) []string {
 	fieldName := strings.TrimSpace(parts[1])
 	if objectName == "" || fieldName == "" {
 		return nil
+	}
+
+	if values := resolveStaticWebpackImportedMemberExpression(content, objectName, fieldName, depth+1); len(values) > 0 {
+		return values
 	}
 
 	patterns := []*regexp.Regexp{
@@ -2424,6 +2983,155 @@ func resolveStaticMemberExpression(content, expr string, depth int) []string {
 		}
 	}
 	return values
+}
+
+func resolveStaticWebpackImportedMemberExpression(content, objectName, fieldName string, depth int) []string {
+	if depth > 6 || objectName == "" || fieldName == "" {
+		return nil
+	}
+
+	moduleIDs := findStaticWebpackImportModuleIDs(content, objectName)
+	if len(moduleIDs) == 0 {
+		return nil
+	}
+
+	values := make([]string, 0, len(moduleIDs))
+	for _, moduleID := range moduleIDs {
+		body := extractStaticWebpackModuleBody(content, moduleID)
+		if body == "" {
+			continue
+		}
+		exportedName := findStaticWebpackExportReturnName(body, fieldName)
+		if exportedName == "" {
+			continue
+		}
+		for _, value := range resolveStaticStringExpression(body, exportedName, depth+1) {
+			values = appendUniqueStrings(values, value)
+		}
+		if len(values) == 0 {
+			for _, value := range resolveStaticLocalStringAssignment(body, exportedName) {
+				values = appendUniqueStrings(values, value)
+			}
+		}
+	}
+	return values
+}
+
+func resolveStaticLocalStringAssignment(content, identifier string) []string {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil
+	}
+	pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(identifier) + `\s*=\s*`)
+	matches := pattern.FindAllStringIndex(content, -1)
+	values := make([]string, 0, len(matches))
+	for _, match := range matches {
+		start := match[1]
+		if start >= len(content) {
+			continue
+		}
+		quote := content[start]
+		if quote != '"' && quote != '\'' && quote != '`' {
+			continue
+		}
+		value, ok := readStaticQuotedString(content, start)
+		if !ok {
+			continue
+		}
+		values = appendUniqueStrings(values, value)
+	}
+	return values
+}
+
+func readStaticQuotedString(content string, quoteIndex int) (string, bool) {
+	if quoteIndex < 0 || quoteIndex >= len(content) {
+		return "", false
+	}
+	quote := content[quoteIndex]
+	if quote != '"' && quote != '\'' && quote != '`' {
+		return "", false
+	}
+	escaped := false
+	var builder strings.Builder
+	for index := quoteIndex + 1; index < len(content); index++ {
+		ch := content[index]
+		if escaped {
+			builder.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == quote {
+			return builder.String(), true
+		}
+		builder.WriteByte(ch)
+	}
+	return "", false
+}
+
+func findStaticWebpackImportModuleIDs(content, objectName string) []string {
+	pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(objectName) + `\s*=\s*[A-Za-z_$][\w$]*\s*\(\s*["']([^"']+)["']\s*\)`)
+	matches := pattern.FindAllStringSubmatch(content, -1)
+	result := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		result = appendUniqueStrings(result, match[1])
+	}
+	return result
+}
+
+func extractStaticWebpackModuleBody(content, moduleID string) string {
+	moduleID = strings.TrimSpace(moduleID)
+	if moduleID == "" {
+		return ""
+	}
+	patterns := []string{
+		strconv.Quote(moduleID) + ":function",
+		strconv.Quote(moduleID) + ": function",
+		moduleID + ":function",
+		moduleID + ": function",
+	}
+	for _, marker := range patterns {
+		start := strings.Index(content, marker)
+		if start < 0 {
+			continue
+		}
+		openParen := strings.Index(content[start:], "(")
+		if openParen < 0 {
+			continue
+		}
+		openParen += start
+		_, closeParen, ok := extractBalancedJS(content, openParen, '(', ')')
+		if !ok {
+			continue
+		}
+		openBrace := closeParen + 1
+		for openBrace < len(content) && strings.ContainsRune(" \t\r\n", rune(content[openBrace])) {
+			openBrace++
+		}
+		if openBrace >= len(content) || content[openBrace] != '{' {
+			continue
+		}
+		body, _, ok := extractBalancedJS(content, openBrace, '{', '}')
+		if ok {
+			return body
+		}
+	}
+	return ""
+}
+
+func findStaticWebpackExportReturnName(moduleBody, exportName string) string {
+	pattern := regexp.MustCompile(`\.d\(\s*[A-Za-z_$][\w$]*\s*,\s*["']` + regexp.QuoteMeta(exportName) + `["']\s*,\s*\(function\(\)\{return\s+([A-Za-z_$][\w$]*)\}\)\s*\)`)
+	match := pattern.FindStringSubmatch(moduleBody)
+	if len(match) >= 2 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
 }
 
 func resolveStaticTemplateLiteral(content, expr string, depth int) string {
@@ -2631,10 +3339,18 @@ func collectParamsFromBodyArg(value string) []StaticProtocolParam {
 	if fields := extractTopLevelObjectFields(trimmed); len(fields) > 0 {
 		params := make([]StaticProtocolParam, 0, len(fields))
 		for key, nestedValue := range fields {
-			params = appendStaticParam(params, key, "body")
+			params = appendStaticParamWithValue(params, StaticProtocolParam{
+				Name:      key,
+				Source:    "body",
+				ValueExpr: strings.TrimSpace(nestedValue),
+			})
 			if nestedFields := extractTopLevelObjectFields(nestedValue); len(nestedFields) > 0 {
-				for nestedKey := range nestedFields {
-					params = appendStaticParam(params, nestedKey, "body.nested")
+				for nestedKey, nestedExpr := range nestedFields {
+					params = appendStaticParamWithValue(params, StaticProtocolParam{
+						Name:      nestedKey,
+						Source:    "body.nested",
+						ValueExpr: strings.TrimSpace(nestedExpr),
+					})
 				}
 			}
 		}
@@ -2642,10 +3358,136 @@ func collectParamsFromBodyArg(value string) []StaticProtocolParam {
 	}
 
 	if identifierPattern.MatchString(trimmed) {
-		return []StaticProtocolParam{{Name: trimmed, Source: "variable"}}
+		return []StaticProtocolParam{{Name: trimmed, Source: "variable", ValueExpr: trimmed}}
 	}
 
 	return nil
+}
+
+func collectParamsFromSerializedForm(content, value, source string) []StaticProtocolParam {
+	selector, ok := parseJQuerySerializeSelector(value)
+	if !ok {
+		return nil
+	}
+	fields := extractSerializedFormFieldNames(content, selector)
+	if len(fields) == 0 {
+		return nil
+	}
+	params := make([]StaticProtocolParam, 0, len(fields))
+	for _, field := range fields {
+		params = appendStaticParamWithValue(params, StaticProtocolParam{
+			Name:         field,
+			Source:       source,
+			Resolved:     true,
+			ResolvedFrom: "dom-form:" + selector,
+		})
+	}
+	return params
+}
+
+func parseJQuerySerializeSelector(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || (!strings.Contains(trimmed, ".serialize()") && !strings.Contains(trimmed, ".serializeArray()")) {
+		return "", false
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?:\$|jQuery)\s*\(\s*"([^"]+)"\s*\)\s*\.\s*(?:serialize|serializeArray)\s*\(\s*\)`),
+		regexp.MustCompile(`(?:\$|jQuery)\s*\(\s*'([^']+)'\s*\)\s*\.\s*(?:serialize|serializeArray)\s*\(\s*\)`),
+		regexp.MustCompile("(?:\\$|jQuery)\\s*\\(\\s*`([^`]+)`\\s*\\)\\s*\\.\\s*(?:serialize|serializeArray)\\s*\\(\\s*\\)"),
+	}
+	for _, pattern := range patterns {
+		match := pattern.FindStringSubmatch(trimmed)
+		if len(match) > 1 {
+			selector := strings.TrimSpace(match[1])
+			if selector != "" {
+				return selector, true
+			}
+		}
+	}
+	return "", false
+}
+
+func extractSerializedFormFieldNames(content, selector string) []string {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil
+	}
+	formHTML := ""
+	if strings.HasPrefix(selector, "#") && len(selector) > 1 {
+		formHTML = extractHTMLFormByID(content, strings.TrimPrefix(selector, "#"))
+	}
+	if strings.TrimSpace(formHTML) == "" {
+		return nil
+	}
+	formHTML = stripHTMLComments(formHTML)
+	fields := make([]string, 0, 6)
+	tagPattern := regexp.MustCompile(`(?is)<\s*(input|select|textarea)\b[^>]*>`)
+	for _, match := range tagPattern.FindAllString(formHTML, -1) {
+		name := htmlAttributeValue(match, "name")
+		if name == "" || htmlAttributeExists(match, "disabled") {
+			continue
+		}
+		tag := strings.ToLower(strings.TrimSpace(firstNonEmpty(htmlTagName(match), "input")))
+		inputType := strings.ToLower(strings.TrimSpace(htmlAttributeValue(match, "type")))
+		if tag == "input" {
+			switch inputType {
+			case "button", "submit", "reset", "image", "file":
+				continue
+			}
+		}
+		fields = appendUniqueStrings(fields, name)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+func extractHTMLFormByID(content, id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	pattern := regexp.MustCompile(`(?is)<form\b[^>]*>.*?</form>`)
+	for _, match := range pattern.FindAllString(content, -1) {
+		openEnd := strings.Index(match, ">")
+		if openEnd < 0 {
+			continue
+		}
+		if htmlAttributeValue(match[:openEnd+1], "id") == id {
+			return match
+		}
+	}
+	return ""
+}
+
+func stripHTMLComments(content string) string {
+	return regexp.MustCompile(`(?is)<!--.*?-->`).ReplaceAllString(content, "")
+}
+
+func htmlTagName(tag string) string {
+	match := regexp.MustCompile(`(?is)^<\s*([A-Za-z0-9_-]+)`).FindStringSubmatch(strings.TrimSpace(tag))
+	if len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func htmlAttributeValue(tag, name string) string {
+	pattern := regexp.MustCompile(`(?is)\b` + regexp.QuoteMeta(name) + `\s*=\s*(?:"([^"]*)"|'([^']*)'|` + "`" + `([^` + "`" + `]*)` + "`" + `|([^\s>]+))`)
+	match := pattern.FindStringSubmatch(tag)
+	if len(match) == 0 {
+		return ""
+	}
+	for _, value := range match[1:] {
+		if value != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func htmlAttributeExists(tag, name string) bool {
+	pattern := regexp.MustCompile(`(?is)\b` + regexp.QuoteMeta(name) + `(?:\s*=\s*(?:"[^"]*"|'[^']*'|` + "`" + `[^` + "`" + `]*` + "`" + `|[^\s>]+))?`)
+	return pattern.MatchString(tag)
 }
 
 func extractNearbyFunctionContext(content string, callIndex int) []string {
@@ -2655,9 +3497,9 @@ func extractNearbyFunctionContext(content string, callIndex int) []string {
 	}
 	window := content[start:callIndex]
 	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`function\s+([A-Za-z_$][\w$]*)?\s*\(([^)]{0,160})\)\s*\{?$`),
-		regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*function\s*\(([^)]{0,160})\)\s*\{?$`),
-		regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*\(([^)]{0,160})\)\s*=>\s*\{?$`),
+		regexp.MustCompile(`function\s+([A-Za-z_$][\w$]*)?\s*\(([^)]{0,160})\)\s*\{`),
+		regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*function\s*\(([^)]{0,160})\)\s*\{`),
+		regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*[:=]\s*\(([^)]{0,160})\)\s*=>\s*\{`),
 	}
 	context := make([]string, 0, 2)
 	for _, pattern := range patterns {
@@ -2702,12 +3544,18 @@ func normalizeFunctionParams(value string) []string {
 func mergeStaticParams(base, extra []StaticProtocolParam) []StaticProtocolParam {
 	merged := append([]StaticProtocolParam{}, base...)
 	for _, param := range extra {
-		merged = appendStaticParam(merged, param.Name, param.Source)
+		merged = appendStaticParamWithValue(merged, param)
 	}
 	return merged
 }
 
 func appendStaticParam(params []StaticProtocolParam, name, source string) []StaticProtocolParam {
+	return appendStaticParamWithValue(params, StaticProtocolParam{Name: name, Source: source})
+}
+
+func appendStaticParamWithValue(params []StaticProtocolParam, param StaticProtocolParam) []StaticProtocolParam {
+	name := strings.TrimSpace(param.Name)
+	source := strings.TrimSpace(param.Source)
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return params
@@ -2717,10 +3565,25 @@ func appendStaticParam(params []StaticProtocolParam, name, source string) []Stat
 			if params[index].Source == "" && source != "" {
 				params[index].Source = source
 			}
+			if params[index].Value == "" {
+				params[index].Value = strings.TrimSpace(param.Value)
+			}
+			if params[index].ValueExpr == "" {
+				params[index].ValueExpr = strings.TrimSpace(param.ValueExpr)
+			}
+			if params[index].ResolvedFrom == "" {
+				params[index].ResolvedFrom = strings.TrimSpace(param.ResolvedFrom)
+			}
+			params[index].Resolved = params[index].Resolved || param.Resolved
 			return params
 		}
 	}
-	return append(params, StaticProtocolParam{Name: name, Source: source})
+	param.Name = name
+	param.Source = source
+	param.Value = strings.TrimSpace(param.Value)
+	param.ValueExpr = strings.TrimSpace(param.ValueExpr)
+	param.ResolvedFrom = strings.TrimSpace(param.ResolvedFrom)
+	return append(params, param)
 }
 
 func appendUniqueStrings(items []string, value string) []string {

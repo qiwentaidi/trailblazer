@@ -17,6 +17,7 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/cdproto/security"
 	"github.com/chromedp/chromedp"
 )
 
@@ -430,6 +431,7 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 			_, err := page.AddScriptToEvaluateOnNewDocument(buildProtocolHookScript(options)).Do(ctx)
 			return err
 		}),
+		security.SetIgnoreCertificateErrors(true),
 		network.Enable(),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return emulation.SetUserAgentOverride(defaultCaptureUserAgent).
@@ -539,6 +541,8 @@ func buildExecAllocatorOptions(options CaptureOptions) []chromedp.ExecAllocatorO
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("enable-automation", false),
 		chromedp.Flag("disable-infobars", true),
+		chromedp.Flag("ignore-certificate-errors", true),
+		chromedp.Flag("allow-insecure-localhost", true),
 		chromedp.Flag("window-size", "1440,900"),
 	)
 
@@ -555,11 +559,13 @@ func buildExecAllocatorOptions(options CaptureOptions) []chromedp.ExecAllocatorO
 
 func buildCaptureChromeFlags(options CaptureOptions) map[string]any {
 	flags := map[string]any{
-		"headless":               !options.BrowserVisible,
-		"disable-blink-features": "AutomationControlled",
-		"enable-automation":      false,
-		"disable-infobars":       true,
-		"window-size":            "1440,900",
+		"headless":                  !options.BrowserVisible,
+		"disable-blink-features":    "AutomationControlled",
+		"enable-automation":         false,
+		"disable-infobars":          true,
+		"ignore-certificate-errors": true,
+		"allow-insecure-localhost":  true,
+		"window-size":               "1440,900",
 	}
 
 	if proxyServer := strings.TrimSpace(options.ProxyServer); proxyServer != "" {

@@ -67,6 +67,39 @@ func TestBindStaticContexts(t *testing.T) {
 	}
 }
 
+func TestExtractWebpackChunkJSLinks(t *testing.T) {
+	content := `u.e=function(e){var n=({}[e]||e)+"."+{0:"87e70602",1:"32c8143c",8:"1f9ff966"}[e]+".js"}`
+
+	links := extractWebpackChunkJSLinks("https://example.com/assets/main.6281bd04.js", content)
+
+	want := []string{
+		"https://example.com/assets/0.87e70602.js",
+		"https://example.com/assets/1.32c8143c.js",
+		"https://example.com/assets/8.1f9ff966.js",
+	}
+	for _, item := range want {
+		if !containsStringLocal(links, item) {
+			t.Fatalf("expected chunk link %q, got %#v", item, links)
+		}
+	}
+}
+
+func TestNormalizeJSURLHandlesProtocolRelativeLinks(t *testing.T) {
+	got := normalizeJSURL("https://example.com/app/", "//cdn.example.com/a.js")
+	if got != "https://cdn.example.com/a.js" {
+		t.Fatalf("expected protocol-relative JS URL to keep CDN host, got %q", got)
+	}
+}
+
+func containsStringLocal(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDedupeVulnerabilitiesHandlesUnauthorizedTrailingSlash(t *testing.T) {
 	tests := []struct {
 		name      string
