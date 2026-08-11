@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
@@ -12,6 +13,8 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/protocoltool"
 	"github.com/qiwentaidi/trailblazer/pkg/core/scanexec"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
+	"github.com/qiwentaidi/trailblazer/pkg/logger"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -127,6 +130,12 @@ type ScanOptions struct {
 	// 输出路径（可选，为空则输出到标准输出）
 	OutputPath string `json:"outputPath,omitempty"`
 
+	// LogOutput 允许宿主系统接管扫描日志输出。
+	LogOutput io.Writer `json:"-"`
+
+	// LogOutputPath 指定扫描日志文件路径。设置后，扫描期间的 fmt/log/stderr 输出会写入该文件。
+	LogOutputPath string `json:"logOutputPath,omitempty"`
+
 	// 结果回调函数（可选，用于实时获取扫描结果，类似nuclei）
 	// 当发现漏洞、资产、风险时会调用此回调
 	// 返回false表示停止扫描，返回true表示继续扫描
@@ -216,6 +225,7 @@ func LoadScanOptionsFromFile(configPath string) (*ScanOptions, error) {
 		Authentication: cfg.Authentication,
 		Placeholder:    cfg.Placeholder,
 		WeakCreds:      cfg.WeakCreds,
+		LogOutputPath:  cfg.Log.OutputPath,
 		VulnDetection: VulnDetectionOptions{
 			Enabled:      vulnDetectionEnabled,
 			SQLInjection: cfg.VulnDetection.SQLInjection,
@@ -1490,11 +1500,40 @@ func resolveSDKScanIdentity(options *ScanOptions) (string, int) {
 	return taskID, version
 }
 
+func prepareSDKLogCapture(options *ScanOptions) (func() error, error) {
+	if options == nil || (options.LogOutput == nil && strings.TrimSpace(options.LogOutputPath) == "") {
+		return func() error { return nil }, nil
+	}
+
+	restoreOutput, err := logger.ConfigureOutput(options.LogOutput, options.LogOutputPath)
+	if err != nil {
+		return nil, err
+	}
+
+	capture, err := logger.InstallStandardCapture()
+	if err != nil {
+		_ = restoreOutput()
+		return nil, err
+	}
+
+	return func() error {
+		return errors.Join(capture.Restore(), restoreOutput())
+	}, nil
+}
+
 // PerformScan 执行CLI扫描（无数据库操作）- SDK版本，使用ScanOptions
 func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 	if options == nil {
 		return nil, fmt.Errorf("scan options cannot be nil")
 	}
+	restoreLogs, err := prepareSDKLogCapture(options)
+	if err != nil {
+		return nil, fmt.Errorf("configure log output: %w", err)
+	}
+	defer func() {
+		_ = restoreLogs()
+	}()
+
 	if options.DataStore == nil {
 		options.DataStore = database.NewMemoryScanDataStore()
 	}

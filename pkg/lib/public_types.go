@@ -4,6 +4,7 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
+	"github.com/qiwentaidi/trailblazer/pkg/logger"
 )
 
 // Configuration aliases keep integrations from depending on the YAML loader's
@@ -24,6 +25,9 @@ type (
 	JSResource          = database.JSResource
 	APIResource         = database.APIResource
 	ProtocolTraceRecord = database.ProtocolTraceRecord
+	Logger              = logger.Logger
+	LogEntry            = logger.Entry
+	LogLevel            = logger.Level
 
 	StaticProtocolEndpoint       = crawl.StaticProtocolEndpoint
 	StaticProtocolProfile        = crawl.StaticProtocolProfile
@@ -37,6 +41,22 @@ type (
 
 // NewMemoryScanDataStore creates an in-memory store for one scan session.
 var NewMemoryScanDataStore = database.NewMemoryScanDataStore
+
+const (
+	LogDebug   = logger.DEBUG
+	LogInfo    = logger.INFO
+	LogWarning = logger.WARNING
+	LogError   = logger.ERROR
+	LogVuln    = logger.VULN
+)
+
+var (
+	DefaultLogger          = logger.Default
+	SetLogOutput           = logger.SetOutput
+	SetLogOutputFile       = logger.SetOutputFile
+	ConfigureLogOutput     = logger.ConfigureOutput
+	InstallStandardLogHook = logger.InstallStandardCapture
+)
 
 // AnalyzeStoredJSProtocolsWithStore analyzes stored JS protocol traces without
 // requiring callers to import the crawl implementation package directly.

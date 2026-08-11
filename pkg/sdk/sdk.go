@@ -48,6 +48,9 @@ type (
 	JSResource                   = lib.JSResource
 	APIResource                  = lib.APIResource
 	ProtocolTraceRecord          = lib.ProtocolTraceRecord
+	Logger                       = lib.Logger
+	LogEntry                     = lib.LogEntry
+	LogLevel                     = lib.LogLevel
 	ProtocolCryptoStep           = lib.ProtocolCryptoStep
 	StaticProtocolEndpoint       = lib.StaticProtocolEndpoint
 	StaticProtocolProfile        = lib.StaticProtocolProfile
@@ -68,6 +71,11 @@ const (
 	EventTypeProtocolTrace = lib.EventTypeProtocolTrace
 	EventTypeProgress      = lib.EventTypeProgress
 	EventTypeError         = lib.EventTypeError
+	LogDebug               = lib.LogDebug
+	LogInfo                = lib.LogInfo
+	LogWarning             = lib.LogWarning
+	LogError               = lib.LogError
+	LogVuln                = lib.LogVuln
 )
 
 var (
@@ -82,4 +90,9 @@ var (
 	NewCLIVulnCollector               = lib.NewCLIVulnCollector
 	NewSDKVulnCollectorAdapter        = lib.NewSDKVulnCollectorAdapter
 	NewMemoryScanDataStore            = lib.NewMemoryScanDataStore
+	DefaultLogger                     = lib.DefaultLogger
+	SetLogOutput                      = lib.SetLogOutput
+	SetLogOutputFile                  = lib.SetLogOutputFile
+	ConfigureLogOutput                = lib.ConfigureLogOutput
+	InstallStandardLogHook            = lib.InstallStandardLogHook
 )

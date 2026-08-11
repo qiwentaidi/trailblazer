@@ -17,12 +17,17 @@ type ConfigYAML struct {
 	Placeholder    map[string]string `yaml:"placeholder"`
 	WeakCreds      []string          `yaml:"weakCreds"`
 	VulnDetection  VulnDetection     `yaml:"vuln-detection"`
+	Log            LogConfig         `yaml:"log" json:"log"`
 }
 
 type WebConfig struct {
 	Port  int    `yaml:"port" json:"port"`
 	Host  string `yaml:"host" json:"host"`
 	Debug bool   `yaml:"debug" json:"debug"`
+}
+
+type LogConfig struct {
+	OutputPath string `yaml:"output-path" json:"outputPath"`
 }
 
 type VulnDetection struct {

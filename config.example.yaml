@@ -13,6 +13,10 @@ openai:
   base_url: ""
   model: ""
 
+log:
+  # 可选：扫描日志文件路径。为空时不接管默认控制台输出。
+  output-path: ""
+
 vuln-detection:
   enabled: true
   sql-injection:

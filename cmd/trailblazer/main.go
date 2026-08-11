@@ -19,6 +19,7 @@ func main() {
 	output := flag.String("output", "", "JSON 输出文件；为空时输出到标准输出")
 	outputShort := flag.String("o", "", "JSON 输出文件；为空时输出到标准输出")
 	configPath := flag.String("config", "", "SDK 配置文件路径，可选")
+	logFile := flag.String("log-file", "", "扫描日志输出文件路径；为空时不接管默认控制台输出")
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Trailblazer 安全扫描 CLI\n\n用法:\n  trailblazer -u https://example.com\n  trailblazer -f urls.txt -o result.json\n\n参数:\n")
@@ -39,6 +40,7 @@ func main() {
 		}
 	}
 	options.OutputPath = firstNonEmpty(*output, *outputShort)
+	options.LogOutputPath = firstNonEmpty(*logFile, options.LogOutputPath)
 
 	result, err := sdk.PerformScan(urlList, options)
 	if err != nil {

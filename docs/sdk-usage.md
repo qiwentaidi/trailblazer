@@ -456,7 +456,23 @@ type VulnDetectionOptions struct {
 options.OutputPath = "./scan-result.json"
 ```
 
-### 6.8 OnResult
+### 6.8 LogOutput / LogOutputPath
+
+可选字段。若设置，`PerformScan` 会在扫描期间接管 `fmt.Printf`、标准库 `log`、`stdout`、`stderr`，统一输出到外部 writer 或指定日志文件，扫描结束后自动恢复。
+
+```go
+options.LogOutput = myWriter
+options.LogOutputPath = "./trailblazer.log"
+```
+
+也可以在配置文件中设置：
+
+```yaml
+log:
+  output-path: "./trailblazer.log"
+```
+
+### 6.9 OnResult
 
 回调函数，用于实时消费扫描过程中的事件。
 
@@ -468,7 +484,7 @@ options.OnResult = func(event sdk.ScanEvent) bool {
 }
 ```
 
-### 6.9 Proxy
+### 6.10 Proxy
 
 `ScanOptions.Proxy` 当前为预留字段。
 

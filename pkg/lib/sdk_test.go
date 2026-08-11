@@ -168,6 +168,22 @@ func TestLoadScanOptionsFromFileDefaultsGlobalVulnSwitchToEnabled(t *testing.T) 
 	}
 }
 
+func TestLoadScanOptionsFromFileLoadsLogOutputPath(t *testing.T) {
+	configPath := t.TempDir() + "/config.yaml"
+	content := []byte("log:\n  output-path: ./trailblazer.log\n")
+	if err := os.WriteFile(configPath, content, 0o644); err != nil {
+		t.Fatalf("expected temp config to be written, got error: %v", err)
+	}
+
+	options, err := LoadScanOptionsFromFile(configPath)
+	if err != nil {
+		t.Fatalf("expected config to load, got error: %v", err)
+	}
+	if options.LogOutputPath != "./trailblazer.log" {
+		t.Fatalf("expected log output path to load, got %q", options.LogOutputPath)
+	}
+}
+
 func TestLoadScanOptionsFromFileReadsGlobalVulnSwitch(t *testing.T) {
 	configPath := t.TempDir() + "/config.yaml"
 	content := []byte("vuln-detection:\n  enabled: false\n  sql-injection:\n    enabled: true\n")
