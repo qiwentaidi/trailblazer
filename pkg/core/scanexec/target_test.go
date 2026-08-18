@@ -157,6 +157,41 @@ func TestBuildAssetVulnerabilitiesPreserveAIVerifiedFlag(t *testing.T) {
 	}
 }
 
+func TestDedupeAssetsMergesSensitiveValuesAcrossSources(t *testing.T) {
+	assets := AssetInfo{
+		Phone: []SensitiveItem{
+			{Value: "15159277491", Source: "http://47.98.57.184:8085/article/31.html"},
+			{Value: "15159277491", Source: "http://47.98.57.184:8085/article/36.html", AIVerified: true},
+		},
+	}
+
+	dedupeAssets(&assets)
+
+	if len(assets.Phone) != 1 {
+		t.Fatalf("expected one phone asset after same-value dedupe, got %#v", assets.Phone)
+	}
+	if assets.Phone[0].Source != "http://47.98.57.184:8085/article/31.html" {
+		t.Fatalf("expected first source to be retained, got %q", assets.Phone[0].Source)
+	}
+	if len(assets.Phone[0].Sources) != 2 {
+		t.Fatalf("expected two merged sources, got %#v", assets.Phone[0].Sources)
+	}
+	if assets.Phone[0].Sources[1] != "http://47.98.57.184:8085/article/36.html" {
+		t.Fatalf("expected second source to be retained, got %#v", assets.Phone[0].Sources)
+	}
+	if !assets.Phone[0].AIVerified {
+		t.Fatal("expected ai verification flag to be merged")
+	}
+
+	vulns := buildAssetVulnerabilities(assets)
+	if len(vulns) != 1 {
+		t.Fatalf("expected one phone vulnerability after asset dedupe, got %#v", vulns)
+	}
+	if vulns[0].URL != "http://47.98.57.184:8085/article/31.html" {
+		t.Fatalf("expected vulnerability to retain representative source, got %q", vulns[0].URL)
+	}
+}
+
 func TestBuildFrontendRoutesNormalizesHashAndFiltersAPI(t *testing.T) {
 	routes := buildFrontendRoutes([]crawl.FrontendRouteRecord{
 		{Path: "https://example.com/#/admin/users", SourceKind: "router-get-routes"},

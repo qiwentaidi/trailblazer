@@ -42,6 +42,7 @@ type Options struct {
 type SensitiveItem struct {
 	Value      string
 	Source     string
+	Sources    []string
 	AIVerified bool
 }
 
@@ -263,9 +264,9 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	aiReviewer := asDenyTemplateReviewer(aiChecker)
 	result.Vulnerabilities = annotateUnauthorizedNoise(result.Vulnerabilities, aiReviewer, filteredUnauthorizedTemplates)
 	result.Vulnerabilities = append(result.Vulnerabilities, runWeakLoginDetections(targetURL, options, mergedAPIRecords, capturedFrontendRoutes)...)
+	dedupeAssets(&result.Assets)
 	result.Vulnerabilities = append(result.Vulnerabilities, buildAssetVulnerabilities(result.Assets)...)
 	result.Vulnerabilities = dedupeVulnerabilities(result.Vulnerabilities)
-	dedupeAssets(&result.Assets)
 
 	return result, nil
 }
@@ -859,19 +860,19 @@ func buildTempJSFileName(jsURL string) string {
 func buildAssetInfo(found structs.FindSomething) AssetInfo {
 	result := AssetInfo{}
 	for _, item := range found.Email {
-		result.Email = append(result.Email, SensitiveItem{Value: item.Filed, Source: item.Source, AIVerified: item.AIVerified})
+		result.Email = append(result.Email, SensitiveItem{Value: item.Filed, Source: item.Source, Sources: nonEmptySensitiveSources(item.Source), AIVerified: item.AIVerified})
 	}
 	for _, item := range found.IDCard {
-		result.IDCard = append(result.IDCard, SensitiveItem{Value: item.Filed, Source: item.Source, AIVerified: item.AIVerified})
+		result.IDCard = append(result.IDCard, SensitiveItem{Value: item.Filed, Source: item.Source, Sources: nonEmptySensitiveSources(item.Source), AIVerified: item.AIVerified})
 	}
 	for _, item := range found.Phone {
-		result.Phone = append(result.Phone, SensitiveItem{Value: item.Filed, Source: item.Source, AIVerified: item.AIVerified})
+		result.Phone = append(result.Phone, SensitiveItem{Value: item.Filed, Source: item.Source, Sources: nonEmptySensitiveSources(item.Source), AIVerified: item.AIVerified})
 	}
 	for _, item := range found.IP_URL {
-		result.IPURL = append(result.IPURL, SensitiveItem{Value: item.Filed, Source: item.Source, AIVerified: item.AIVerified})
+		result.IPURL = append(result.IPURL, SensitiveItem{Value: item.Filed, Source: item.Source, Sources: nonEmptySensitiveSources(item.Source), AIVerified: item.AIVerified})
 	}
 	for _, item := range found.Sensitive {
-		result.Sensitive = append(result.Sensitive, SensitiveItem{Value: item.Filed, Source: item.Source, AIVerified: item.AIVerified})
+		result.Sensitive = append(result.Sensitive, SensitiveItem{Value: item.Filed, Source: item.Source, Sources: nonEmptySensitiveSources(item.Source), AIVerified: item.AIVerified})
 	}
 	return result
 }
@@ -1114,13 +1115,45 @@ func dedupeSensitiveItems(items []SensitiveItem) []SensitiveItem {
 	seen := make(map[string]int, len(items))
 	result := make([]SensitiveItem, 0, len(items))
 	for _, item := range items {
-		key := strings.TrimSpace(item.Value) + "|" + strings.TrimSpace(item.Source)
+		key := strings.TrimSpace(item.Value)
+		if key == "" {
+			continue
+		}
 		if index, ok := seen[key]; ok {
 			result[index].AIVerified = result[index].AIVerified || item.AIVerified
+			result[index].Sources = mergeSensitiveSources(result[index].Sources, append([]string{item.Source}, item.Sources...)...)
+			if strings.TrimSpace(result[index].Source) == "" && len(result[index].Sources) > 0 {
+				result[index].Source = result[index].Sources[0]
+			}
 			continue
+		}
+		item.Sources = mergeSensitiveSources(nil, append([]string{item.Source}, item.Sources...)...)
+		if strings.TrimSpace(item.Source) == "" && len(item.Sources) > 0 {
+			item.Source = item.Sources[0]
 		}
 		seen[key] = len(result)
 		result = append(result, item)
+	}
+	return result
+}
+
+func nonEmptySensitiveSources(sources ...string) []string {
+	return mergeSensitiveSources(nil, sources...)
+}
+
+func mergeSensitiveSources(base []string, sources ...string) []string {
+	result := make([]string, 0, len(base)+len(sources))
+	seen := make(map[string]struct{}, len(base)+len(sources))
+	for _, source := range append(base, sources...) {
+		trimmed := strings.TrimSpace(source)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
 	}
 	return result
 }

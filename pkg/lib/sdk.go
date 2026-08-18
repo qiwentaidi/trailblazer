@@ -664,9 +664,10 @@ type AssetInfo struct {
 }
 
 type SensitiveItem struct {
-	Value      string `json:"value"`
-	Source     string `json:"source"`
-	AIVerified bool   `json:"aiVerified,omitempty"`
+	Value      string   `json:"value"`
+	Source     string   `json:"source"`
+	Sources    []string `json:"sources,omitempty"`
+	AIVerified bool     `json:"aiVerified,omitempty"`
 }
 
 // FingerprintItem identifies a technology or request characteristic; it is
@@ -1698,9 +1699,10 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 					Target:    targetURL,
 					Timestamp: time.Now(),
 					Data: map[string]interface{}{
-						"type":   assetGroup.assetType,
-						"value":  assetItem.Value,
-						"source": assetItem.Source,
+						"type":    assetGroup.assetType,
+						"value":   assetItem.Value,
+						"source":  assetItem.Source,
+						"sources": assetItem.Sources,
 					},
 				}) {
 					fmt.Printf("[信息] 扫描已通过回调函数停止\n")
@@ -1813,6 +1815,7 @@ func convertSharedSensitiveItemsToSDK(items []scanexec.SensitiveItem) []Sensitiv
 		result = append(result, SensitiveItem{
 			Value:      item.Value,
 			Source:     item.Source,
+			Sources:    append([]string(nil), item.Sources...),
 			AIVerified: item.AIVerified,
 		})
 	}
@@ -1919,14 +1922,44 @@ func countTreeNodes(nodes []crawl.ElTreeNode) int {
 
 // removeDuplicateSensitiveItems 去重敏感信息项
 func removeDuplicateSensitiveItems(items []SensitiveItem) []SensitiveItem {
-	seen := make(map[string]bool)
+	seen := make(map[string]int, len(items))
 	result := make([]SensitiveItem, 0)
 	for _, item := range items {
-		key := item.Value + "|" + item.Source
-		if !seen[key] {
-			seen[key] = true
-			result = append(result, item)
+		key := strings.TrimSpace(item.Value)
+		if key == "" {
+			continue
 		}
+		item.Sources = mergeSDKSensitiveSources(nil, append([]string{item.Source}, item.Sources...)...)
+		if strings.TrimSpace(item.Source) == "" && len(item.Sources) > 0 {
+			item.Source = item.Sources[0]
+		}
+		if index, ok := seen[key]; ok {
+			result[index].Sources = mergeSDKSensitiveSources(result[index].Sources, append([]string{item.Source}, item.Sources...)...)
+			if strings.TrimSpace(result[index].Source) == "" && len(result[index].Sources) > 0 {
+				result[index].Source = result[index].Sources[0]
+			}
+			result[index].AIVerified = result[index].AIVerified || item.AIVerified
+			continue
+		}
+		seen[key] = len(result)
+		result = append(result, item)
+	}
+	return result
+}
+
+func mergeSDKSensitiveSources(base []string, sources ...string) []string {
+	result := make([]string, 0, len(base)+len(sources))
+	seen := make(map[string]struct{}, len(base)+len(sources))
+	for _, source := range append(base, sources...) {
+		trimmed := strings.TrimSpace(source)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
 	}
 	return result
 }

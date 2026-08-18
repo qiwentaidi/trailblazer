@@ -5,6 +5,7 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 	"github.com/qiwentaidi/trailblazer/pkg/core/protocoltool"
+	"github.com/qiwentaidi/trailblazer/pkg/core/scanexec"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	"os"
 	"testing"
@@ -720,5 +721,25 @@ func TestConvertSharedVulnerabilitiesDefaultsSensitiveLeakMethodToGET(t *testing
 	}
 	if items[0].Method != "GET" {
 		t.Fatalf("expected sensitive leak method GET, got %q", items[0].Method)
+	}
+}
+
+func TestConvertSharedSensitiveItemsToSDKPreservesSources(t *testing.T) {
+	items := convertSharedSensitiveItemsToSDK([]scanexec.SensitiveItem{
+		{
+			Value:   "15159277491",
+			Source:  "http://47.98.57.184:8085/article/31.html",
+			Sources: []string{"http://47.98.57.184:8085/article/31.html", "http://47.98.57.184:8085/article/36.html"},
+		},
+	})
+
+	if len(items) != 1 {
+		t.Fatalf("expected one item, got %d", len(items))
+	}
+	if items[0].Source != "http://47.98.57.184:8085/article/31.html" {
+		t.Fatalf("expected representative source, got %q", items[0].Source)
+	}
+	if len(items[0].Sources) != 2 {
+		t.Fatalf("expected two sources, got %#v", items[0].Sources)
 	}
 }
