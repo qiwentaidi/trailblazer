@@ -102,6 +102,25 @@ func TestBuildJSRequestBlueprintsExtractsMinifiedAxiosLikeInstances(t *testing.T
 	}
 }
 
+func TestBuildJSRequestBlueprintsDoesNotDoubleMatchDollarAxiosReceiver(t *testing.T) {
+	blueprints := BuildJSRequestBlueprints([]database.JSResource{{
+		URL: "https://example.com/app.js",
+		Content: `
+			const $axios = createClient();
+			$axios.post("/r/api/rcmmdInf/checkQr", { reqencdata: i, digest: s });
+		`,
+	}})
+	if len(blueprints) != 1 {
+		t.Fatalf("expected one blueprint for one $axios call, got %#v", blueprints)
+	}
+	if blueprints[0].Path != "/r/api/rcmmdInf/checkQr" || blueprints[0].Method != "POST" {
+		t.Fatalf("unexpected blueprint: %#v", blueprints[0])
+	}
+	if blueprints[0].Source.Snippet == "" || blueprints[0].Source.Snippet[0] != '$' {
+		t.Fatalf("expected full $axios source snippet, got %#v", blueprints[0].Source)
+	}
+}
+
 func TestBuildJSRequestBlueprintsKeepsValueExpressionsAndUnresolvedSymbols(t *testing.T) {
 	jsResources := []database.JSResource{
 		{

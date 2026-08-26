@@ -9,9 +9,15 @@ import (
 	"strings"
 
 	"github.com/qiwentaidi/trailblazer/pkg/sdk"
+	"github.com/qiwentaidi/trailblazer/pkg/web"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "web" {
+		runWeb(os.Args[2:])
+		return
+	}
+
 	urls := flag.String("urls", "", "逗号分隔的目标 URL 列表")
 	urlsShort := flag.String("u", "", "逗号分隔的目标 URL 列表")
 	file := flag.String("file", "", "目标 URL 文件，每行一个 URL")
@@ -53,6 +59,28 @@ func main() {
 		if err := encoder.Encode(result); err != nil {
 			log.Fatalf("输出扫描结果失败: %v", err)
 		}
+	}
+}
+
+func runWeb(args []string) {
+	flags := flag.NewFlagSet("web", flag.ExitOnError)
+	configPath := flags.String("config", "config.yaml", "Web 配置文件路径")
+	databasePath := flags.String("database", "tasks.db", "SQLite 数据库文件路径")
+	frontendDevURL := flags.String("frontend-dev-url", "", "前端开发服务器地址")
+	host := flags.String("host", "", "监听主机（覆盖配置文件）")
+	port := flags.Int("port", 0, "监听端口（覆盖配置文件）")
+	flags.Usage = func() {
+		fmt.Fprintf(flags.Output(), "用法:\n  trailblazer web [参数]\n\n参数:\n")
+		flags.PrintDefaults()
+	}
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if err := web.Run(web.ServerOptions{
+		ConfigPath: *configPath, DatabasePath: *databasePath,
+		FrontendDevURL: *frontendDevURL, Host: *host, Port: *port,
+	}); err != nil {
+		log.Fatalf("启动 Web 服务失败: %v", err)
 	}
 }
 

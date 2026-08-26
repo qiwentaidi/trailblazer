@@ -170,6 +170,22 @@ type VulnStaticContext struct {
 	Snippet   string `json:"snippet"`
 }
 
+// CryptoKeyEvidence is cryptographic key material proven to be publicly
+// recoverable from a scanned frontend bundle. It is intentionally preserved
+// with the finding: the exposed material itself is the security evidence.
+type CryptoKeyEvidence struct {
+	Algorithm       string `json:"algorithm"`
+	KeyType         string `json:"key_type"`
+	KeyFormat       string `json:"key_format"`
+	KeyMaterial     string `json:"key_material"`
+	KeyBits         int    `json:"key_bits,omitempty"`
+	Fingerprint     string `json:"fingerprint"`
+	SourceURL       string `json:"source_url"`
+	DecoderPath     string `json:"decoder_path"`
+	DecryptFunction string `json:"decrypt_function,omitempty"`
+	Verification    string `json:"verification,omitempty"`
+}
+
 func (r *ProtocolTraceRecord) NormalizeForView() {
 	if r == nil {
 		return
@@ -957,6 +973,10 @@ type VulnRecord struct {
 	Level              string              `json:"level"` // high, medium, low, info
 	Status             string              `json:"status,omitempty"`
 	Type               string              `json:"type"`
+	Category           string              `json:"category,omitempty"`
+	Subcategory        string              `json:"subcategory,omitempty"`
+	BusinessObject     string              `json:"business_object,omitempty"`
+	NamingSource       string              `json:"naming_source,omitempty"`
 	URL                string              `json:"url"`
 	Method             string              `json:"method,omitempty"`
 	Request            string              `json:"request,omitempty"`
@@ -982,6 +1002,7 @@ type VulnRecord struct {
 	AIReviewConfidence int                 `json:"ai_review_confidence,omitempty"`
 	AIReviewReason     string              `json:"ai_review_reason,omitempty"`
 	StaticContexts     []VulnStaticContext `json:"static_contexts,omitempty"`
+	CryptoKeyEvidence  *CryptoKeyEvidence  `json:"crypto_key_evidence,omitempty"`
 	Description        string              `json:"description"`
 	AIVerified         bool                `json:"ai_verified"` // AI辅助验证标记
 	CreatedAt          time.Time           `json:"created_at"`
@@ -1012,35 +1033,37 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// ES 索引名称
-const (
-	IndexSiteTree               = "trailblazer-sitetree"
-	IndexJS                     = "trailblazer-js"
-	IndexAPI                    = "trailblazer-api"
-	IndexProtocol               = "trailblazer-protocol"
-	IndexStaticProtocolAnalysis = "trailblazer-static-protocol"
-	IndexVuln                   = "trailblazer-vuln"
-	IndexAsset                  = "trailblazer-asset"
-)
-
-// SaveSiteTreeNode 保存网站树节点
+// SaveSiteTreeNode 保存网站树节点到 SQLite。
 func SaveSiteTreeNode(node SiteTreeNode) error {
-	return InsertToES(node, IndexSiteTree, false)
+	return saveScanDocument(scanDocumentFields{
+		kind: CollectionSiteTree, taskID: node.TaskID, version: node.Version,
+		identity: node.NodeID, parentID: node.ParentID, url: node.URL, level: node.Level,
+		createdAt: node.CreatedAt,
+	}, node)
 }
 
 // SaveJSResource 保存JS资源
 func SaveJSResource(js JSResource) error {
-	return InsertToES(js, IndexJS, false)
+	return saveScanDocument(scanDocumentFields{
+		kind: CollectionJS, taskID: js.TaskID, version: js.Version, identity: js.URL,
+		url: js.URL, fetchedAt: js.FetchedAt,
+	}, js)
 }
 
 // SaveAPIResource 保存接口请求/响应记录
 func SaveAPIResource(api APIResource) error {
-	return InsertToES(api, IndexAPI, false)
+	return saveScanDocument(scanDocumentFields{
+		kind: CollectionAPI, taskID: api.TaskID, version: api.Version, identity: api.URL,
+		url: api.URL, traceID: api.TraceID, fetchedAt: api.FetchedAt,
+	}, api)
 }
 
 // SaveProtocolTrace 保存协议轨迹记录
 func SaveProtocolTrace(trace ProtocolTraceRecord) error {
-	return InsertToES(trace, IndexProtocol, false)
+	return saveScanDocument(scanDocumentFields{
+		kind: CollectionProtocol, taskID: trace.TaskID, version: trace.Version,
+		identity: trace.TraceID, url: trace.RequestURL, traceID: trace.TraceID, createdAt: trace.CreatedAt,
+	}, trace)
 }
 
 // SaveVuln 保存漏洞
@@ -1049,7 +1072,10 @@ func SaveVuln(vuln VulnRecord) error {
 		vuln.Status = "open"
 	}
 
-	err := InsertToES(vuln, IndexVuln, false)
+	err := saveScanDocument(scanDocumentFields{
+		kind: CollectionVuln, taskID: vuln.TaskID, version: vuln.Version,
+		identity: vuln.VulnID, url: vuln.URL, traceID: vuln.TraceID, createdAt: vuln.CreatedAt,
+	}, vuln)
 	if err != nil {
 		return err
 	}
@@ -1089,25 +1115,7 @@ func UpdateTaskVersionHighestRiskLevelFromVulns(taskID string, version int, vuln
 
 // SaveAsset 保存资产
 func SaveAsset(asset AssetRecord) error {
-	err := InsertToES(asset, IndexAsset, false)
-	if err == nil {
-		return nil
-	}
-
-	// 兼容旧版资产索引映射：当 email/ip_url 等字段仍是 text 时，
-	// ES 无法接收 {value,source} 对象数组，此时自动回退为旧版字符串数组。
-	if isLegacyAssetMappingError(err) {
-		return InsertToES(toLegacyAssetRecord(asset), IndexAsset, false)
-	}
-	return err
-}
-
-func isLegacyAssetMappingError(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := err.Error()
-	return strings.Contains(message, "document_parsing_exception") &&
-		strings.Contains(message, "Expected text") &&
-		strings.Contains(message, "START_OBJECT")
+	return saveScanDocument(scanDocumentFields{
+		kind: CollectionAsset, taskID: asset.TaskID, version: asset.Version, createdAt: asset.CreatedAt,
+	}, asset)
 }

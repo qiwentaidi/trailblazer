@@ -104,6 +104,62 @@ func TestBuildSDKJSFindOptionsCarriesStaticHints(t *testing.T) {
 	}
 }
 
+func TestBuildSDKSecurityLeadsCarriesRequestPayloadContext(t *testing.T) {
+	leads := buildSDKSecurityLeads(
+		"https://web.cupdata.com/ncoas/0581/m/",
+		[]string{"/m/api/save", "/m/api/support/getCardList"},
+		[]crawl.RequestBlueprint{{
+			Path:           "/m/api/save",
+			Method:         "POST",
+			PayloadCarrier: "body",
+			PayloadFormat:  "json",
+			PayloadPreview: `{name:e.name,phone:e.phone}`,
+			Params: []crawl.RequestBlueprintParam{
+				{Name: "name", Location: "json", ValueExpr: "e.name", Confidence: "medium"},
+				{Name: "phone", Location: "json", ValueExpr: "e.phone", Confidence: "medium"},
+			},
+			Headers: []crawl.RequestBlueprintHeader{
+				{Name: "X-Sign", Source: "interceptor", Dynamic: true},
+			},
+			Interceptors: []crawl.RequestBlueprintInterceptor{
+				{Client: "service", Kind: "request", Mutates: []string{"headers.X-Sign"}, Snippet: "headers['X-Sign']=sign(config)"},
+			},
+			UnresolvedSymbols: []string{"e", "sign"},
+			Source: crawl.RequestBlueprintSource{
+				File:    "https://web.cupdata.com/ncoas/0581/m/static/js/app.js",
+				Snippet: `save:"/m/api/save"`,
+			},
+			Confidence:       "medium",
+			ExtractionSource: "static-js",
+		}},
+		nil,
+		[]string{},
+	)
+
+	if len(leads) != 1 {
+		t.Fatalf("expected one high-risk security lead, got %#v", leads)
+	}
+	lead := leads[0]
+	if lead.Category != "state-changing-submit" || lead.Decision != "needs_review" {
+		t.Fatalf("unexpected lead classification: %#v", lead)
+	}
+	if lead.URL != "https://web.cupdata.com/ncoas/0581/m/api/save" {
+		t.Fatalf("expected mounted full URL, got %q", lead.URL)
+	}
+	if lead.Request.PayloadPreview != `{name:e.name,phone:e.phone}` {
+		t.Fatalf("expected payload preview to be preserved, got %#v", lead.Request)
+	}
+	if len(lead.Request.Params) != 2 || lead.Request.Params[0].Name != "name" {
+		t.Fatalf("expected JSON body params to be carried, got %#v", lead.Request.Params)
+	}
+	if len(lead.Request.Headers) != 1 || !lead.Request.Headers[0].Dynamic {
+		t.Fatalf("expected dynamic header context, got %#v", lead.Request.Headers)
+	}
+	if lead.Source.File == "" || len(lead.EvidenceSnippets) == 0 {
+		t.Fatalf("expected JS source evidence, got source=%#v evidence=%#v", lead.Source, lead.EvidenceSnippets)
+	}
+}
+
 func TestBuildSDKStaticHintBundleWithFetcherAndTempDir(t *testing.T) {
 	parentDir := t.TempDir()
 	fetcher := func(jsURL string) ([]byte, error) {
@@ -479,11 +535,15 @@ func TestMergeRuntimeAPIRoutesIncludesRuntimeTraceURLs(t *testing.T) {
 }
 
 func TestPreferAbsoluteRuntimeRoutesDropsRelativeDuplicate(t *testing.T) {
-	routes := preferAbsoluteRuntimeRoutes([]string{
-		"/api/common/getCitys",
-		"https://example.com/api/common/getCitys",
-		"/ccat/testcases/getCaseList",
-	})
+	runtimeRoutes := []string{"https://example.com/api/common/getCitys"}
+	routes := preferAbsoluteRuntimeRoutes(
+		[]string{
+			"/api/common/getCitys",
+			"https://example.com/api/common/getCitys",
+			"/ccat/testcases/getCaseList",
+		},
+		runtimeRoutes,
+	)
 
 	if len(routes) != 2 {
 		t.Fatalf("expected relative duplicate to be removed, got %#v", routes)
@@ -492,6 +552,20 @@ func TestPreferAbsoluteRuntimeRoutesDropsRelativeDuplicate(t *testing.T) {
 		if route == "/api/common/getCitys" {
 			t.Fatalf("expected relative route duplicate to be removed, got %#v", routes)
 		}
+	}
+}
+
+func TestPreferAbsoluteRuntimeRoutesKeepsStaticRelativeDuplicate(t *testing.T) {
+	routes := preferAbsoluteRuntimeRoutes([]string{
+		"/m/api/save",
+		"https://web.cupdata.com/m/api/save",
+	})
+
+	if len(routes) != 1 {
+		t.Fatalf("expected static absolute duplicate to be dropped, got %#v", routes)
+	}
+	if routes[0] != "/m/api/save" {
+		t.Fatalf("expected static relative route to be kept, got %#v", routes)
 	}
 }
 

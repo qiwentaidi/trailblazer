@@ -6,6 +6,7 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	weaklogin "github.com/qiwentaidi/trailblazer/pkg/core/vuln/weaklogin"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,52 @@ func TestNormalizeJSURLHandlesProtocolRelativeLinks(t *testing.T) {
 	got := normalizeJSURL("https://example.com/app/", "//cdn.example.com/a.js")
 	if got != "https://cdn.example.com/a.js" {
 		t.Fatalf("expected protocol-relative JS URL to keep CDN host, got %q", got)
+	}
+}
+
+func TestNormalizeJSURLUsesPageDirectoryForRelativeLinks(t *testing.T) {
+	got := normalizeJSURL("https://web.cupdata.com/ncoas/0581/m/", "static/js/app.js")
+	want := "https://web.cupdata.com/ncoas/0581/m/static/js/app.js"
+	if got != want {
+		t.Fatalf("normalizeJSURL() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeJSURLUsesOriginForRootRelativeLinks(t *testing.T) {
+	got := normalizeJSURL("https://web.cupdata.com/ncoas/0581/m/", "/static/js/app.js")
+	want := "https://web.cupdata.com/static/js/app.js"
+	if got != want {
+		t.Fatalf("normalizeJSURL() = %q, want %q", got, want)
+	}
+}
+
+func TestFetchStaticHintJSResourcesSendsPageReferer(t *testing.T) {
+	var gotReferer string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotReferer = r.Header.Get("Referer")
+		if gotReferer == "" {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			_, _ = w.Write([]byte("<html>range error</html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/javascript")
+		_, _ = w.Write([]byte("window.__manifest_ok__=true;"))
+	}))
+	defer server.Close()
+
+	homeURL := server.URL + "/ncoas/0581/m/"
+	resources := fetchStaticHintJSResources("task", 1, homeURL, []string{"static/js/manifest.js"}, nil)
+	if len(resources) != 1 {
+		t.Fatalf("expected one JS resource, got %#v", resources)
+	}
+	if resources[0].ResponseCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d with content %q", resources[0].ResponseCode, resources[0].Content)
+	}
+	if resources[0].Content != "window.__manifest_ok__=true;" {
+		t.Fatalf("unexpected content: %q", resources[0].Content)
+	}
+	if gotReferer != homeURL {
+		t.Fatalf("Referer = %q, want %q", gotReferer, homeURL)
 	}
 }
 
@@ -234,6 +281,7 @@ func TestBuildFrontendRoutesKeepsConfirmedReactSourceKinds(t *testing.T) {
 
 func TestBuildStaticAPIRoutesFiltersAndDedupes(t *testing.T) {
 	routes := buildStaticAPIRoutes(
+		"https://example.com/app/",
 		structs.FindSomething{
 			APIRoute: []structs.InfoSource{
 				{Filed: "/api/users"},
@@ -252,8 +300,60 @@ func TestBuildStaticAPIRoutesFiltersAndDedupes(t *testing.T) {
 	if len(routes) != 2 {
 		t.Fatalf("expected 2 static routes, got %#v", routes)
 	}
-	if routes[0] != "https://example.com/api/users" || routes[1] != "/api/roles" {
+	if routes[0] != "/api/roles" || routes[1] != "/api/users" {
 		t.Fatalf("unexpected static routes: %#v", routes)
+	}
+}
+
+func TestBuildAPIRoutesPrefersRuntimeAbsoluteOverStaticRelative(t *testing.T) {
+	routes := buildAPIRoutes(
+		"https://example.com/app/",
+		structs.FindSomething{
+			APIRoute: []structs.InfoSource{
+				{Filed: "/api/users"},
+			},
+		},
+		func() crawl.NetworkLinks {
+			var links crawl.NetworkLinks
+			links.Classification.APIRoute = []string{"https://example.com/api/users"}
+			return links
+		}(),
+		[]crawl.NetworkRecord{{URL: "https://example.com/api/users"}},
+		nil,
+		crawl.Filter{},
+	)
+
+	if len(routes) != 1 {
+		t.Fatalf("expected one runtime route, got %#v", routes)
+	}
+	if routes[0] != "https://example.com/api/users" {
+		t.Fatalf("expected runtime absolute route to be kept, got %#v", routes)
+	}
+}
+
+func TestBuildAPIRoutesKeepsStaticRelativeWhenAbsoluteIsDiscoveryOnly(t *testing.T) {
+	routes := buildAPIRoutes(
+		"https://web.cupdata.com/ncoas/0581/m/",
+		structs.FindSomething{
+			APIRoute: []structs.InfoSource{
+				{Filed: "/m/api/save"},
+			},
+		},
+		func() crawl.NetworkLinks {
+			var links crawl.NetworkLinks
+			links.Classification.APIRoute = []string{"https://web.cupdata.com/m/api/save"}
+			return links
+		}(),
+		nil,
+		nil,
+		crawl.Filter{},
+	)
+
+	if len(routes) != 1 {
+		t.Fatalf("expected one static route, got %#v", routes)
+	}
+	if routes[0] != "/m/api/save" {
+		t.Fatalf("expected static relative route to be kept, got %#v", routes)
 	}
 }
 

@@ -533,7 +533,38 @@ type TargetResult struct {
 	ProtocolTraces        []ProtocolTrace          `json:"protocolTraces,omitempty"`
 	Assets                AssetInfo                `json:"assets"`
 	Fingerprints          []FingerprintItem        `json:"fingerprints,omitempty"`
+	SecurityLeads         []SecurityLead           `json:"securityLeads,omitempty"`
 	Vulnerabilities       []VulnerabilityItem      `json:"vulnerabilities"`
+}
+
+// SecurityLead is a non-vulnerability review artifact. It preserves high-risk
+// or state-changing API clues that should not be fuzzed automatically, while
+// carrying enough static request context for manual or AI follow-up analysis.
+type SecurityLead struct {
+	ID                string                       `json:"id"`
+	Route             string                       `json:"route"`
+	URL               string                       `json:"url,omitempty"`
+	Method            string                       `json:"method,omitempty"`
+	Category          string                       `json:"category"`
+	Decision          string                       `json:"decision"`
+	Reason            string                       `json:"reason"`
+	MatchedKeyword    string                       `json:"matchedKeyword,omitempty"`
+	RiskHypotheses    []string                     `json:"riskHypotheses,omitempty"`
+	SuggestedNextStep string                       `json:"suggestedNextStep,omitempty"`
+	Request           SecurityLeadRequest          `json:"request,omitempty"`
+	Source            crawl.RequestBlueprintSource `json:"source,omitempty"`
+	EvidenceSnippets  []string                     `json:"evidenceSnippets,omitempty"`
+}
+
+type SecurityLeadRequest struct {
+	PayloadCarrier    string                              `json:"payloadCarrier,omitempty"`
+	PayloadFormat     string                              `json:"payloadFormat,omitempty"`
+	PayloadPreview    string                              `json:"payloadPreview,omitempty"`
+	RequestBody       string                              `json:"requestBody,omitempty"`
+	Params            []crawl.RequestBlueprintParam       `json:"params,omitempty"`
+	Headers           []crawl.RequestBlueprintHeader      `json:"headers,omitempty"`
+	Interceptors      []crawl.RequestBlueprintInterceptor `json:"interceptors,omitempty"`
+	UnresolvedSymbols []string                            `json:"unresolvedSymbols,omitempty"`
 }
 
 func sdkVulnerabilityDedupKey(vuln VulnRecord) string {
@@ -1418,14 +1449,24 @@ func mergeRuntimeAPIRoutes(routes []string, apiRecords []crawl.NetworkRecord, pr
 	return arrayutil.RemoveDuplicates(merged)
 }
 
-func preferAbsoluteRuntimeRoutes(routes []string) []string {
-	absoluteByPath := make(map[string]bool)
+func preferAbsoluteRuntimeRoutes(routes []string, runtimeRouteGroups ...[]string) []string {
+	runtimeAbsoluteByPath := make(map[string]bool)
+	for _, group := range runtimeRouteGroups {
+		for _, route := range group {
+			pathKey, isAbsolute := sdkAPIRoutePathKey(route)
+			if pathKey != "" && isAbsolute {
+				runtimeAbsoluteByPath[pathKey] = true
+			}
+		}
+	}
+
+	relativeByPath := make(map[string]bool)
 	for _, route := range routes {
-		parsed, err := url.Parse(strings.TrimSpace(route))
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		pathKey, isAbsolute := sdkAPIRoutePathKey(route)
+		if pathKey == "" || isAbsolute {
 			continue
 		}
-		absoluteByPath[strings.TrimSpace(parsed.Path)] = true
+		relativeByPath[pathKey] = true
 	}
 
 	result := make([]string, 0, len(routes))
@@ -1434,12 +1475,294 @@ func preferAbsoluteRuntimeRoutes(routes []string) []string {
 		if trimmed == "" {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "/") && absoluteByPath[trimmed] {
-			continue
+
+		pathKey, isAbsolute := sdkAPIRoutePathKey(trimmed)
+		if pathKey != "" {
+			if !isAbsolute && runtimeAbsoluteByPath[pathKey] {
+				continue
+			}
+			if isAbsolute && !runtimeAbsoluteByPath[pathKey] && relativeByPath[pathKey] {
+				continue
+			}
 		}
 		result = append(result, trimmed)
 	}
 	return crawl.DeduplicateSimilarAPIRoutes(arrayutil.RemoveDuplicates(result))
+}
+
+func sdkAPIRoutePathKey(route string) (string, bool) {
+	trimmed := strings.TrimSpace(route)
+	if trimmed == "" {
+		return "", false
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", false
+	}
+
+	pathValue := strings.TrimSpace(parsed.Path)
+	if pathValue == "" {
+		return "", parsed.Scheme != "" && parsed.Host != ""
+	}
+	if !strings.HasPrefix(pathValue, "/") {
+		pathValue = "/" + pathValue
+	}
+	return pathValue, parsed.Scheme != "" && parsed.Host != ""
+}
+
+func buildSDKSecurityLeads(targetURL string, routes []string, blueprints []crawl.RequestBlueprint, apiRecords []APIRecord, highRiskKeywords []string) []SecurityLead {
+	keywords := sdkSecurityLeadKeywords(highRiskKeywords)
+	blueprintIndex := indexSDKRequestBlueprints(blueprints)
+	recordIndex := indexSDKAPIRecords(apiRecords)
+	seen := make(map[string]struct{}, len(routes))
+	leads := make([]SecurityLead, 0)
+
+	for _, route := range routes {
+		normalizedRoute := strings.TrimSpace(route)
+		if normalizedRoute == "" {
+			continue
+		}
+		keyword, category, hypotheses, nextStep, ok := classifySDKSecurityLead(normalizedRoute, keywords)
+		if !ok {
+			continue
+		}
+		pathKey, _ := sdkAPIRoutePathKey(normalizedRoute)
+		if pathKey == "" {
+			pathKey = normalizedRoute
+		}
+		if _, exists := seen[pathKey]; exists {
+			continue
+		}
+		seen[pathKey] = struct{}{}
+
+		blueprint := findSDKSecurityLeadBlueprint(pathKey, blueprintIndex)
+		record := recordIndex[pathKey]
+		method := firstNonEmptyString(blueprint.Method, record.Method, inferSDKSecurityLeadMethod(category))
+		fullURL := normalizedRoute
+		if parsed, err := url.Parse(normalizedRoute); err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			fullURL = resolveSDKSecurityLeadURL(targetURL, normalizedRoute)
+		}
+		lead := SecurityLead{
+			ID:                buildSDKSecurityLeadID(method, pathKey, keyword),
+			Route:             normalizedRoute,
+			URL:               fullURL,
+			Method:            method,
+			Category:          category,
+			Decision:          "needs_review",
+			Reason:            "matched high-risk/business-action keyword: " + keyword,
+			MatchedKeyword:    keyword,
+			RiskHypotheses:    hypotheses,
+			SuggestedNextStep: nextStep,
+			Request:           buildSDKSecurityLeadRequest(blueprint, record),
+			Source:            blueprint.Source,
+			EvidenceSnippets:  buildSDKSecurityLeadEvidence(blueprint),
+		}
+		leads = append(leads, lead)
+	}
+
+	return leads
+}
+
+func sdkSecurityLeadKeywords(extra []string) []string {
+	defaults := []string{
+		"sms", "sendsms", "send_sms", "sendcode", "send_code",
+		"/save", "submit", "apply", "getapplyid",
+		"upload", "delete", "remove", "update", "modify",
+		"pay", "order", "login", "logout", "token",
+	}
+	seen := make(map[string]struct{}, len(defaults)+len(extra))
+	result := make([]string, 0, len(defaults)+len(extra))
+	for _, keyword := range append(defaults, extra...) {
+		keyword = strings.ToLower(strings.TrimSpace(keyword))
+		if keyword == "" {
+			continue
+		}
+		if _, exists := seen[keyword]; exists {
+			continue
+		}
+		seen[keyword] = struct{}{}
+		result = append(result, keyword)
+	}
+	return result
+}
+
+func classifySDKSecurityLead(route string, keywords []string) (string, string, []string, string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(route))
+	for _, keyword := range keywords {
+		if keyword == "" || !strings.Contains(lower, keyword) {
+			continue
+		}
+		category := "business-action"
+		hypotheses := []string{"state-changing endpoint", "requires authorized test data before active probing"}
+		nextStep := "manual-review-or-authorized-replay"
+		switch {
+		case strings.Contains(keyword, "sms") || strings.Contains(keyword, "sendcode") || strings.Contains(lower, "sms"):
+			category = "sms-action"
+			hypotheses = []string{"arbitrary recipient SMS trigger", "SMS rate-limit bypass", "verification-code workflow abuse"}
+			nextStep = "review with test phone number and strict rate limit before replay"
+		case strings.Contains(keyword, "save") || strings.Contains(keyword, "submit") || strings.Contains(keyword, "apply") || strings.Contains(lower, "/save"):
+			category = "state-changing-submit"
+			hypotheses = []string{"unauthorized submission", "parameter tampering", "duplicate submission or business-data pollution"}
+			nextStep = "dry-run request construction first; replay only in authorized test environment"
+		case strings.Contains(keyword, "upload"):
+			category = "file-upload-action"
+			hypotheses = []string{"unsafe file upload", "storage path exposure", "content-type validation bypass"}
+			nextStep = "manual upload test with benign fixture in authorized environment"
+		case strings.Contains(keyword, "delete") || strings.Contains(keyword, "remove") || strings.Contains(keyword, "update") || strings.Contains(keyword, "modify"):
+			category = "mutation-action"
+			hypotheses = []string{"unauthorized mutation", "IDOR on mutable object", "missing CSRF or replay protection"}
+			nextStep = "manual review with disposable test object"
+		case strings.Contains(keyword, "token") || strings.Contains(keyword, "login") || strings.Contains(keyword, "logout"):
+			category = "auth-session-action"
+			hypotheses = []string{"session workflow weakness", "token leakage or replay", "authentication state confusion"}
+			nextStep = "review authentication flow and replay only with test account"
+		}
+		return keyword, category, hypotheses, nextStep, true
+	}
+	return "", "", nil, "", false
+}
+
+func indexSDKRequestBlueprints(blueprints []crawl.RequestBlueprint) map[string]crawl.RequestBlueprint {
+	index := make(map[string]crawl.RequestBlueprint, len(blueprints))
+	for _, blueprint := range blueprints {
+		key, _ := sdkAPIRoutePathKey(blueprint.Path)
+		if key == "" {
+			key = strings.TrimSpace(blueprint.Path)
+		}
+		if key == "" {
+			continue
+		}
+		current, exists := index[key]
+		if !exists || shouldPreferSDKSecurityLeadBlueprint(current, blueprint) {
+			index[key] = blueprint
+		}
+	}
+	return index
+}
+
+func shouldPreferSDKSecurityLeadBlueprint(current, candidate crawl.RequestBlueprint) bool {
+	currentScore := len(current.Params) + len(current.Headers) + len(current.Interceptors)
+	candidateScore := len(candidate.Params) + len(candidate.Headers) + len(candidate.Interceptors)
+	if strings.TrimSpace(current.PayloadPreview) != "" {
+		currentScore += 2
+	}
+	if strings.TrimSpace(candidate.PayloadPreview) != "" {
+		candidateScore += 2
+	}
+	if strings.TrimSpace(current.Source.Snippet) != "" {
+		currentScore++
+	}
+	if strings.TrimSpace(candidate.Source.Snippet) != "" {
+		candidateScore++
+	}
+	return candidateScore > currentScore
+}
+
+func indexSDKAPIRecords(records []APIRecord) map[string]APIRecord {
+	index := make(map[string]APIRecord, len(records))
+	for _, record := range records {
+		key, _ := sdkAPIRoutePathKey(record.URL)
+		if key == "" {
+			continue
+		}
+		index[key] = record
+	}
+	return index
+}
+
+func findSDKSecurityLeadBlueprint(pathKey string, index map[string]crawl.RequestBlueprint) crawl.RequestBlueprint {
+	if blueprint, ok := index[pathKey]; ok {
+		return blueprint
+	}
+	for key, blueprint := range index {
+		if strings.HasSuffix(pathKey, key) || strings.HasSuffix(key, pathKey) {
+			return blueprint
+		}
+	}
+	return crawl.RequestBlueprint{}
+}
+
+func buildSDKSecurityLeadRequest(blueprint crawl.RequestBlueprint, record APIRecord) SecurityLeadRequest {
+	return SecurityLeadRequest{
+		PayloadCarrier:    blueprint.PayloadCarrier,
+		PayloadFormat:     blueprint.PayloadFormat,
+		PayloadPreview:    limitSDKLeadText(blueprint.PayloadPreview, 2000),
+		RequestBody:       limitSDKLeadText(record.RequestBody, 2000),
+		Params:            append([]crawl.RequestBlueprintParam(nil), blueprint.Params...),
+		Headers:           append([]crawl.RequestBlueprintHeader(nil), blueprint.Headers...),
+		Interceptors:      append([]crawl.RequestBlueprintInterceptor(nil), blueprint.Interceptors...),
+		UnresolvedSymbols: append([]string(nil), blueprint.UnresolvedSymbols...),
+	}
+}
+
+func buildSDKSecurityLeadEvidence(blueprint crawl.RequestBlueprint) []string {
+	evidence := make([]string, 0, 1+len(blueprint.Context))
+	if snippet := limitSDKLeadText(blueprint.Source.Snippet, 1200); snippet != "" {
+		evidence = append(evidence, snippet)
+	}
+	for _, context := range blueprint.Context {
+		if trimmed := limitSDKLeadText(context, 1200); trimmed != "" {
+			evidence = append(evidence, trimmed)
+		}
+	}
+	if len(evidence) > 4 {
+		return evidence[:4]
+	}
+	return evidence
+}
+
+func buildSDKSecurityLeadID(method, pathKey, keyword string) string {
+	hash := sha1.Sum([]byte(strings.ToUpper(strings.TrimSpace(method)) + "|" + strings.TrimSpace(pathKey) + "|" + strings.TrimSpace(keyword)))
+	return "lead-" + hex.EncodeToString(hash[:])[:12]
+}
+
+func inferSDKSecurityLeadMethod(category string) string {
+	switch category {
+	case "sms-action", "state-changing-submit", "file-upload-action", "mutation-action", "auth-session-action":
+		return "POST"
+	default:
+		return "GET"
+	}
+}
+
+func resolveSDKSecurityLeadURL(targetURL, route string) string {
+	base, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return strings.TrimSpace(route)
+	}
+	trimmedRoute := strings.TrimSpace(route)
+	if strings.HasPrefix(trimmedRoute, "/m/") {
+		basePath := base.EscapedPath()
+		if idx := strings.Index(basePath, "/m/"); idx >= 0 {
+			return base.Scheme + "://" + base.Host + basePath[:idx] + trimmedRoute
+		}
+		if strings.HasSuffix(basePath, "/m") {
+			return base.Scheme + "://" + base.Host + strings.TrimSuffix(basePath, "/m") + trimmedRoute
+		}
+	}
+	parsed, err := url.Parse(trimmedRoute)
+	if err != nil {
+		return trimmedRoute
+	}
+	return base.ResolveReference(parsed).String()
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func limitSDKLeadText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "...[truncated]"
 }
 
 func sdkEnsureTrailingSlash(value string) string {
@@ -1645,6 +1968,7 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 		for _, trace := range targetScanResult.ProtocolTraces {
 			targetResult.ProtocolTraces = append(targetResult.ProtocolTraces, normalizeSDKProtocolTraceForView(convertProtocolTrace(trace)))
 		}
+		targetResult.SecurityLeads = buildSDKSecurityLeads(targetURL, targetResult.Assets.APIRoutes, targetResult.RequestBlueprints, targetResult.APIRecords, options.HighRiskRouter)
 		targetResult.Overview = buildSDKTargetOverview(targetResult)
 
 		totalTreeNodes += countTreeNodes(targetResult.SiteTree)

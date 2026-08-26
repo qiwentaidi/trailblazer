@@ -147,7 +147,7 @@ SDK 支持以下事件类型：
 3. **性能考虑**: 回调函数应该快速执行，避免阻塞扫描流程
 4. **错误处理**: 建议在回调函数中添加错误处理逻辑
 5. **上下文复用**: 漏洞分析和静态协议分析会读取 `DataStore` 中的 JS/API/协议轨迹；如果你要跨任务重载结果，建议把这些事件持久化
-6. **无 ES 场景**: SDK 已支持不依赖 ES 运行，默认内存存储适合单次扫描，自定义 `DataStore` 适合平台化接入
+6. **本地存储**: SDK 默认内存存储适合单次扫描；Web 管理端使用 SQLite，自定义 `DataStore` 适合平台化接入
 
 ## 更多信息
 
@@ -155,4 +155,4 @@ SDK 支持以下事件类型：
 
 - SDK 入口: [`pkg/sdk/sdk.go`](../pkg/sdk/sdk.go)
 - SDK 文档: [`docs/sdk-usage.md`](../docs/sdk-usage.md)
-- 服务端项目: [`trailblazer-server`](../../trailblazer-server)
+- Web 管理端: [`docs/web.md`](../docs/web.md)

@@ -2205,7 +2205,7 @@ func isBase64Like(value string) bool {
 		if (ch < 'A' || ch > 'Z') &&
 			(ch < 'a' || ch > 'z') &&
 			(ch < '0' || ch > '9') &&
-			ch != '+' && ch != '/' && ch != '=' {
+			ch != '+' && ch != '/' && ch != '-' && ch != '_' && ch != '=' {
 			return false
 		}
 	}

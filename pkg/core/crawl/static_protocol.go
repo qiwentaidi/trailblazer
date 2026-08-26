@@ -2540,6 +2540,14 @@ func findCallExpressions(content, callee string) []callExpression {
 			break
 		}
 		callStart := searchFrom + idx
+		// A fixed callee such as `axios.post` must not match the tail of a
+		// different JavaScript identifier such as `$axios.post` or
+		// `customaxios.post`. Those calls are handled by the generic wrapper
+		// extractor with their complete receiver name.
+		if callStart > 0 && isJSIdentifierContinuation(content[callStart-1]) {
+			searchFrom = callStart + len(pattern)
+			continue
+		}
 		openIndex := callStart + len(callee)
 		args, endIndex, ok := extractBalancedJS(content, openIndex, '(', ')')
 		if ok {
@@ -2555,6 +2563,13 @@ func findCallExpressions(content, callee string) []callExpression {
 		searchFrom = callStart + len(pattern)
 	}
 	return results
+}
+
+func isJSIdentifierContinuation(value byte) bool {
+	return value == '$' || value == '_' ||
+		(value >= 'a' && value <= 'z') ||
+		(value >= 'A' && value <= 'Z') ||
+		(value >= '0' && value <= '9')
 }
 
 func findConfigLikeCallExpressions(content string) []callExpression {

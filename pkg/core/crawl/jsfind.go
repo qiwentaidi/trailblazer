@@ -244,14 +244,7 @@ func Scan(target string, jsLinks []string, aiChecker *SensitiveInfoChecker) stru
 
 // 对URL 和 JS 链接进行格式化
 func formatURL(url string, jslink string) string {
-	var newURL string
-	host, _ := httputil.GetBasePath(url)
-	if strings.HasPrefix(jslink, "http") {
-		newURL = jslink
-	} else {
-		newURL = host + strings.TrimLeft(jslink, "/")
-	}
-	return newURL
+	return ResolveResourceURL(url, jslink)
 }
 
 // clean 去除手机号和身份证中的其他字符，保留数字、+ 和 X
@@ -638,6 +631,22 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 	homeBody := string(resp.Body())
 	apiResourceIndex := loadUnauthorizedAPIResourceIndex(o)
 	protocolTraceIndex := loadUnauthorizedProtocolTraceIndex(o)
+	var uncapturedEncryptionReviewer uncapturedEncryptedResponseAIReviewer
+	if reviewer, ok := o.AIChecker.(uncapturedEncryptedResponseAIReviewer); ok {
+		uncapturedEncryptionReviewer = reviewer
+	}
+	var unauthorizedNamer unauthorizedFindingNamer
+	if namer, ok := o.AIChecker.(unauthorizedFindingNamer); ok {
+		unauthorizedNamer = namer
+	}
+	var uncapturedEncryptionJSContext *uncapturedEncryptionJSContext
+	if uncapturedEncryptionReviewer != nil {
+		uncapturedEncryptionJSContext = loadUncapturedEncryptionJSContext(o)
+	}
+	// Analyze all cached JS independently of AI review so static, executable
+	// response decryption remains available for any response envelope shape.
+	staticResponseDecryptors := loadStaticResponseDecryptIndex(o)
+	recordStaticPrivateKeyFindings(o, collector, staticResponseDecryptors)
 	totalAPIs := len(o.ApiList)
 	fmt.Printf("[信息] 开始进行接口测试: 首页=%s，根路径=%s，接口数=%d\n", o.HomeURL, o.ApiRoot, totalAPIs)
 	var wg sync.WaitGroup
@@ -771,7 +780,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 					}
 					if collector != nil {
 						collector.Collect(vulnRecord)
-					} else if database.ESClient != nil {
+					} else if database.DB != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
 							fmt.Printf("\n[错误] 保存 LFI 漏洞失败: %v\n", err)
 						}
@@ -810,7 +819,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 					}
 					if collector != nil {
 						collector.Collect(vulnRecord)
-					} else if database.ESClient != nil {
+					} else if database.DB != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
 							fmt.Printf("\n[错误] 保存 SSRF 漏洞失败: %v\n", err)
 						}
@@ -849,7 +858,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 					}
 					if collector != nil {
 						collector.Collect(vulnRecord)
-					} else if database.ESClient != nil {
+					} else if database.DB != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
 							fmt.Printf("\n[错误] 保存重定向漏洞失败: %v\n", err)
 						}
@@ -888,7 +897,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 					}
 					if collector != nil {
 						collector.Collect(vulnRecord)
-					} else if database.ESClient != nil {
+					} else if database.DB != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
 							fmt.Printf("\n[错误] 保存 SQL 注入漏洞失败: %v\n", err)
 						}
@@ -929,7 +938,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 					}
 					if collector != nil {
 						collector.Collect(vulnRecord)
-					} else if database.ESClient != nil {
+					} else if database.DB != nil {
 						if err := database.SaveVuln(vulnRecord); err != nil {
 							fmt.Printf("\n[错误] 保存 XSS 漏洞失败: %v\n", err)
 						}
@@ -984,7 +993,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 						}
 						if collector != nil {
 							collector.Collect(vulnRecord)
-						} else if database.ESClient != nil {
+						} else if database.DB != nil {
 							if err := database.SaveVuln(vulnRecord); err != nil {
 								fmt.Printf("\n[错误] 保存文件上传漏洞失败: %v\n", err)
 							}
@@ -1024,13 +1033,48 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			probeProtocolContext = context
 			if attempted {
 				plaintextUnauthorizedResponse = decodedBody
+				return decodedBody, attempted, decryptErr
 			}
-			return decodedBody, attempted, decryptErr
+
+			if plaintext, evidence, ok := tryStaticResponseDecrypt(rawBody, context.ResponseCiphertext, staticResponseDecryptors); ok {
+				context.ResponsePlaintext = plaintext
+				context.DecryptionStatus = "decrypted_static"
+				context.CryptoKeyEvidence = evidence
+				context.DecryptionDetail = strings.TrimSpace(context.DecryptionDetail + "；已通过全量缓存 JavaScript 中恢复的 RSA 私钥完成静态解密")
+				if traceID, saved := saveStaticResponseDecryptTrace(o, apiReq, firstNonEmpty(context.ResponseCiphertext, rawBody), plaintext, evidence); saved {
+					context.TraceID = traceID
+					context.HasProtocolTrace = true
+				}
+				probeProtocolContext = context
+				plaintextUnauthorizedResponse = plaintext
+				return plaintext, true, nil
+			}
+
+			reviewedContext, reviewErr := reviewUncapturedEncryptedResponse(
+				apiReq,
+				rawBody,
+				context,
+				uncapturedEncryptionJSContext,
+				uncapturedEncryptionReviewer,
+			)
+			probeProtocolContext = reviewedContext
+			if reviewErr != nil {
+				var encryptedResponseErr *uncapturedEncryptedResponseError
+				if errors.As(reviewErr, &encryptedResponseErr) {
+					return "", true, reviewErr
+				}
+				fmt.Printf("[警告] 响应加密包装的 AI 解密链路线索复核失败，继续按原响应处理 %s %s: %v\n", apiReq.Method, apiReq.URL, reviewErr)
+			}
+			return decodedBody, false, decryptErr
 		})
 
 		// 测试未授权访问
 		vulnerable, body, assessment, err := unauth.TestUnauthorizedAccessWithDecoder(homeBody, unauthorizedProbeReq, o.Authentication, responseDecoder)
 		if err != nil {
+			var encryptedResponseErr *uncapturedEncryptedResponseError
+			if errors.As(err, &encryptedResponseErr) {
+				recordUncapturedEncryptedResponseFinding(o, collector, unauthorizedProbeReq, rawUnauthorizedResponse, probeProtocolContext, uncapturedEncryptionJSContext)
+			}
 			return
 		}
 
@@ -1052,6 +1096,12 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				Response: httputil.LimitResponse(rawUnauthorizedResponse, maxResponseSize, "响应包长度过大，请手动打开链接查看。"),
 				Length:   len(rawUnauthorizedResponse),
 			}
+			name := ClassifyUnauthorizedFinding(fullURL, method, firstNonEmpty(plaintextUnauthorizedResponse, body), assessment.DataExposure)
+			if unauthorizedNamer != nil {
+				if aiName, err := unauthorizedNamer.NameUnauthorizedFinding(fullURL, method, result.Request, firstNonEmpty(plaintextUnauthorizedResponse, body), assessment.DataExposure); err == nil {
+					name = normalizeUnauthorizedFindingName(aiName, fullURL, method, firstNonEmpty(plaintextUnauthorizedResponse, body), assessment.DataExposure)
+				}
+			}
 
 			fmt.Printf("[+] %s | %s | %s | 风险等级: %s | 响应长度: %d\n",
 				result.VulType, result.Method, result.Source, result.Severity, result.Length)
@@ -1062,9 +1112,13 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				TaskID:             o.TaskID,
 				Version:            o.Version,
 				VulnID:             vulnID,
-				Title:              "未授权访问",
+				Title:              name.Title,
 				Level:              assessment.RiskLevel,
 				Type:               "未授权访问",
+				Category:           name.Category,
+				Subcategory:        name.Subcategory,
+				BusinessObject:     name.BusinessObject,
+				NamingSource:       name.Source,
 				URL:                fullURL,
 				Method:             method,
 				Request:            result.Request,
@@ -1076,6 +1130,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 				ResponseCiphertext: probeProtocolContext.ResponseCiphertext,
 				DecryptionStatus:   probeProtocolContext.DecryptionStatus,
 				DecryptionDetail:   probeProtocolContext.DecryptionDetail,
+				CryptoKeyEvidence:  probeProtocolContext.CryptoKeyEvidence,
 				ResponseLength:     len(rawUnauthorizedResponse),
 				Confidence:         assessment.Confidence,
 				ConfidenceReason:   assessment.ConfidenceReason,
@@ -1087,7 +1142,7 @@ func AnalyzeAPIWithCollector(o structs.JSFindOptions, collector VulnCollector) {
 			}
 			if collector != nil {
 				collector.Collect(vulnRecord)
-			} else if database.ESClient != nil {
+			} else if database.DB != nil {
 				if err := database.SaveVuln(vulnRecord); err != nil {
 					fmt.Printf("\n[错误] 保存未授权漏洞失败: %v\n", err)
 				}
@@ -1554,8 +1609,28 @@ type unauthorizedProtocolContext struct {
 	HasProtocolTrace   bool
 	ResponsePlaintext  string
 	ResponseCiphertext string
+	ResponseEncrypted  bool
+	AIEncryptionReview bool
 	DecryptionStatus   string
 	DecryptionDetail   string
+	CryptoKeyEvidence  *database.CryptoKeyEvidence
+}
+
+type uncapturedEncryptionJSContext struct {
+	Evidence      string
+	StaticSummary string
+}
+
+type uncapturedEncryptedResponseAIReviewer interface {
+	ReviewUncapturedEncryptedResponse(targetURL, requestPreview, responsePreview, jsEvidence string) (EncryptedResponseAIReview, error)
+}
+
+type uncapturedEncryptedResponseError struct {
+	detail string
+}
+
+func (e *uncapturedEncryptedResponseError) Error() string {
+	return e.detail
 }
 
 type unauthorizedAPIResourceIndex struct {
@@ -1648,6 +1723,174 @@ func loadUnauthorizedProtocolTraceIndex(o structs.JSFindOptions) *unauthorizedPr
 	return index
 }
 
+func loadUncapturedEncryptionJSContext(o structs.JSFindOptions) *uncapturedEncryptionJSContext {
+	if strings.TrimSpace(o.TaskID) == "" {
+		return nil
+	}
+	store := o.DataStore
+	if store == nil {
+		store = database.GetScanDataStore()
+	}
+	if store == nil {
+		return nil
+	}
+
+	var (
+		resources []database.JSResource
+		err       error
+	)
+	if o.Version > 0 {
+		resources, err = store.ListJSResources(o.TaskID, o.Version)
+	} else {
+		resources, err = store.ListJSResources(o.TaskID)
+	}
+	if err != nil || len(resources) == 0 {
+		return nil
+	}
+
+	context := buildUncapturedEncryptionJSContext(resources)
+	var analysis *StaticProtocolAnalysisResult
+	if o.Version > 0 {
+		analysis, _ = AnalyzeStoredJSProtocolsWithStore(o.TaskID, store, o.Version)
+	} else {
+		analysis, _ = AnalyzeStoredJSProtocolsWithStore(o.TaskID, store)
+	}
+	appendStaticProtocolEvidence(&context, analysis)
+	if context.Evidence == "" {
+		return nil
+	}
+	return &context
+}
+
+func buildUncapturedEncryptionJSContext(resources []database.JSResource) uncapturedEncryptionJSContext {
+	const (
+		maxEvidenceItems = 8
+		snippetRadius    = 180
+	)
+	needles := []string{"decrypt", "crypto", "webcrypto", "cryptojs", "sm4", "aes", "rsa", "atob", "base64", "decode"}
+	items := make([]string, 0, maxEvidenceItems)
+	found := make(map[string]struct{})
+	for _, resource := range resources {
+		content := resource.Content
+		lower := strings.ToLower(content)
+		for _, needle := range needles {
+			if len(items) >= maxEvidenceItems {
+				break
+			}
+			index := strings.Index(lower, needle)
+			if index < 0 {
+				continue
+			}
+			key := resource.URL + "\x00" + needle
+			if _, exists := found[key]; exists {
+				continue
+			}
+			found[key] = struct{}{}
+			start := index - snippetRadius
+			if start < 0 {
+				start = 0
+			}
+			end := index + len(needle) + snippetRadius
+			if end > len(content) {
+				end = len(content)
+			}
+			snippet := strings.Join(strings.Fields(content[start:end]), " ")
+			items = append(items, fmt.Sprintf("文件: %s；命中: %s；片段: %s", resource.URL, needle, snippet))
+		}
+		if len(items) >= maxEvidenceItems {
+			break
+		}
+	}
+	if len(items) == 0 {
+		return uncapturedEncryptionJSContext{}
+	}
+	return uncapturedEncryptionJSContext{
+		Evidence:      strings.Join(items, "\n"),
+		StaticSummary: fmt.Sprintf("已从 %d 个已保存 JS 资源中提取 %d 条加解密/编码相关静态证据", len(resources), len(items)),
+	}
+}
+
+func appendStaticProtocolEvidence(context *uncapturedEncryptionJSContext, analysis *StaticProtocolAnalysisResult) {
+	if context == nil || analysis == nil {
+		return
+	}
+	profileCount := 0
+	items := make([]string, 0, 4)
+	for _, profile := range analysis.Profiles {
+		if !profile.EncryptionEnabled {
+			continue
+		}
+		profileCount++
+		if len(items) >= 4 {
+			continue
+		}
+		detail := "静态协议轮廓: " + profile.Name
+		if len(profile.ResponsePipeline) > 0 {
+			detail += "；响应链路: " + strings.Join(profile.ResponsePipeline, " -> ")
+		}
+		if len(profile.Evidence) > 0 {
+			detail += "；证据文件: " + profile.Evidence[0].FileURL
+		}
+		items = append(items, detail)
+	}
+	if profileCount == 0 {
+		return
+	}
+	context.Evidence = strings.TrimSpace(context.Evidence + "\n" + strings.Join(items, "\n"))
+	if context.StaticSummary == "" {
+		context.StaticSummary = fmt.Sprintf("已从任务 JS 静态协议分析中识别 %d 个加密协议轮廓", profileCount)
+		return
+	}
+	context.StaticSummary += fmt.Sprintf("；静态协议分析识别 %d 个加密协议轮廓", profileCount)
+}
+
+func reviewUncapturedEncryptedResponse(apiReq structs.APIRequest, rawBody string, context unauthorizedProtocolContext, jsContext *uncapturedEncryptionJSContext, reviewer uncapturedEncryptedResponseAIReviewer) (unauthorizedProtocolContext, error) {
+	if context.ResponseCiphertext == "" {
+		return context, nil
+	}
+
+	markForRuntimeCapture := func(detail string) (unauthorizedProtocolContext, error) {
+		context.DecryptionStatus = "needs_runtime_capture"
+		context.DecryptionDetail = strings.TrimSpace(context.DecryptionDetail + "；" + detail + "；未捕获可执行运行期解密链路，已保留密文并建议补充运行期捕获")
+		return context, &uncapturedEncryptedResponseError{detail: "检测到响应级加密包装但未捕获运行期解密链路，已转入 JS 静态分析"}
+	}
+
+	// A response-level envelope is deterministic evidence. It must be kept out
+	// of unauthorized-access evaluation even when a historical trace cannot be
+	// found or the AI service is unavailable.
+	if context.ResponseEncrypted {
+		detail := "本地结构化判定为响应加密包装"
+		if reviewer == nil || jsContext == nil || strings.TrimSpace(jsContext.Evidence) == "" {
+			return markForRuntimeCapture(detail)
+		}
+		review, err := reviewer.ReviewUncapturedEncryptedResponse(
+			apiReq.URL,
+			vuln.BuildRawRequest(apiReq),
+			rawBody,
+			jsContext.Evidence,
+		)
+		if err != nil {
+			return markForRuntimeCapture(detail + "；AI 辅助复核不可用")
+		}
+		context.AIEncryptionReview = true
+		if strings.TrimSpace(review.Reason) != "" {
+			detail += "；AI 复核（置信度 " + strconv.Itoa(review.Confidence) + "%）: " + strings.TrimSpace(review.Reason)
+		}
+		if strings.TrimSpace(jsContext.StaticSummary) != "" {
+			detail += "；" + jsContext.StaticSummary
+		}
+		if len(review.CandidateAlgorithms) > 0 {
+			detail += "；候选算法: " + strings.Join(review.CandidateAlgorithms, ", ")
+		}
+		return markForRuntimeCapture(detail)
+	}
+
+	// AI is deliberately not an encryption classifier. A response that does not
+	// satisfy the local, response-level envelope rule remains an ordinary
+	// business response/unknown response and must not be promoted by a model.
+	return context, nil
+}
+
 func buildUnauthorizedAPIResourceIndex(apiResources []database.APIResource) *unauthorizedAPIResourceIndex {
 	index := &unauthorizedAPIResourceIndex{
 		byFullURL:       make(map[string][]database.APIResource, len(apiResources)),
@@ -1718,14 +1961,17 @@ func resolveUnauthorizedProtocolContext(apiReq structs.APIRequest, responseBody 
 		}
 	}
 
-	ciphertext, ciphertextSource := pickUnauthorizedCiphertext(responseBody, resource, matched)
+	ciphertext, ciphertextSource, encryptedEnvelope := pickUnauthorizedCiphertext(responseBody, resource, matched)
 	if ciphertext == "" {
 		return context
 	}
 
 	context.ResponseCiphertext = ciphertext
+	context.ResponseEncrypted = encryptedEnvelope
 	context.DecryptionStatus = "not_tried"
 	switch {
+	case encryptedEnvelope:
+		context.DecryptionDetail = buildUnauthorizedCiphertextDetail(ciphertextSource, "响应包含加密包装标记（如 useGlobalEnc / enc）")
 	case context.HasProtocolTrace:
 		context.DecryptionDetail = buildUnauthorizedDecryptionDetail(matchStrategy, buildUnauthorizedCiphertextDetail(ciphertextSource, "已关联协议轨迹，可先尝试离线解密，失败后可继续尝试在线 runtime 解密"))
 	case matched:
@@ -1737,18 +1983,18 @@ func resolveUnauthorizedProtocolContext(apiReq structs.APIRequest, responseBody 
 	return context
 }
 
-func pickUnauthorizedCiphertext(responseBody string, resource database.APIResource, matched bool) (string, string) {
+func pickUnauthorizedCiphertext(responseBody string, resource database.APIResource, matched bool) (string, string, bool) {
 	if ciphertext := normalizeUnauthorizedCiphertext(responseBody); ciphertext != "" {
-		return ciphertext, "unauth_probe_response"
+		return ciphertext, "unauth_probe_response", isLikelyEncryptedResponseEnvelope(responseBody)
 	}
 
 	if matched {
 		if ciphertext := normalizeUnauthorizedCiphertext(resource.ResponseBody); ciphertext != "" {
-			return ciphertext, "api_record_response"
+			return ciphertext, "api_record_response", isLikelyEncryptedResponseEnvelope(resource.ResponseBody)
 		}
 	}
 
-	return "", ""
+	return "", "", false
 }
 
 func buildUnauthorizedCiphertextDetail(source, detail string) string {
@@ -2066,6 +2312,60 @@ func buildUnauthorizedVulnDescription(riskLevel, confidence, dataExposure string
 	return description + "；" + strings.TrimSpace(replayDetail)
 }
 
+func recordUncapturedEncryptedResponseFinding(o structs.JSFindOptions, collector VulnCollector, apiReq structs.APIRequest, rawResponse string, context unauthorizedProtocolContext, jsContext *uncapturedEncryptionJSContext) {
+	if strings.TrimSpace(context.ResponseCiphertext) == "" || context.DecryptionStatus != "needs_runtime_capture" {
+		return
+	}
+	description := "检测到接口响应加密包装，但本次运行未捕获可执行的响应解密链路；已基于已保存的 JavaScript 继续完成静态证据分析。该记录不是未授权访问漏洞，需补充浏览器运行期捕获后再验证响应明文。"
+	if context.AIEncryptionReview {
+		description = "AI 已复核 JavaScript 解密链路线索；" + description
+	}
+	if jsContext != nil && strings.TrimSpace(jsContext.StaticSummary) != "" {
+		description += "；" + jsContext.StaticSummary
+	}
+	staticContexts := []database.VulnStaticContext{}
+	if jsContext != nil && strings.TrimSpace(jsContext.Evidence) != "" {
+		staticContexts = append(staticContexts, database.VulnStaticContext{
+			SourceURL: "已保存 JavaScript 静态分析",
+			Snippet:   jsContext.Evidence,
+		})
+	}
+	record := database.VulnRecord{
+		TaskID:             o.TaskID,
+		Version:            o.Version,
+		VulnID:             uuid.New().String(),
+		Title:              "接口加密响应待分析",
+		Level:              "info",
+		Type:               "加密响应待分析",
+		URL:                apiReq.URL,
+		Method:             apiReq.Method,
+		Request:            vuln.BuildRawRequest(apiReq),
+		Response:           rawResponse,
+		TraceID:            context.TraceID,
+		HasProtocolTrace:   context.HasProtocolTrace,
+		ResponseCiphertext: context.ResponseCiphertext,
+		DecryptionStatus:   context.DecryptionStatus,
+		DecryptionDetail:   context.DecryptionDetail,
+		ResponseLength:     len(rawResponse),
+		Confidence:         "medium",
+		ConfidenceReason:   "本地结构化规则已确认响应级加密包装；尚未获得运行期解密明文",
+		StaticContexts:     staticContexts,
+		CryptoKeyEvidence:  context.CryptoKeyEvidence,
+		Description:        description,
+		AIVerified:         context.AIEncryptionReview,
+		CreatedAt:          time.Now(),
+	}
+	if collector != nil {
+		collector.Collect(record)
+		return
+	}
+	if database.DB != nil {
+		if err := database.SaveVuln(record); err != nil {
+			fmt.Printf("\n[错误] 保存加密响应待分析记录失败: %v\n", err)
+		}
+	}
+}
+
 func lookupUnauthorizedAPIResource(method, rawURL string, apiResourceIndex *unauthorizedAPIResourceIndex) (database.APIResource, string, bool) {
 	if apiResourceIndex == nil {
 		return database.APIResource{}, "", false
@@ -2363,19 +2663,68 @@ func normalizeUnauthorizedCiphertext(body string) string {
 	if direct := normalizeUnauthorizedCiphertextValue(body); direct != "" {
 		return direct
 	}
-
-	trimmed := strings.TrimSpace(body)
-	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
-		return ""
+	if isLikelyEncryptedResponseEnvelope(body) {
+		var response map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &response); err == nil {
+			payload, _ := lookupInsensitiveJSONString(response, "data", "payload", "ciphertext", "content", "result")
+			return normalizeUnauthorizedCiphertextValue(payload)
+		}
 	}
 
-	var parsed any
-	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-		return ""
+	// Never recursively mine JSON business fields for random-looking strings.
+	// A JSON response is treated as ciphertext only when it satisfies the
+	// response-envelope contract above. This prevents values such as card_id,
+	// request_id, token, or UUID from becoming "encrypted response" findings.
+	return ""
+}
+
+func isLikelyEncryptedResponseEnvelope(body string) bool {
+	var response map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &response); err != nil {
+		return false
 	}
 
-	best, _ := findUnauthorizedCiphertextCandidate(parsed, "", 0)
-	return best
+	globalEncryption, _ := lookupInsensitiveJSONBool(response, "useGlobalEnc", "use_global_enc", "globalEncryption")
+	if !globalEncryption {
+		return false
+	}
+	algorithm, _ := lookupInsensitiveJSONString(response, "enc", "encryption", "cipher", "algorithm")
+	algorithm = strings.ToLower(strings.TrimSpace(algorithm))
+	if algorithm == "" || algorithm == "none" || algorithm == "plain" || algorithm == "plaintext" {
+		return false
+	}
+	payload, _ := lookupInsensitiveJSONString(response, "data", "payload", "ciphertext", "content", "result")
+	if normalizeUnauthorizedCiphertextValue(payload) == "" {
+		return false
+	}
+
+	return true
+}
+
+func lookupInsensitiveJSONString(values map[string]any, keys ...string) (string, bool) {
+	for key, value := range values {
+		for _, expected := range keys {
+			if !strings.EqualFold(strings.TrimSpace(key), expected) {
+				continue
+			}
+			stringValue, ok := value.(string)
+			return strings.TrimSpace(stringValue), ok
+		}
+	}
+	return "", false
+}
+
+func lookupInsensitiveJSONBool(values map[string]any, keys ...string) (bool, bool) {
+	for key, value := range values {
+		for _, expected := range keys {
+			if !strings.EqualFold(strings.TrimSpace(key), expected) {
+				continue
+			}
+			boolValue, ok := value.(bool)
+			return boolValue, ok
+		}
+	}
+	return false, false
 }
 
 func normalizeUnauthorizedCiphertextValue(value string) string {
@@ -2402,57 +2751,6 @@ func normalizeUnauthorizedCiphertextValue(value string) string {
 	}
 
 	return ""
-}
-
-func findUnauthorizedCiphertextCandidate(value any, parentKey string, depth int) (string, int) {
-	if depth > 6 {
-		return "", -1
-	}
-
-	switch typed := value.(type) {
-	case string:
-		candidate := normalizeUnauthorizedCiphertextValue(typed)
-		if candidate == "" {
-			return "", -1
-		}
-		return candidate, scoreUnauthorizedCiphertextCandidate(parentKey, candidate)
-	case map[string]any:
-		bestValue := ""
-		bestScore := -1
-		for key, child := range typed {
-			candidate, score := findUnauthorizedCiphertextCandidate(child, key, depth+1)
-			if score > bestScore {
-				bestValue = candidate
-				bestScore = score
-			}
-		}
-		return bestValue, bestScore
-	case []any:
-		bestValue := ""
-		bestScore := -1
-		for _, child := range typed {
-			candidate, score := findUnauthorizedCiphertextCandidate(child, parentKey, depth+1)
-			if score > bestScore {
-				bestValue = candidate
-				bestScore = score
-			}
-		}
-		return bestValue, bestScore
-	default:
-		return "", -1
-	}
-}
-
-func scoreUnauthorizedCiphertextCandidate(parentKey, candidate string) int {
-	score := len(candidate)
-	key := strings.ToLower(strings.TrimSpace(parentKey))
-	for _, hint := range []string{"cipher", "encrypt", "payload", "data", "content", "result", "body", "bizcontent", "msg"} {
-		if strings.Contains(key, hint) {
-			score += 100
-			break
-		}
-	}
-	return score
 }
 
 // buildFullURL 根据 ApiRoot 和 API 路径生成完整 URL

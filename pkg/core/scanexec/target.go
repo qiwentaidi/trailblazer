@@ -245,8 +245,8 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	result.Assets = buildAssetInfo(findSomething)
 	result.Assets.FrontendRoutes = buildFrontendRoutes(capturedFrontendRoutes)
 
-	staticAPIRoutes := buildStaticAPIRoutes(findSomething, classified, filter)
-	apiRouter := buildAPIRoutes(findSomething, classified, mergedAPIRecords, capturedProtocolTraces, filter)
+	staticAPIRoutes := buildStaticAPIRoutes(targetURL, findSomething, classified, filter)
+	apiRouter := buildAPIRoutes(targetURL, findSomething, classified, mergedAPIRecords, capturedProtocolTraces, filter)
 	result.Assets.APIRoutes = apiRouter
 	result.Assets.APIRoots = buildAPIRoots(targetURL, apiRouter, classified, filter)
 	logJSHookCaptureDelta(targetURL, result.Assets.FrontendRoutes, capturedFrontendRoutes, staticAPIRoutes, apiRouter, mergedAPIRecords, capturedProtocolTraces)
@@ -714,7 +714,7 @@ func fetchStaticHintJSResources(taskID string, version int, homeURL string, jsLi
 		}
 		seen[resolvedURL] = struct{}{}
 
-		resp, err := clients.SimpleGet(resolvedURL, clients.NewRestyClient(nil, true))
+		resp, err := clients.DoRequest(http.MethodGet, resolvedURL, staticHintJSRequestHeaders(homeURL), nil, 0, clients.NewRestyClient(nil, true))
 		if err != nil {
 			continue
 		}
@@ -756,26 +756,19 @@ func fetchStaticHintJSResources(taskID string, version int, homeURL string, jsLi
 	return result
 }
 
-func normalizeJSURL(homeURL, jsLink string) string {
-	jsLink = strings.TrimSpace(jsLink)
-	if jsLink == "" {
-		return ""
+func staticHintJSRequestHeaders(homeURL string) map[string]string {
+	headers := map[string]string{
+		"Accept":          "*/*",
+		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 	}
-	if strings.HasPrefix(jsLink, "//") {
-		if parsed, err := url.Parse(strings.TrimSpace(homeURL)); err == nil && parsed != nil && parsed.Scheme != "" {
-			return parsed.Scheme + ":" + jsLink
-		}
-		return "https:" + jsLink
+	if referer := strings.TrimSpace(homeURL); referer != "" {
+		headers["Referer"] = referer
 	}
-	if strings.HasPrefix(jsLink, "http://") || strings.HasPrefix(jsLink, "https://") {
-		return jsLink
-	}
+	return headers
+}
 
-	baseURL := strings.TrimSpace(homeURL)
-	if parsed, err := url.Parse(baseURL); err == nil && parsed != nil && parsed.Scheme != "" && parsed.Host != "" {
-		return parsed.Scheme + "://" + parsed.Host + "/" + strings.TrimLeft(jsLink, "/")
-	}
-	return jsLink
+func normalizeJSURL(homeURL, jsLink string) string {
+	return crawl.ResolveResourceURL(homeURL, jsLink)
 }
 
 func extractWebpackChunkJSLinks(parentURL, content string) []string {
@@ -923,6 +916,7 @@ func isConfirmedFrontendRouteSourceKind(sourceKind string) bool {
 }
 
 func buildStaticAPIRoutes(
+	targetURL string,
 	found structs.FindSomething,
 	classified crawl.NetworkLinks,
 	filter crawl.Filter,
@@ -932,34 +926,69 @@ func buildStaticAPIRoutes(
 		if strings.Contains(item.Filed, "[") || strings.Contains(item.Filed, "]") {
 			continue
 		}
-		route := strings.TrimSpace(item.Filed)
+		route := normalizeStaticAPIRouteForOutput(targetURL, item.Filed)
 		if route != "" {
 			routes = append(routes, route)
 		}
 	}
 	for _, route := range classified.Classification.APIRoute {
-		trimmedRoute := strings.TrimSpace(route)
+		trimmedRoute := normalizeStaticAPIRouteForOutput(targetURL, route)
 		if trimmedRoute != "" {
 			routes = append(routes, trimmedRoute)
 		}
 	}
-	return finalizeAPIRoutes(routes, filter)
+	return finalizeStaticAPIRoutes(routes, filter)
 }
 
 func buildAPIRoutes(
+	targetURL string,
 	found structs.FindSomething,
 	classified crawl.NetworkLinks,
 	apiRecords []crawl.NetworkRecord,
 	protocolTraces []crawl.ProtocolTraceRecord,
 	filter crawl.Filter,
 ) []string {
-	apiRouter := buildStaticAPIRoutes(found, classified, filter)
-	apiRouter = mergeRuntimeAPIRoutes(apiRouter, apiRecords, protocolTraces)
-	return finalizeAPIRoutes(apiRouter, filter)
+	apiRouter := buildStaticAPIRoutes(targetURL, found, classified, filter)
+	runtimeRoutes := collectRuntimeAPIRoutes(apiRecords, protocolTraces)
+	apiRouter = append(apiRouter, runtimeRoutes...)
+	return finalizeAPIRoutes(apiRouter, filter, runtimeRoutes)
 }
 
-func finalizeAPIRoutes(routes []string, filter crawl.Filter) []string {
-	routes = preferAbsoluteRuntimeRoutes(routes)
+func normalizeStaticAPIRouteForOutput(targetURL string, route string) string {
+	trimmed := strings.TrimSpace(route)
+	if trimmed == "" {
+		return ""
+	}
+
+	routeURL, err := url.Parse(trimmed)
+	if err != nil || routeURL.Scheme == "" || routeURL.Host == "" {
+		return trimmed
+	}
+
+	targetParsed, targetErr := url.Parse(strings.TrimSpace(targetURL))
+	if targetErr != nil || targetParsed.Host == "" || !strings.EqualFold(targetParsed.Host, routeURL.Host) {
+		return trimmed
+	}
+
+	pathValue := strings.TrimSpace(routeURL.EscapedPath())
+	if pathValue == "" {
+		pathValue = strings.TrimSpace(routeURL.Path)
+	}
+	if pathValue == "" {
+		return trimmed
+	}
+	if routeURL.RawQuery != "" {
+		pathValue += "?" + routeURL.RawQuery
+	}
+	return pathValue
+}
+
+func finalizeStaticAPIRoutes(routes []string, filter crawl.Filter) []string {
+	return finalizeAPIRoutes(routes, filter, nil)
+}
+
+func finalizeAPIRoutes(routes []string, filter crawl.Filter, runtimeRoutes []string) []string {
+	routes = preferRuntimeOrRelativeAPIRoutes(routes, runtimeRoutes)
 	routes = arrayutil.RemoveDuplicates(routes)
 	routes = filter.FilterAPIRoutes(routes)
 	routes = crawl.DeduplicateSimilarAPIRoutes(routes)
@@ -1598,18 +1627,24 @@ func preferTraceResponseBody(trace crawl.ProtocolTraceRecord) string {
 	return ""
 }
 
-func mergeRuntimeAPIRoutes(routes []string, apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord) []string {
-	merged := append([]string{}, routes...)
+func collectRuntimeAPIRoutes(apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord) []string {
+	routes := make([]string, 0, len(apiRecords)+len(protocolTraces))
 	for _, record := range apiRecords {
 		if value := strings.TrimSpace(record.URL); value != "" {
-			merged = append(merged, value)
+			routes = append(routes, value)
 		}
 	}
 	for _, trace := range protocolTraces {
 		if value := strings.TrimSpace(trace.RequestURL); value != "" {
-			merged = append(merged, value)
+			routes = append(routes, value)
 		}
 	}
+	return arrayutil.RemoveDuplicates(routes)
+}
+
+func mergeRuntimeAPIRoutes(routes []string, apiRecords []crawl.NetworkRecord, protocolTraces []crawl.ProtocolTraceRecord) []string {
+	merged := append([]string{}, routes...)
+	merged = append(merged, collectRuntimeAPIRoutes(apiRecords, protocolTraces)...)
 	return arrayutil.RemoveDuplicates(merged)
 }
 
@@ -1797,14 +1832,22 @@ func jsHookDebugEnabled() bool {
 	return raw == "1"
 }
 
-func preferAbsoluteRuntimeRoutes(routes []string) []string {
-	absoluteByPath := make(map[string]bool)
+func preferRuntimeOrRelativeAPIRoutes(routes []string, runtimeRoutes []string) []string {
+	runtimeAbsoluteByPath := make(map[string]bool)
+	for _, route := range runtimeRoutes {
+		pathKey, isAbsolute := apiRoutePathKey(route)
+		if pathKey != "" && isAbsolute {
+			runtimeAbsoluteByPath[pathKey] = true
+		}
+	}
+
+	relativeByPath := make(map[string]bool)
 	for _, route := range routes {
-		parsed, err := url.Parse(strings.TrimSpace(route))
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		pathKey, isAbsolute := apiRoutePathKey(route)
+		if pathKey == "" || isAbsolute {
 			continue
 		}
-		absoluteByPath[strings.TrimSpace(parsed.Path)] = true
+		relativeByPath[pathKey] = true
 	}
 
 	result := make([]string, 0, len(routes))
@@ -1813,12 +1856,40 @@ func preferAbsoluteRuntimeRoutes(routes []string) []string {
 		if trimmed == "" {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "/") && absoluteByPath[trimmed] {
-			continue
+
+		pathKey, isAbsolute := apiRoutePathKey(trimmed)
+		if pathKey != "" {
+			if !isAbsolute && runtimeAbsoluteByPath[pathKey] {
+				continue
+			}
+			if isAbsolute && !runtimeAbsoluteByPath[pathKey] && relativeByPath[pathKey] {
+				continue
+			}
 		}
 		result = append(result, trimmed)
 	}
 	return arrayutil.RemoveDuplicates(result)
+}
+
+func apiRoutePathKey(route string) (string, bool) {
+	trimmed := strings.TrimSpace(route)
+	if trimmed == "" {
+		return "", false
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", false
+	}
+
+	pathValue := strings.TrimSpace(parsed.Path)
+	if pathValue == "" {
+		return "", parsed.Scheme != "" && parsed.Host != ""
+	}
+	if !strings.HasPrefix(pathValue, "/") {
+		pathValue = "/" + pathValue
+	}
+	return pathValue, parsed.Scheme != "" && parsed.Host != ""
 }
 
 func ensureTrailingSlash(value string) string {

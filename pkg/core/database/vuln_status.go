@@ -1,18 +1,12 @@
 package database
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 )
 
-var allowedVulnStatuses = map[string]struct{}{
-	"open":     {},
-	"resolved": {},
-	"ignored":  {},
-}
+var allowedVulnStatuses = map[string]struct{}{"open": {}, "resolved": {}, "ignored": {}}
 
 func NormalizeVulnStatus(status string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(status))
@@ -26,59 +20,44 @@ func NormalizeVulnStatus(status string) (string, error) {
 }
 
 func UpdateVulnStatusByID(vulnID, status string) error {
-	if ESClient == nil {
-		return fmt.Errorf("ES client not initialized")
-	}
-
-	normalizedStatus, err := NormalizeVulnStatus(status)
+	normalized, err := NormalizeVulnStatus(status)
 	if err != nil {
 		return err
 	}
-
-	body := map[string]interface{}{
-		"query": map[string]interface{}{
-			"term": map[string]interface{}{
-				"vuln_id.keyword": vulnID,
-			},
-		},
-		"script": map[string]interface{}{
-			"source": "ctx._source.status = params.status",
-			"lang":   "painless",
-			"params": map[string]interface{}{
-				"status": normalizedStatus,
-			},
-		},
+	if DB == nil {
+		return fmt.Errorf("SQLite database not initialized")
 	}
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(body); err != nil {
-		return fmt.Errorf("failed to encode update query: %v", err)
-	}
-
-	res, err := ESClient.UpdateByQuery(
-		[]string{IndexVuln},
-		ESClient.UpdateByQuery.WithContext(context.Background()),
-		ESClient.UpdateByQuery.WithBody(&buf),
-		ESClient.UpdateByQuery.WithRefresh(true),
-	)
+	rows, err := DB.Query("SELECT id, body FROM scan_documents WHERE kind = ? AND identity = ?", CollectionVuln, CleanUTF8Text(vulnID))
 	if err != nil {
-		return fmt.Errorf("failed to update vulnerability status: %v", err)
+		return err
 	}
-	defer res.Body.Close()
-
-	if res.IsError() {
-		return fmt.Errorf("error response from ES when updating vulnerability status: %s", res.String())
+	defer rows.Close()
+	updated := 0
+	for rows.Next() {
+		var id int64
+		var body string
+		if err := rows.Scan(&id, &body); err != nil {
+			return err
+		}
+		var vuln VulnRecord
+		if err := json.Unmarshal([]byte(body), &vuln); err != nil {
+			return fmt.Errorf("decode vulnerability %s: %w", vulnID, err)
+		}
+		vuln.Status = normalized
+		cleaned, err := marshalUTF8Document(vuln)
+		if err != nil {
+			return err
+		}
+		if _, err := DB.Exec("UPDATE scan_documents SET body = ? WHERE id = ?", cleaned, id); err != nil {
+			return err
+		}
+		updated++
 	}
-
-	var result struct {
-		Updated int `json:"updated"`
+	if err := rows.Err(); err != nil {
+		return err
 	}
-	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode update result: %v", err)
-	}
-	if result.Updated == 0 {
+	if updated == 0 {
 		return fmt.Errorf("vulnerability %s not found", vulnID)
 	}
-
 	return nil
 }

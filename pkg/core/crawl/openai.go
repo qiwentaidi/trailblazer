@@ -490,6 +490,107 @@ type UnauthorizedAIReview struct {
 	RecommendedAction  string   `json:"recommended_action"`
 }
 
+// EncryptedResponseAIReview only describes JavaScript evidence for a response
+// that has already passed the local response-encryption envelope rule. It does
+// not classify business fields as ciphertext and cannot change that rule.
+type EncryptedResponseAIReview struct {
+	Encrypted                AITruth  `json:"encrypted"`
+	ResponseDecryptionLikely AITruth  `json:"response_decryption_likely"`
+	Confidence               int      `json:"confidence"`
+	Encoding                 string   `json:"encoding"`
+	CandidateAlgorithms      []string `json:"candidate_algorithms"`
+	Evidence                 []string `json:"evidence"`
+	Reason                   string   `json:"reason"`
+	RecommendedAction        string   `json:"recommended_action"`
+}
+
+func decodeEncryptedResponseAIReview(data []byte) (EncryptedResponseAIReview, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return EncryptedResponseAIReview{}, err
+	}
+	for _, field := range []string{"encrypted", "response_decryption_likely", "confidence", "encoding", "candidate_algorithms", "evidence", "reason", "recommended_action"} {
+		value, ok := raw[field]
+		if !ok || strings.TrimSpace(string(value)) == "null" {
+			return EncryptedResponseAIReview{}, fmt.Errorf("missing required encrypted response AI field %q", field)
+		}
+	}
+
+	var review EncryptedResponseAIReview
+	if err := json.Unmarshal(data, &review); err != nil {
+		return EncryptedResponseAIReview{}, err
+	}
+	if review.Encrypted != AITruthTrue {
+		return EncryptedResponseAIReview{}, fmt.Errorf("encrypted response evidence review must preserve the confirmed envelope, got %q", review.Encrypted)
+	}
+	if review.ResponseDecryptionLikely != AITruthTrue && review.ResponseDecryptionLikely != AITruthFalse && review.ResponseDecryptionLikely != AITruthUnknown {
+		return EncryptedResponseAIReview{}, fmt.Errorf("invalid response_decryption_likely value %q", review.ResponseDecryptionLikely)
+	}
+	if review.Confidence < 0 || review.Confidence > 100 {
+		return EncryptedResponseAIReview{}, fmt.Errorf("encrypted response AI confidence must be between 0 and 100")
+	}
+	if review.Encoding != "hex" && review.Encoding != "base64" && review.Encoding != "mixed" && review.Encoding != "unknown" {
+		return EncryptedResponseAIReview{}, fmt.Errorf("invalid encrypted response encoding %q", review.Encoding)
+	}
+	if review.RecommendedAction != "continue_js_analysis" && review.RecommendedAction != "needs_runtime_capture" {
+		return EncryptedResponseAIReview{}, fmt.Errorf("invalid encrypted response recommended action %q", review.RecommendedAction)
+	}
+	return review, nil
+}
+
+// ReviewUncapturedEncryptedResponse reviews JavaScript evidence after the
+// scanner has already confirmed a response-level encryption envelope. JS
+// evidence is pre-selected by the scanner and is evidence, not executable code
+// supplied to the model.
+func (c *SensitiveInfoChecker) ReviewUncapturedEncryptedResponse(targetURL, requestPreview, responsePreview, jsEvidence string) (EncryptedResponseAIReview, error) {
+	systemPrompt := `你是一名前端协议与应用安全分析助手。上游固定规则已经确认：该响应包含“响应级加密包装”，同时具备加密开关、非明文算法声明和顶层编码载荷。你的任务仅是复核所给 JavaScript 证据是否能解释响应解密链路，并给出后续分析线索。
+
+严格规则：
+1. 不要重新判断响应是否加密；不要把业务字段、card_id、token、UUID、签名或任意长字符串升级为密文。
+2. 只能依据已给 JavaScript 证据描述可能的解密链路；不要假设未提供的密钥、函数或算法。
+3. encrypted 必须返回 true，表示“上游结构化规则已确认响应加密包装”，不是你的独立判定；它绝不代表漏洞成立或已经解密成功。
+4. response_decryption_likely 仅评价 JS 是否显示响应解密链路；若证据不足使用 unknown。
+5. recommended_action 只能是 continue_js_analysis 或 needs_runtime_capture，不能将已确认的包装降级为明文。
+
+只输出严格 JSON，不要 Markdown。所有字段都必须存在；encrypted 和 response_decryption_likely 只能是 true、false 或 unknown 字符串；confidence 为 0 到 100 的整数；encoding 只能是 hex、base64、mixed、unknown；recommended_action 只能是 continue_js_analysis、needs_runtime_capture。
+
+JSON 格式：
+{"encrypted":"true","response_decryption_likely":"true|false|unknown","confidence":0,"encoding":"hex|base64|mixed|unknown","candidate_algorithms":[],"evidence":[],"reason":"","recommended_action":"continue_js_analysis|needs_runtime_capture"}`
+
+	if len(targetURL) > 1000 {
+		targetURL = targetURL[:1000] + "...(URL已截断)"
+	}
+	if len(requestPreview) > 2500 {
+		requestPreview = requestPreview[:2500] + "...(请求已截断)"
+	}
+	if len(responsePreview) > 5000 {
+		responsePreview = responsePreview[:5000] + "...(响应已截断)"
+	}
+	if len(jsEvidence) > 6000 {
+		jsEvidence = jsEvidence[:6000] + "...(JS证据已截断)"
+	}
+
+	reply, err := c.chatComplete(
+		systemPrompt,
+		fmt.Sprintf("目标 URL：%s\n\n请求报文：\n%s\n\n响应报文：\n%s\n\n已采集 JavaScript 证据：\n%s", targetURL, requestPreview, responsePreview, jsEvidence),
+		0.1,
+		900,
+	)
+	if err != nil {
+		return EncryptedResponseAIReview{}, err
+	}
+
+	jsonBytes, err := extractJSONObject(reply)
+	if err != nil {
+		return EncryptedResponseAIReview{}, fmt.Errorf("failed to parse encrypted response AI review: %w", err)
+	}
+	review, err := decodeEncryptedResponseAIReview(jsonBytes)
+	if err != nil {
+		return EncryptedResponseAIReview{}, fmt.Errorf("failed to decode encrypted response AI review: %w", err)
+	}
+	return review, nil
+}
+
 func (r UnauthorizedAIReview) IsFalsePositive() bool {
 	return r.Verdict == "FALSE_POSITIVE" ||
 		r.VulnerabilityType == "PUBLIC_API" ||
@@ -634,6 +735,62 @@ JSON 格式：
 		return UnauthorizedAIReview{}, fmt.Errorf("failed to decode unauthorized AI review: %w", err)
 	}
 	return review, nil
+}
+
+// NameUnauthorizedFinding supplies a bounded business label only after the
+// scanner has independently recorded an unauthorized-access finding. It does
+// not decide whether the vulnerability exists, its risk level, or confidence.
+func (c *SensitiveInfoChecker) NameUnauthorizedFinding(targetURL, method, requestPreview, responsePreview, dataExposure string) (UnauthorizedFindingName, error) {
+	fallback := ClassifyUnauthorizedFindingFallback(targetURL, method, responsePreview, dataExposure)
+	if len(targetURL) > 1000 {
+		targetURL = targetURL[:1000] + "...(URL已截断)"
+	}
+	if len(requestPreview) > 2500 {
+		requestPreview = requestPreview[:2500] + "...(请求已截断)"
+	}
+	if len(responsePreview) > 5000 {
+		responsePreview = responsePreview[:5000] + "...(响应已截断)"
+	}
+
+	systemPrompt := `你负责给已确认的未授权访问漏洞做业务命名。漏洞是否成立、风险等级和置信度均已由规则确认；你不能推翻或改变它们。
+
+只根据给出的 URL、方法、请求、响应和数据暴露评级识别业务对象，并从指定小类中选择一个。禁止猜测未出现的业务、用户、金额、权限或影响。业务对象应是 2 至 32 个字符的简短中文名词短语，不含标点、换行或敏感内容；不确定时填写“业务资源”。
+
+小类只能是：未授权敏感信息读取、未授权业务数据读取、未授权业务查询、未授权状态变更、未授权业务接口访问。
+只输出严格 JSON，不要 Markdown 或其他文本：
+{"category":"访问控制缺陷","subcategory":"上述之一","business_object":"简短业务对象"}`
+
+	reply, err := c.chatComplete(
+		systemPrompt,
+		fmt.Sprintf("目标 URL：%s\n请求方法：%s\n数据暴露评级：%s\n\n请求报文：\n%s\n\n已验证响应：\n%s", targetURL, method, dataExposure, requestPreview, responsePreview),
+		0,
+		180,
+	)
+	if err != nil {
+		return fallback, err
+	}
+	jsonBytes, err := extractJSONObject(reply)
+	if err != nil {
+		return fallback, fmt.Errorf("failed to parse unauthorized finding name: %w", err)
+	}
+	var raw struct {
+		Category       string `json:"category"`
+		Subcategory    string `json:"subcategory"`
+		BusinessObject string `json:"business_object"`
+	}
+	if err := json.Unmarshal(jsonBytes, &raw); err != nil {
+		return fallback, fmt.Errorf("failed to decode unauthorized finding name: %w", err)
+	}
+	name := normalizeUnauthorizedFindingName(UnauthorizedFindingName{
+		Category:       raw.Category,
+		Subcategory:    raw.Subcategory,
+		BusinessObject: raw.BusinessObject,
+		Source:         "ai",
+	}, targetURL, method, responsePreview, dataExposure)
+	if name.Source != "ai" {
+		return fallback, fmt.Errorf("invalid unauthorized finding name from AI")
+	}
+	return name, nil
 }
 
 // JudgeDenyTemplate preserves the old API for callers that only need a

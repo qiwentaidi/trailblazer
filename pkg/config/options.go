@@ -17,7 +17,15 @@ type ConfigYAML struct {
 	Placeholder    map[string]string `yaml:"placeholder"`
 	WeakCreds      []string          `yaml:"weakCreds"`
 	VulnDetection  VulnDetection     `yaml:"vuln-detection"`
+	Collaborative  CollaborativeTest `yaml:"collaborative-testing"`
 	Log            LogConfig         `yaml:"log" json:"log"`
+}
+
+// CollaborativeTest controls the explicit boundary for business-action replay.
+// An empty allowlist means that approval records may be created, but no replay
+// executor can dispatch a request.
+type CollaborativeTest struct {
+	AllowedReplayHosts []string `yaml:"allowed-replay-hosts" json:"allowedReplayHosts"`
 }
 
 type WebConfig struct {

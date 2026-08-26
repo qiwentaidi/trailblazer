@@ -159,6 +159,27 @@ func InitSQLite(dbPath string) error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_browser_session_traces_session_created ON browser_session_traces(session_id, created_at DESC);
+
+	-- 扫描结果使用统一的文档表保留原有 JSON 结构，同时将常用过滤字段拆出并建立索引。
+	CREATE TABLE IF NOT EXISTS scan_documents (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		kind TEXT NOT NULL,
+		task_id TEXT NOT NULL,
+		version INTEGER NOT NULL DEFAULT 0,
+		identity TEXT DEFAULT '',
+		parent_id TEXT DEFAULT '',
+		level INTEGER DEFAULT 0,
+		url TEXT DEFAULT '',
+		trace_id TEXT DEFAULT '',
+		created_at DATETIME,
+		fetched_at DATETIME,
+		body TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_scan_documents_task_kind_version ON scan_documents(task_id, kind, version);
+	CREATE INDEX IF NOT EXISTS idx_scan_documents_kind_identity ON scan_documents(kind, identity);
+	CREATE INDEX IF NOT EXISTS idx_scan_documents_task_url ON scan_documents(task_id, kind, url);
+	CREATE INDEX IF NOT EXISTS idx_scan_documents_task_trace ON scan_documents(task_id, kind, trace_id);
+	CREATE INDEX IF NOT EXISTS idx_scan_documents_tree_parent ON scan_documents(task_id, version, parent_id, level);
 	`
 
 	if _, err := DB.Exec(schema); err != nil {
@@ -191,6 +212,11 @@ func InitSQLite(dbPath string) error {
 		for _, s := range samples {
 			_, _ = DB.Exec("INSERT INTO js_rules(label, value, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", s.label, s.value)
 		}
+	}
+
+	// WAL 能避免读取扫描结果时阻塞写入；busy_timeout 让并发采集更稳定。
+	if _, err := DB.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON"); err != nil {
+		return fmt.Errorf("failed to configure sqlite: %w", err)
 	}
 
 	log.Println("SQLite 初始化成功")
@@ -698,7 +724,7 @@ func highestRiskLevelFromVulns(vulns []VulnRecord) string {
 
 // UpdateTaskHighestRiskLevel 仅同步任务的最高风险等级，不再维护漏洞计数。
 func UpdateTaskHighestRiskLevel(taskID string) error {
-	if DB == nil || ESClient == nil {
+	if DB == nil {
 		return nil
 	}
 

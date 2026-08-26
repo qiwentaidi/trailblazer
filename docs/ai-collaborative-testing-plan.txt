@@ -1,0 +1,416 @@
+AI 协同安全测试能力改造方案
+================================
+
+背景
+----
+
+当前程序已经具备以下基础能力：
+
+1. 输入 URL 后进行页面、JS、API Router、API Root、运行时 API 的采集。
+2. 从已保存 JS 中提取 RequestBlueprint，包括 method、params、headers、payloadPreview、source snippet 等。
+3. 通过 VulnDetection 执行漏洞检测。
+4. 通过 OpenAI / SensitiveInfoChecker 做敏感信息、未授权候选、文件上传结果等 AI 复核。
+5. 通过 SDK ScanCallback 输出扫描过程事件。
+
+当前主要问题是：
+
+1. 高危名单或业务动作接口会在测试前被跳过。
+2. 被跳过的接口通常只在日志中体现，最终 JSON 中缺少结构化产出。
+3. 后续 AI 无法基于这些线索继续做查漏补缺、风险解释或测试计划生成。
+4. 用户容易把“未测试 / 待授权测试”误解成“没有问题”。
+
+目标
+----
+
+把现有扫描能力升级成“AI 协同测试工作台”：
+
+用户输入 URL 后，程序自动完成目标采集、测试环节规划、风险动作识别、自动安全测试、人工审批队列生成，并把高风险业务动作交给人机协同处理。
+
+核心原则
+--------
+
+1. AI 可以分析、规划、解释、生成建议，但不能直接决定执行高风险业务动作。
+2. 会触发短信、提交、上传、删除、修改、支付、登录态变更等动作的请求，必须进入人工审批流程。
+3. vulnerabilities 只保存已验证漏洞。
+4. securityLeads / pendingRiskActions 保存“值得复核但尚未安全执行”的线索。
+5. 所有跳过、过滤、待审批的测试决策都必须结构化输出，不能只存在于日志。
+6. 默认优先 dry-run，只构造请求和 payload，不发送业务动作请求。
+
+建议的整体流程
+--------------
+
+1. 用户输入 URL。
+
+2. 基础采集阶段：
+   - 抓取页面资源。
+   - 保存 JS。
+   - 提取 API Router。
+   - 提取 API Root。
+   - 提取运行时 APIRecords。
+   - 提取 ProtocolTraces。
+   - 从 JS 二次分析 RequestBlueprint。
+
+3. 程序静态分类阶段：
+   - safe：只读、低风险、可自动测试。
+   - needs_review：疑似业务动作，需要人工或 AI 复核。
+   - forbidden：默认禁止自动测试，例如短信发送、真实提交、删除、支付等。
+   - not_runnable：参数缺失、动态符号未解析、缺少认证上下文。
+
+4. AI 测试计划阶段：
+   - AI 根据 API 路由、RequestBlueprint、securityLeads、运行时记录生成测试计划。
+   - 输出哪些可以自动测，哪些必须人工确认，哪些需要测试账号/测试手机号/测试环境。
+
+5. 自动安全测试阶段：
+   - 自动执行只读 unauth。
+   - 自动执行安全的静态分析。
+   - 默认不执行 SQLi/XSS/SSRF/LFI/Upload 等主动 fuzz，除非配置允许。
+
+6. 高风险动作协同阶段：
+   - 生成 pendingRiskActions。
+   - 每个动作携带 route、method、payloadPreview、params、headers、source snippet、风险假设、建议测试方式。
+   - 用户可以选择：
+     - skip
+     - dry-run
+     - authorize-replay
+     - mark-as-false-positive
+     - request-more-ai-analysis
+
+7. 人工批准后的受限执行阶段：
+   - 仅在显式批准后执行。
+   - 必须带测试账号、测试手机号、测试身份数据或测试环境标识。
+   - 必须限速、限次。
+   - 必须记录完整 request / response。
+
+8. AI 复核阶段：
+   - AI 对响应进行独立判断。
+   - 输出 CONFIRMED / FALSE_POSITIVE / NEEDS_MANUAL_REVIEW。
+   - 最终只有满足证据要求的内容进入 vulnerabilities。
+
+建议新增输出字段
+----------------
+
+在 TargetResult 中增加：
+
+securityLeads:
+  非漏洞线索。保存从 JS / runtime / protocol 中提取到但不适合自动测试的高风险接口。
+
+pendingRiskActions:
+  等待用户确认的风险动作队列。
+
+testDecisions:
+  测试决策记录。包括 tested、skipped、filtered、needs_review、not_runnable。
+
+aiTestPlan:
+  AI 生成的测试计划。
+
+coverage:
+  覆盖率摘要，解释发现了多少、测试了多少、跳过了多少、待人工复核多少。
+
+建议的 securityLeads 结构
+------------------------
+
+{
+  "id": "lead-001",
+  "route": "/m/api/save",
+  "url": "https://web.cupdata.com/ncoas/0581/m/api/save",
+  "method": "POST",
+  "category": "state-changing-submit",
+  "decision": "needs_review",
+  "reason": "matched high-risk/business-action keyword: /save",
+  "matchedKeyword": "/save",
+  "riskHypotheses": [
+    "unauthorized submission",
+    "parameter tampering",
+    "duplicate submission or business-data pollution"
+  ],
+  "suggestedNextStep": "dry-run request construction first; replay only in authorized test environment",
+  "request": {
+    "payloadCarrier": "body",
+    "payloadFormat": "json",
+    "payloadPreview": "{name:e.name,phone:e.phone}",
+    "requestBody": "",
+    "params": [
+      {
+        "name": "name",
+        "location": "json",
+        "valueExpr": "e.name",
+        "resolved": false,
+        "confidence": "medium"
+      }
+    ],
+    "headers": [
+      {
+        "name": "X-Sign",
+        "source": "interceptor",
+        "dynamic": true
+      }
+    ],
+    "interceptors": [
+      {
+        "client": "service",
+        "kind": "request",
+        "mutates": ["headers.X-Sign"],
+        "snippet": "headers['X-Sign']=sign(config)"
+      }
+    ],
+    "unresolvedSymbols": ["e", "sign"]
+  },
+  "source": {
+    "file": "https://web.cupdata.com/ncoas/0581/m/static/js/app.xxx.js",
+    "snippet": "save:\"/m/api/save\""
+  },
+  "evidenceSnippets": [
+    "save:\"/m/api/save\""
+  ]
+}
+
+建议的 pendingRiskActions 结构
+------------------------------
+
+{
+  "id": "action-001",
+  "leadId": "lead-001",
+  "route": "/m/api/save",
+  "method": "POST",
+  "riskLevel": "high",
+  "actionType": "state-changing-submit",
+  "defaultMode": "dry-run-only",
+  "allowedModes": ["dry-run", "authorized-replay"],
+  "requires": [
+    "explicit human approval",
+    "test account",
+    "test identity data",
+    "non-production or authorized scope"
+  ],
+  "aiQuestion": "该接口疑似提交信用卡申请，是否允许在授权测试环境使用测试身份数据执行？"
+}
+
+建议的 testDecisions 结构
+------------------------
+
+{
+  "route": "/m/api/sms/sendApplySms",
+  "method": "POST",
+  "decision": "skipped",
+  "reason": "matched high-risk business action: sms",
+  "phase": "api-fuzz",
+  "category": "sms-action",
+  "source": "high-risk-router-policy",
+  "nextStep": "requires test phone number and human approval"
+}
+
+建议的 coverage 结构
+-------------------
+
+{
+  "apiRoutesDiscovered": 59,
+  "requestBlueprintsExtracted": 10,
+  "runtimeAPIRecords": 2,
+  "autoTested": 5,
+  "skippedHighRisk": 8,
+  "needsHumanReview": 6,
+  "filteredCandidates": 0,
+  "notRunnable": 40
+}
+
+需要新增的核心接口
+------------------
+
+1. AI 生成测试计划
+
+func (c *SensitiveInfoChecker) PlanSecurityTest(target string, result ScanResult) (AITestPlan, error)
+
+输入：
+  - target URL
+  - assets
+  - apiRoutes
+  - apiRecords
+  - requestBlueprints
+  - securityLeads
+
+输出：
+  - 自动测试阶段
+  - 需要人工确认的风险动作
+  - 推荐测试顺序
+  - 缺失的上下文
+
+2. AI 复核单条风险线索
+
+func (c *SensitiveInfoChecker) ReviewSecurityLead(lead SecurityLead) (AIRiskActionReview, error)
+
+输出：
+  - riskLevel
+  - actionType
+  - evidence
+  - missingEvidence
+  - safeTestPlan
+  - recommendedDecision
+
+3. 人工审批网关
+
+type ApprovalGate interface {
+  RequestApproval(action RiskAction) (HumanDecision, error)
+}
+
+所有高风险动作必须经过 ApprovalGate。
+
+4. dry-run 请求构造
+
+func BuildDryRunRequest(lead SecurityLead, placeholders map[string]string) (DryRunRequest, error)
+
+只构造：
+  - URL
+  - method
+  - headers
+  - params
+  - body
+  - unresolved symbols
+
+不发送真实请求。
+
+业务动作分类规则
+----------------
+
+默认高风险关键词：
+
+sms
+sendSms
+send_sms
+sendCode
+send_code
+save
+submit
+apply
+getApplyId
+upload
+delete
+remove
+update
+modify
+pay
+order
+login
+logout
+token
+
+分类建议：
+
+sms-action:
+  短信发送、验证码发送、邮件发送。
+
+state-changing-submit:
+  save、submit、apply、getApplyId 等提交或初始化业务记录的接口。
+
+mutation-action:
+  delete、remove、update、modify。
+
+file-upload-action:
+  upload。
+
+auth-session-action:
+  login、logout、token。
+
+payment-action:
+  pay、order。
+
+AI 对话交互建议
+--------------
+
+用户输入：
+  扫描 https://example.com
+
+系统返回：
+  已发现 59 个 API Router，提取 10 个 RequestBlueprint。
+  自动测试 5 个只读接口。
+  发现 6 个高风险业务动作，需要确认：
+    1. /m/api/save：疑似申请提交
+    2. /m/api/sms/sendApplySms：疑似短信发送
+    3. /m/api/getApplyId：疑似申请 ID 初始化
+
+AI 建议：
+  - /m/api/save 先做 dry-run，不发送。
+  - /m/api/sms/sendApplySms 需要测试手机号和严格限速。
+  - /m/api/getApplyId 需要确认是否会创建业务申请记录。
+
+用户可以回复：
+  - 只生成 dry-run
+  - 跳过短信接口
+  - 使用测试手机号 13800000000 测试短信限速
+  - 允许在测试环境重放 /m/api/save
+
+程序执行：
+  - 根据用户批准生成 HumanDecision。
+  - 只有授权动作进入 authorized-replay。
+  - 所有动作写入 testDecisions。
+
+MVP 落地顺序
+------------
+
+阶段 1：结构化线索输出
+  - 增加 securityLeads。
+  - 从 API routes + RequestBlueprints 生成线索。
+  - 每条线索携带 payloadPreview、params、headers、interceptors、source snippet。
+  - 不改变现有漏洞统计。
+
+阶段 2：测试决策可见化
+  - 增加 testDecisions。
+  - 高危路由 skip、去重 skip、not runnable、AI filter 都写入结构化结果。
+  - 增加 coverage。
+
+阶段 3：AI 测试计划
+  - 增加 PlanSecurityTest。
+  - 扫描后自动生成 aiTestPlan。
+  - AI 只输出计划，不执行动作。
+
+阶段 4：对话式审批
+  - 增加 pendingRiskActions。
+  - 增加 ApprovalGate。
+  - CLI / SDK / Web 前端都可以消费审批事件。
+
+阶段 5：dry-run 请求生成
+  - 根据 SecurityLead + placeholders 生成 DryRunRequest。
+  - 输出完整请求预览。
+  - 不发送请求。
+
+阶段 6：授权重放
+  - 增加 EnableBusinessActionReplay。
+  - 需要测试账号、测试手机号、授权 scope。
+  - 强制限速、限次、审计日志。
+
+阶段 7：AI 响应复核
+  - 对 authorized-replay 的响应调用 AI 复核。
+  - AI 输出 CONFIRMED / FALSE_POSITIVE / NEEDS_MANUAL_REVIEW。
+  - 只有证据满足要求才进入 vulnerabilities。
+
+安全边界
+--------
+
+1. 默认不发送业务动作请求。
+2. 默认不测试短信发送。
+3. 默认不测试提交、上传、删除、支付、登录态变更。
+4. 没有人工批准时，高风险动作只能进入 securityLeads / pendingRiskActions。
+5. AI 不能绕过人工批准。
+6. 用户批准必须被记录到 testDecisions。
+7. 所有 authorized-replay 必须写审计日志。
+
+和现有代码的对应关系
+--------------------
+
+已有能力：
+  - RequestBlueprint: pkg/core/crawl/request_blueprint.go
+  - AI 复核: pkg/core/crawl/openai.go
+  - SDK ScanCallback: pkg/lib/sdk.go
+  - API 测试主流程: pkg/core/crawl/jsfind.go
+  - SDK 输出结构: pkg/lib/sdk.go
+
+已完成的第一步：
+  - TargetResult 增加 securityLeads。
+  - SecurityLead 携带 request payload 上下文。
+  - SDK 输出层基于 apiRoutes + requestBlueprints 生成业务动作线索。
+
+后续建议优先实现：
+  1. testDecisions。
+  2. coverage。
+  3. AI PlanSecurityTest。
+  4. pendingRiskActions。
+  5. dry-run request builder。

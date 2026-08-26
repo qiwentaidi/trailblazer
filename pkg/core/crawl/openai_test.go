@@ -46,3 +46,27 @@ func TestValidateUnauthorizedAIReviewRejectsUnsupportedConfirmedResult(t *testin
 		t.Fatal("expected invalid confirmed public API review to be rejected")
 	}
 }
+
+func TestDecodeEncryptedResponseAIReviewAcceptsEvidenceReview(t *testing.T) {
+	review, err := decodeEncryptedResponseAIReview([]byte(`{"encrypted":"true","response_decryption_likely":"true","confidence":86,"encoding":"base64","candidate_algorithms":["AES"],"evidence":["data 字段为长 base64 串","JS 中存在 decrypt"],"reason":"响应载荷和 JS 响应处理链路一致","recommended_action":"continue_js_analysis"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Encrypted != AITruthTrue || review.Encoding != "base64" || review.Confidence != 86 {
+		t.Fatalf("unexpected encrypted response review: %#v", review)
+	}
+}
+
+func TestDecodeEncryptedResponseAIReviewRejectsInvalidAction(t *testing.T) {
+	_, err := decodeEncryptedResponseAIReview([]byte(`{"encrypted":"true","response_decryption_likely":"unknown","confidence":50,"encoding":"unknown","candidate_algorithms":[],"evidence":[],"reason":"","recommended_action":"decrypt_now"}`))
+	if err == nil {
+		t.Fatal("expected invalid action to be rejected")
+	}
+}
+
+func TestDecodeEncryptedResponseAIReviewRejectsEnvelopeDowngrade(t *testing.T) {
+	_, err := decodeEncryptedResponseAIReview([]byte(`{"encrypted":"false","response_decryption_likely":"unknown","confidence":50,"encoding":"unknown","candidate_algorithms":[],"evidence":[],"reason":"","recommended_action":"needs_runtime_capture"}`))
+	if err == nil {
+		t.Fatal("expected a model response that downgrades the confirmed envelope to be rejected")
+	}
+}
