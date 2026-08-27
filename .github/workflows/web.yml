@@ -18,6 +18,21 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        working-directory: frontend-admin
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build frontend assets
+        run: ./build-web.sh frontend
+
       - name: Test
         run: go test ./...
 
