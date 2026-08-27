@@ -154,47 +154,10 @@ describe('ProtocolAnalysisPanel', () => {
     });
   });
 
-  test('hides plaintext-only traces by default in protocol list', () => {
+  test('shows all protocol traces without filter controls', () => {
     render(
       <ProtocolAnalysisPanel
         taskId="task-1"
-        traces={[
-          buildTrace(),
-          {
-            ...buildTrace(),
-            trace_id: 'trace-plain',
-            request_url: 'https://example.com/api/plain',
-            algorithms: ['json.parse'],
-            response_steps: [
-              {
-                source: 'JSON.stringify',
-                algorithm: 'json.stringify',
-                input_preview: '{"code":0}',
-                output_preview: '{"code":0}',
-                captured_at_ms: 100,
-              },
-            ],
-            session_materials: {
-              latest_response_plaintext: '{"code":0}',
-            },
-          },
-        ]}
-        staticAnalysis={null}
-      />,
-    );
-
-    expect(screen.getByText('aes + rsa')).toBeInTheDocument();
-    expect(screen.queryByText('json.parse')).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/已默认隐藏 1 条“明文直出\/缺少密文证据”的轨迹/),
-    ).toBeInTheDocument();
-  });
-
-  test('can show plaintext-only traces when filter mode is all', () => {
-    render(
-      <ProtocolAnalysisPanel
-        taskId="task-1"
-        initialTraceFilterMode="all"
         traces={[
           buildTrace(),
           {
@@ -223,6 +186,10 @@ describe('ProtocolAnalysisPanel', () => {
     expect(screen.getByText('aes + rsa')).toBeInTheDocument();
     expect(screen.getByText('json.parse')).toBeInTheDocument();
     expect(screen.queryByText(/已默认隐藏 1 条/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('combobox', { name: /轨迹|筛选|加解密/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('共 2 条')).toBeInTheDocument();
   });
 
   test('renders session materials with wrapping-safe styles', () => {

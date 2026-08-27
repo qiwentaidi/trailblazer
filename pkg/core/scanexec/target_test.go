@@ -502,6 +502,60 @@ func TestAnnotateUnauthorizedNoisePersistsManualStructuredReview(t *testing.T) {
 	if annotated[0].Confidence != "medium" {
 		t.Fatalf("manual review should downgrade high confidence to medium, got %q", annotated[0].Confidence)
 	}
+	if !strings.Contains(annotated[0].ConfidenceReason, "AI复核置信度 59/100") ||
+		!strings.Contains(annotated[0].ConfidenceReason, "缺少接口权限设计证据") ||
+		strings.Contains(annotated[0].ConfidenceReason, "响应包含明确业务数据返回") {
+		t.Fatalf("manual review confidence reason should come from AI review, got %q", annotated[0].ConfidenceReason)
+	}
+}
+
+func TestAnnotateUnauthorizedNoiseAppliesConfirmedAIConfidence(t *testing.T) {
+	vulns := []database.VulnRecord{{
+		Title:            "未授权访问",
+		Type:             "未授权访问",
+		Confidence:       "high",
+		ConfidenceReason: "高置信：响应包含明确业务数据返回",
+		Description:      "发现未授权访问漏洞，风险等级: medium，置信度: high，数据暴露评级: internal_business，响应长度: 45；置信度说明: 高置信：响应包含明确业务数据返回；暴露评级说明: 响应包含有效业务结构",
+		URL:              "https://example.com/api/orders/query",
+		Request:          "GET /api/orders/query HTTP/1.1",
+		Response:         `{"code":0,"data":{"order_id":1,"amount":20}}`,
+	}}
+	reviewer := &structuredUnauthorizedReviewerStub{review: crawl.UnauthorizedAIReview{
+		Verdict:            "CONFIRMED",
+		VulnerabilityType:  "UNAUTHENTICATED_ACCESS",
+		Confidence:         62,
+		ProtectedResource:  crawl.AITruthTrue,
+		SensitiveDataFound: crawl.AITruthTrue,
+		Evidence:           []string{"响应包含订单金额", "匿名请求返回订单对象"},
+		Reason:             "响应内容像受保护订单数据，但缺少更高价值字段",
+		Impact:             "可能泄露订单信息",
+		RiskLevel:          "MEDIUM",
+		MissingEvidence:    []string{},
+		RecommendedAction:  "结合登录态确认资源归属",
+	}}
+
+	annotated := annotateUnauthorizedNoise(vulns, reviewer, make(map[string]struct{}))
+	if len(annotated) != 1 {
+		t.Fatalf("confirmed findings = %#v, want one finding", annotated)
+	}
+	if annotated[0].Confidence != "medium" {
+		t.Fatalf("confidence = %q, want medium", annotated[0].Confidence)
+	}
+	if annotated[0].AIReviewConfidence != 62 || annotated[0].AIReviewReason != reviewer.review.Reason {
+		t.Fatalf("AI review metadata was not persisted: %#v", annotated[0])
+	}
+	if !strings.Contains(annotated[0].ConfidenceReason, "AI复核置信度 62/100") ||
+		!strings.Contains(annotated[0].ConfidenceReason, reviewer.review.Reason) ||
+		!strings.Contains(annotated[0].ConfidenceReason, "响应包含订单金额") ||
+		strings.Contains(annotated[0].ConfidenceReason, "响应包含明确业务数据返回") {
+		t.Fatalf("confirmed confidence reason should come from AI review, got %q", annotated[0].ConfidenceReason)
+	}
+	if !strings.Contains(annotated[0].Description, "置信度: medium") ||
+		!strings.Contains(annotated[0].Description, "AI复核置信度 62/100") ||
+		!strings.Contains(annotated[0].Description, "暴露评级说明: 响应包含有效业务结构") ||
+		strings.Contains(annotated[0].Description, "高置信：响应包含明确业务数据返回") {
+		t.Fatalf("description should be rewritten with AI confidence, got %q", annotated[0].Description)
+	}
 }
 
 func TestBuildJSFindOptionsLeavesAICheckerNilWhenDisabled(t *testing.T) {

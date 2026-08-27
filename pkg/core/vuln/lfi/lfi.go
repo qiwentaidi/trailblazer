@@ -1,12 +1,13 @@
 package lfi
 
 import (
-	"github.com/qiwentaidi/trailblazer/pkg/config"
-	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
-	"github.com/qiwentaidi/trailblazer/pkg/core/vuln"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/qiwentaidi/trailblazer/pkg/config"
+	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
+	"github.com/qiwentaidi/trailblazer/pkg/core/vuln"
 )
 
 // LFIResult 表示 LFI 测试结果
@@ -76,9 +77,10 @@ func TestLocalFileInclusion(apiReq structs.APIRequest, cfg config.LFIConfig) (*L
 
 				// 根据规则类型进行匹配
 				matched := false
-				if rule.MatchType == "regex" {
+				switch rule.MatchType {
+				case "regex":
 					matched = isLFIMatchedByRegex(body, rule.Regex)
-				} else if rule.MatchType == "word" {
+				case "word":
 					matched = isLFIMatchedByWords(body, rule.Words, rule.Condition)
 				}
 

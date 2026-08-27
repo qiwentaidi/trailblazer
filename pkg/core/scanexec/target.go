@@ -90,6 +90,10 @@ type denyTemplateAIReviewer interface {
 }
 
 const manualUnauthorizedReviewConfidenceCap = 59
+const (
+	unauthorizedAIHighConfidenceThreshold   = 75
+	unauthorizedAIMediumConfidenceThreshold = 45
+)
 
 type unauthorizedAIReviewer interface {
 	ReviewUnauthorizedAccess(targetURL, requestPreview, responsePreview string) (crawl.UnauthorizedAIReview, error)
@@ -1213,7 +1217,9 @@ func annotateUnauthorizedNoise(vulns []database.VulnRecord, reviewer denyTemplat
 
 		var review crawl.UnauthorizedAIReview
 		var err error
+		structuredReview := false
 		if structuredReviewer, ok := reviewer.(unauthorizedAIReviewer); ok {
+			structuredReview = true
 			review, err = structuredReviewer.ReviewUnauthorizedAccess(vuln.URL, vuln.Request, vuln.Response)
 		} else {
 			// Compatibility path for callers that provide the old boolean reviewer.
@@ -1250,12 +1256,18 @@ func annotateUnauthorizedNoise(vulns []database.VulnRecord, reviewer denyTemplat
 		vuln.AIReviewType = review.VulnerabilityType
 		vuln.AIReviewConfidence = review.Confidence
 		vuln.AIReviewReason = strings.TrimSpace(review.Reason)
-		if review.Verdict == "NEEDS_MANUAL_REVIEW" {
+		if structuredReview && review.Verdict == "CONFIRMED" {
+			vuln.Confidence = unauthorizedAIConfidenceLevel(review.Confidence)
+			vuln.ConfidenceReason = buildUnauthorizedAIConfidenceReason(review, review.Confidence)
+			vuln.Description = updateUnauthorizedDescriptionWithAIConfidence(vuln.Description, vuln.Confidence, vuln.ConfidenceReason)
+		}
+		if structuredReview && review.Verdict == "NEEDS_MANUAL_REVIEW" {
 			if vuln.AIReviewConfidence > manualUnauthorizedReviewConfidenceCap {
 				vuln.AIReviewConfidence = manualUnauthorizedReviewConfidenceCap
 			}
-			vuln.Confidence = downgradeUnauthorizedConfidence(vuln.Confidence)
-			vuln.ConfidenceReason = appendReviewReason(vuln.ConfidenceReason, "AI复核结论: 需人工复核，已降低置信度")
+			vuln.Confidence = unauthorizedAIConfidenceLevel(vuln.AIReviewConfidence)
+			vuln.ConfidenceReason = buildUnauthorizedAIConfidenceReason(review, vuln.AIReviewConfidence)
+			vuln.Description = updateUnauthorizedDescriptionWithAIConfidence(vuln.Description, vuln.Confidence, vuln.ConfidenceReason)
 		}
 		filtered = append(filtered, vuln)
 	}
@@ -1263,27 +1275,76 @@ func annotateUnauthorizedNoise(vulns []database.VulnRecord, reviewer denyTemplat
 	return filtered
 }
 
-func downgradeUnauthorizedConfidence(level string) string {
-	switch strings.ToLower(strings.TrimSpace(level)) {
-	case "high":
+func unauthorizedAIConfidenceLevel(score int) string {
+	switch {
+	case score >= unauthorizedAIHighConfidenceThreshold:
+		return "high"
+	case score >= unauthorizedAIMediumConfidenceThreshold:
 		return "medium"
-	case "medium":
-		return "low"
 	default:
-		return level
+		return "low"
 	}
 }
 
-func appendReviewReason(existing, review string) string {
-	existing = strings.TrimSpace(existing)
-	review = strings.TrimSpace(review)
-	if existing == "" {
-		return review
+func buildUnauthorizedAIConfidenceReason(review crawl.UnauthorizedAIReview, effectiveConfidence int) string {
+	parts := []string{fmt.Sprintf("AI复核置信度 %d/100", effectiveConfidence)}
+	switch review.Verdict {
+	case "CONFIRMED":
+		parts = append(parts, "AI结论: 确认未授权风险")
+	case "NEEDS_MANUAL_REVIEW":
+		parts = append(parts, "AI结论: 需人工复核，已降低置信度")
+	default:
+		parts = append(parts, "AI结论: "+review.Verdict)
 	}
-	if review == "" {
-		return existing
+
+	if reason := strings.TrimSpace(review.Reason); reason != "" {
+		parts = append(parts, "依据: "+reason)
 	}
-	return existing + "；" + review
+	if evidence := trimUnauthorizedReviewItems(review.Evidence, 3); len(evidence) > 0 {
+		parts = append(parts, "证据: "+strings.Join(evidence, "；"))
+	}
+	if missingEvidence := trimUnauthorizedReviewItems(review.MissingEvidence, 3); review.Verdict == "NEEDS_MANUAL_REVIEW" && len(missingEvidence) > 0 {
+		parts = append(parts, "缺失证据: "+strings.Join(missingEvidence, "；"))
+	}
+	return strings.Join(parts, "；")
+}
+
+func trimUnauthorizedReviewItems(items []string, limit int) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		result = append(result, item)
+		if len(result) >= limit {
+			return result
+		}
+	}
+	return result
+}
+
+func updateUnauthorizedDescriptionWithAIConfidence(description, confidence, confidenceReason string) string {
+	description = strings.TrimSpace(description)
+	confidenceReason = strings.TrimSpace(confidenceReason)
+	if description == "" || confidenceReason == "" {
+		return description
+	}
+
+	description = regexp.MustCompile(`置信度: [^，；]+`).ReplaceAllString(description, "置信度: "+confidence)
+
+	marker := "；置信度说明: "
+	start := strings.Index(description, marker)
+	if start < 0 {
+		return description + marker + confidenceReason
+	}
+
+	reasonStart := start + len(marker)
+	reasonEnd := len(description)
+	if next := strings.Index(description[reasonStart:], "；暴露评级说明:"); next >= 0 {
+		reasonEnd = reasonStart + next
+	}
+	return description[:reasonStart] + confidenceReason + description[reasonEnd:]
 }
 
 var dynamicURIErrorPattern = regexp.MustCompile(`(?i)((?:错误的|无效的|invalid|bad)\s*(?:uri|url)\s*[:：]?\s*)[^"\\]+`)

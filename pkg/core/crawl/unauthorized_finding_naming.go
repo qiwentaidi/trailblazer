@@ -67,7 +67,7 @@ func ClassifyUnauthorizedFinding(targetURL, method, responsePreview, dataExposur
 		Category:       unauthorizedFindingCategory,
 		Subcategory:    subcategory,
 		BusinessObject: businessObject,
-		Title:          businessObject + subcategory,
+		Title:          buildUnauthorizedFindingTitle(businessObject, subcategory),
 		Source:         "rule",
 	}, targetURL, method, responsePreview, dataExposure)
 }
@@ -87,7 +87,7 @@ func normalizeUnauthorizedFindingName(name UnauthorizedFindingName, targetURL, m
 	}
 	// Compose the title locally: the AI may select an allowed category and
 	// identify the business object, but cannot invent a free-form claim.
-	name.Title = name.BusinessObject + name.Subcategory
+	name.Title = buildUnauthorizedFindingTitle(name.BusinessObject, name.Subcategory)
 	if name.Source != "ai" {
 		name.Source = "rule"
 	}
@@ -123,9 +123,23 @@ func ClassifyUnauthorizedFindingFallback(targetURL, method, responsePreview, dat
 		Category:       unauthorizedFindingCategory,
 		Subcategory:    subcategory,
 		BusinessObject: businessObject,
-		Title:          businessObject + subcategory,
+		Title:          buildUnauthorizedFindingTitle(businessObject, subcategory),
 		Source:         "rule",
 	}
+}
+
+func buildUnauthorizedFindingTitle(businessObject, subcategory string) string {
+	suffixes := map[string]string{
+		"未授权敏感信息读取": "未授权读取",
+		"未授权业务数据读取": "未授权读取",
+		"未授权业务查询":   "未授权查询",
+		"未授权状态变更":   "未授权变更",
+		"未授权业务接口访问": "未授权访问",
+	}
+	if suffix, ok := suffixes[subcategory]; ok {
+		return businessObject + suffix
+	}
+	return businessObject + "未授权访问"
 }
 
 func isUnauthorizedWriteOperation(targetURL, method string) bool {

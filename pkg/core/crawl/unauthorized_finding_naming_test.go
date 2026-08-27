@@ -15,7 +15,7 @@ func TestClassifyUnauthorizedFindingUsesSpecificBusinessQueryLabel(t *testing.T)
 	if name.Subcategory != "未授权业务查询" {
 		t.Fatalf("subcategory = %q", name.Subcategory)
 	}
-	if name.Title != "业务查询结果未授权业务查询" {
+	if name.Title != "业务查询结果未授权查询" {
 		t.Fatalf("title = %q", name.Title)
 	}
 	if name.Source != "rule" {

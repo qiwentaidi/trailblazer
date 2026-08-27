@@ -751,6 +751,32 @@ describe('RiskWorkbench', () => {
     expect(screen.getByText('响应密文')).toBeInTheDocument();
   });
 
+  test('shows business classification instead of repeating the generic vulnerability name', () => {
+    render(
+      <CodecWorkbenchProvider>
+        <RiskWorkbench
+          taskId="task-1"
+          risks={[
+            {
+              ...buildRisk(1),
+              title: '业务查询结果未授权查询',
+              type: '未授权访问',
+              category: '访问控制缺陷',
+              subcategory: '未授权业务查询',
+              businessObject: '业务查询结果',
+            },
+          ]}
+        />
+      </CodecWorkbenchProvider>,
+    );
+
+    expect(screen.getByText('访问控制缺陷 / 未授权业务查询')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
+    expect(screen.getByText('漏洞大类: 访问控制缺陷')).toBeInTheDocument();
+    expect(screen.getByText('漏洞小类: 未授权业务查询')).toBeInTheDocument();
+    expect(screen.getByText('业务对象: 业务查询结果')).toBeInTheDocument();
+  });
+
   test('opens codec workbench with inferred sm4 materials from the selected risk', () => {
     render(
       <CodecWorkbenchProvider>

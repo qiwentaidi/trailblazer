@@ -6,7 +6,6 @@ import {
   Descriptions,
   Drawer,
   Empty,
-  Select,
   Space,
   Spin,
   Table,
@@ -40,10 +39,7 @@ interface Props {
   traces: ProtocolTrace[];
   staticAnalysis: StaticProtocolAnalysis | null;
   loading?: boolean;
-  initialTraceFilterMode?: ProtocolTraceFilterMode;
 }
-
-type ProtocolTraceFilterMode = 'crypto_focused' | 'all';
 
 const renderTagList = (items?: string[]) =>
   items?.length ? (
@@ -772,53 +768,22 @@ export default function ProtocolAnalysisPanel({
   traces,
   staticAnalysis,
   loading,
-  initialTraceFilterMode = 'crypto_focused',
 }: Props) {
   const [selectedTraceId, setSelectedTraceId] = useState<string>('');
-  const [traceFilterMode, setTraceFilterMode] = useState<ProtocolTraceFilterMode>(
-    initialTraceFilterMode,
-  );
   const [aiExplaining, setAIExplaining] = useState(false);
   const [aiExplanationByTraceId, setAIExplanationByTraceId] = useState<
     Record<string, { explanation: string; model?: string }>
   >({});
   const [aiExplanationError, setAIExplanationError] = useState('');
   const explainAbortControllerRef = useRef<AbortController | null>(null);
-  const hasCryptoFocusedSignal = (trace: ProtocolTrace) => {
-    const responseCiphertext = Boolean(
-      trace.session_materials?.latest_response_ciphertext?.trim(),
-    );
-    if (responseCiphertext) {
-      return true;
-    }
-
-    const responseSteps = trace.response_steps || [];
-    return responseSteps.some((step) => {
-      const source = (step.source || '').toLowerCase();
-      const algorithm = (step.algorithm || '').toLowerCase();
-      const signal = `${source} ${algorithm}`;
-      return /(decrypt|decode|sm4|aes|des|rsa|cipher|base64|hex|atob|btoa)/.test(
-        signal,
-      );
-    });
-  };
-
-  const filteredTraces =
-    traceFilterMode === 'all'
-      ? traces
-      : traces.filter((trace) => hasCryptoFocusedSignal(trace));
-
-  useEffect(() => {
-    setTraceFilterMode(initialTraceFilterMode);
-  }, [initialTraceFilterMode]);
 
   useEffect(() => {
     setSelectedTraceId((current) =>
-      current && filteredTraces.some((trace) => trace.trace_id === current)
+      current && traces.some((trace) => trace.trace_id === current)
         ? current
         : '',
     );
-  }, [filteredTraces]);
+  }, [traces]);
 
   useEffect(
     () => () => {
@@ -844,10 +809,9 @@ export default function ProtocolAnalysisPanel({
 
   const staticProfiles = staticAnalysis?.profiles || [];
   const apiContexts = staticAnalysis?.api_contexts || [];
-  const hiddenPlaintextOnlyCount = Math.max(0, traces.length - filteredTraces.length);
-  const traceGroups = groupProtocolTracesByAlgorithms(filteredTraces);
+  const traceGroups = groupProtocolTracesByAlgorithms(traces);
   const selectedTrace =
-    filteredTraces.find((trace) => trace.trace_id === selectedTraceId) || null;
+    traces.find((trace) => trace.trace_id === selectedTraceId) || null;
   const selectedTraceFlow = selectedTrace
     ? buildProtocolTraceFlow(selectedTrace)
     : null;
@@ -958,27 +922,10 @@ export default function ProtocolAnalysisPanel({
         title="协议轨迹"
         extra={
           <Space wrap>
-            <Tag>{`展示 ${filteredTraces.length}/${traces.length}`}</Tag>
-            <Select
-              value={traceFilterMode}
-              onChange={(value) => setTraceFilterMode(value)}
-              style={{ width: 220 }}
-              options={[
-                { label: '仅看加解密相关轨迹', value: 'crypto_focused' },
-                { label: '显示全部轨迹', value: 'all' },
-              ]}
-            />
+            <Tag>{`共 ${traces.length} 条`}</Tag>
           </Space>
         }
       >
-        {hiddenPlaintextOnlyCount > 0 && traceFilterMode === 'crypto_focused' ? (
-          <Alert
-            showIcon
-            type="info"
-            style={{ marginBottom: 16 }}
-            title={`已默认隐藏 ${hiddenPlaintextOnlyCount} 条“明文直出/缺少密文证据”的轨迹，避免干扰加解密分析。`}
-          />
-        ) : null}
         {traceGroups.length ? (
           <Collapse
             items={traceGroups.map((group) => ({

@@ -31,7 +31,7 @@ func TestBuildTaskVulnResponsesIncludesStaticDecryptEvidence(t *testing.T) {
 func TestBuildTaskVulnResponsesIncludesBusinessClassification(t *testing.T) {
 	responses := buildTaskVulnResponses([]database.VulnRecord{{
 		VulnID:         "vuln-query",
-		Title:          "业务查询结果未授权业务查询",
+		Title:          "业务查询结果未授权查询",
 		Type:           "未授权访问",
 		Category:       "访问控制缺陷",
 		Subcategory:    "未授权业务查询",

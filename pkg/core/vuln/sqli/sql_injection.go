@@ -1,6 +1,8 @@
 package sqli
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
@@ -10,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // SQLInjectionResult 表示 SQL 注入测试结果
@@ -27,6 +30,32 @@ type responseSnapshot struct {
 	body       string
 	bodyLower  string
 	packet     string
+	duration   time.Duration
+}
+
+const (
+	maxSQLiProbeRequests  = 48
+	sqlProbeTimeoutSecs   = 5
+	timeDelayThreshold    = 1800 * time.Millisecond
+	timeDelayProbeSeconds = 2
+)
+
+var errSQLiProbeBudgetExceeded = errors.New("SQL injection probe request budget exceeded")
+
+type probeSender struct {
+	remaining int
+}
+
+func newProbeSender(limit int) *probeSender {
+	return &probeSender{remaining: limit}
+}
+
+func (s *probeSender) send(apiReq structs.APIRequest) (responseSnapshot, error) {
+	if s.remaining <= 0 {
+		return responseSnapshot{}, errSQLiProbeBudgetExceeded
+	}
+	s.remaining--
+	return sendSnapshot(apiReq)
 }
 
 // TestSQLInjection 测试SQL注入漏洞
@@ -34,7 +63,8 @@ type responseSnapshot struct {
 // cfg: SQL注入配置（包含payloads、匹配关键词）
 // returns: SQLInjectionResult 测试结果
 func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) (*SQLInjectionResult, error) {
-	baselineResp, err := sendSnapshot(cloneAPIRequest(apiReq))
+	sender := newProbeSender(maxSQLiProbeRequests)
+	baselineResp, err := sender.send(cloneAPIRequest(apiReq))
 	if err != nil {
 		return nil, err
 	}
@@ -44,6 +74,7 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 	for paramName := range apiReq.Params {
 		paramNames = append(paramNames, paramName)
 	}
+	sort.Strings(paramNames)
 
 	// 如果没有参数，跳过测试
 	if len(paramNames) == 0 {
@@ -53,7 +84,7 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 	// 对每个参数都进行测试
 	for _, paramName := range paramNames {
 		// 检测布尔盲注
-		vulnerable, evidenceResp, boolPayload := isBooleanBasedSQLInjection(apiReq, paramName)
+		vulnerable, evidenceResp, boolPayload := isBooleanBasedSQLInjection(sender, apiReq, paramName)
 		if vulnerable {
 			return &SQLInjectionResult{
 				Vulnerable:     true,
@@ -65,7 +96,19 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 			}, nil
 		}
 
-		for _, rule := range cfg.Rules {
+		vulnerable, evidenceResp, timePayload := isTimeBasedSQLInjection(sender, apiReq, paramName, baselineResp)
+		if vulnerable {
+			return &SQLInjectionResult{
+				Vulnerable:     true,
+				Payload:        timePayload,
+				Response:       vuln.TruncateResponse(evidenceResp.packet),
+				ResponseLength: len(evidenceResp.body),
+				Reason:         "检测到时间盲注SQL注入漏洞 (参数: " + paramName + ")",
+				Type:           "time-based",
+			}, nil
+		}
+
+		for _, rule := range buildSQLiPayloadRules(cfg) {
 			payloadList := rule.Payloads
 			if len(payloadList) == 0 {
 				continue
@@ -73,12 +116,14 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 
 			for _, payload := range payloadList {
 				// 创建修改后的请求，只修改当前测试的参数
-				modifiedReq := cloneAPIRequest(apiReq)
-				modifiedReq.Params[paramName] = []string{payload}
+				modifiedReq := buildTestRequest(apiReq, paramName, payload)
 
-				resp, err := sendSnapshot(modifiedReq)
+				resp, err := sender.send(modifiedReq)
 				if err != nil {
-					continue // 跳过失败的请求
+					if errors.Is(err, errSQLiProbeBudgetExceeded) {
+						return nonVulnerableSQLiResult("SQL注入检测达到请求预算，已停止剩余探针"), nil
+					}
+					continue
 				}
 
 				// 按规则先做响应体关键词校验
@@ -129,40 +174,86 @@ func TestSQLInjection(apiReq structs.APIRequest, cfg config.SQLInjectionConfig) 
 	}, nil
 }
 
+func nonVulnerableSQLiResult(reason string) *SQLInjectionResult {
+	return &SQLInjectionResult{
+		Vulnerable: false,
+		Payload:    "",
+		Response:   "",
+		Reason:     reason,
+		Type:       "",
+	}
+}
+
 // 奇数单引号组（1 个和 3 个）的响应必须相同，偶数单引号组（2 个和 4 个）的响应也必须相同，
 // 且两组响应必须不同，才判定为布尔盲注。基线响应不参与该判定。
-func isBooleanBasedSQLInjection(apiReq structs.APIRequest, paramName string) (bool, responseSnapshot, string) {
+func isBooleanBasedSQLInjection(sender *probeSender, apiReq structs.APIRequest, paramName string) (bool, responseSnapshot, string) {
 	for _, probe := range buildBooleanProbePairs() {
-		oddResp1, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.oddPayload1))
+		trueResp1, err := sender.send(buildTestRequest(apiReq, paramName, probe.truePayload1))
 		if err != nil {
+			if errors.Is(err, errSQLiProbeBudgetExceeded) {
+				return false, responseSnapshot{}, ""
+			}
 			continue
 		}
-		oddResp3, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.oddPayload3))
+		trueResp2, err := sender.send(buildTestRequest(apiReq, paramName, probe.truePayload2))
 		if err != nil {
+			if errors.Is(err, errSQLiProbeBudgetExceeded) {
+				return false, responseSnapshot{}, ""
+			}
 			continue
 		}
-		evenResp2, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.evenPayload2))
+		falseResp1, err := sender.send(buildTestRequest(apiReq, paramName, probe.falsePayload1))
 		if err != nil {
+			if errors.Is(err, errSQLiProbeBudgetExceeded) {
+				return false, responseSnapshot{}, ""
+			}
 			continue
 		}
-		evenResp4, err := sendSnapshot(buildTestRequest(apiReq, paramName, probe.evenPayload4))
+		falseResp2, err := sender.send(buildTestRequest(apiReq, paramName, probe.falsePayload2))
 		if err != nil {
+			if errors.Is(err, errSQLiProbeBudgetExceeded) {
+				return false, responseSnapshot{}, ""
+			}
 			continue
 		}
 
-		if !responsesEquivalent(oddResp1, oddResp3) || !responsesEquivalent(evenResp2, evenResp4) {
+		if !responsesEquivalent(trueResp1, trueResp2) || !responsesEquivalent(falseResp1, falseResp2) {
 			continue
 		}
-		if !responsesDifferent(oddResp1, evenResp2) {
+		if !responsesDifferent(trueResp1, falseResp1) {
 			continue
 		}
-		if isStatusOnlyEmptyBodyDifference(oddResp1, evenResp2) {
+		if isStatusOnlyEmptyBodyDifference(trueResp1, falseResp1) {
 			continue
 		}
 
-		return true, oddResp1, probe.oddPayload1
+		return true, trueResp1, probe.truePayload1
 	}
 
+	return false, responseSnapshot{}, ""
+}
+
+func isTimeBasedSQLInjection(sender *probeSender, apiReq structs.APIRequest, paramName string, baseline responseSnapshot) (bool, responseSnapshot, string) {
+	for _, probe := range buildTimeProbePairs() {
+		controlResp, err := sender.send(buildTestRequest(apiReq, paramName, probe.controlPayload))
+		if err != nil {
+			if errors.Is(err, errSQLiProbeBudgetExceeded) {
+				return false, responseSnapshot{}, ""
+			}
+			continue
+		}
+		delayedResp, err := sender.send(buildTestRequest(apiReq, paramName, probe.delayedPayload))
+		if err != nil {
+			if errors.Is(err, errSQLiProbeBudgetExceeded) {
+				return false, responseSnapshot{}, ""
+			}
+			continue
+		}
+		if delayedResp.duration-controlResp.duration >= timeDelayThreshold &&
+			delayedResp.duration-baseline.duration >= timeDelayThreshold {
+			return true, delayedResp, probe.delayedPayload
+		}
+	}
 	return false, responseSnapshot{}, ""
 }
 
@@ -249,7 +340,6 @@ var errorPatterns = []string{
 	// 通用 / 驱动 / JDBC / Java 异常
 	"sql syntax",
 	"sql error",
-	"syntax error",
 	"database error",
 	"query failed",
 	"java.sql.sqlexception",
@@ -321,19 +411,87 @@ func hasNewErrorBasedSignal(bodyLower string, baselineLower string) bool {
 }
 
 type booleanProbePair struct {
-	oddPayload1  string
-	oddPayload3  string
-	evenPayload2 string
-	evenPayload4 string
+	truePayload1  string
+	truePayload2  string
+	falsePayload1 string
+	falsePayload2 string
 }
 
 func buildBooleanProbePairs() []booleanProbePair {
 	return []booleanProbePair{
 		{
-			oddPayload1:  "'",
-			oddPayload3:  "'''",
-			evenPayload2: "''",
-			evenPayload4: "''''",
+			truePayload1:  "'",
+			truePayload2:  "'''",
+			falsePayload1: "''",
+			falsePayload2: "''''",
+		},
+		{
+			truePayload1:  "1 AND 1=1",
+			truePayload2:  "1 AND 2=2",
+			falsePayload1: "1 AND 1=2",
+			falsePayload2: "1 AND 2=3",
+		},
+		{
+			truePayload1:  "' AND '1'='1",
+			truePayload2:  "' AND '2'='2",
+			falsePayload1: "' AND '1'='2",
+			falsePayload2: "' AND '2'='3",
+		},
+		{
+			truePayload1:  "') AND ('1'='1",
+			truePayload2:  "') AND ('2'='2",
+			falsePayload1: "') AND ('1'='2",
+			falsePayload2: "') AND ('2'='3",
+		},
+		{
+			truePayload1:  "\" AND \"1\"=\"1",
+			truePayload2:  "\" AND \"2\"=\"2",
+			falsePayload1: "\" AND \"1\"=\"2",
+			falsePayload2: "\" AND \"2\"=\"3",
+		},
+	}
+}
+
+type timeProbePair struct {
+	controlPayload string
+	delayedPayload string
+}
+
+func buildTimeProbePairs() []timeProbePair {
+	delay := fmt.Sprintf("%d", timeDelayProbeSeconds)
+	return []timeProbePair{
+		{controlPayload: "1", delayedPayload: "1 AND SLEEP(" + delay + ")"},
+		{controlPayload: "1", delayedPayload: "1 AND pg_sleep(" + delay + ")"},
+		{controlPayload: "1", delayedPayload: "1; WAITFOR DELAY '0:0:" + delay + "'--"},
+		{controlPayload: "' AND '1'='1", delayedPayload: "' AND SLEEP(" + delay + ")-- "},
+	}
+}
+
+func buildSQLiPayloadRules(cfg config.SQLInjectionConfig) []config.SQLiPayloadRule {
+	rules := append([]config.SQLiPayloadRule{}, cfg.Rules...)
+	if len(cfg.Payloads) > 0 {
+		rules = append(rules, config.SQLiPayloadRule{
+			Payloads: cfg.Payloads,
+			Type:     "error-based",
+		})
+	}
+	if len(rules) > 0 {
+		return rules
+	}
+	return []config.SQLiPayloadRule{
+		{
+			Payloads: []string{
+				"'",
+				"\"",
+				"')",
+				"\")",
+				"'--",
+				"\"--",
+				"' OR '1'='1",
+				"\" OR \"1\"=\"1",
+				"1 OR 1=1",
+			},
+			Type: "error-based",
 		},
 	}
 }
@@ -342,7 +500,59 @@ func buildBooleanProbePairs() []booleanProbePair {
 func buildTestRequest(apiReq structs.APIRequest, paramName, testValue string) structs.APIRequest {
 	modifiedReq := cloneAPIRequest(apiReq)
 	modifiedReq.Params[paramName] = []string{testValue}
+	modifiedReq.Body = injectPayloadIntoBody(modifiedReq, paramName, testValue)
 	return modifiedReq
+}
+
+func injectPayloadIntoBody(apiReq structs.APIRequest, paramName, testValue string) string {
+	body := strings.TrimSpace(apiReq.Body)
+	if body == "" {
+		return apiReq.Body
+	}
+
+	payloadCarrier := strings.ToLower(strings.TrimSpace(apiReq.PayloadCarrier))
+	payloadFormat := strings.ToLower(strings.TrimSpace(apiReq.PayloadFormat))
+	contentType := strings.ToLower(headerValue(apiReq.Headers, "Content-Type"))
+	if payloadCarrier != "body" && payloadCarrier != "data" &&
+		payloadFormat != "json" && payloadFormat != "form" &&
+		!strings.Contains(contentType, "application/json") &&
+		!strings.Contains(contentType, "application/x-www-form-urlencoded") {
+		return apiReq.Body
+	}
+
+	if payloadFormat == "json" || strings.Contains(contentType, "application/json") || strings.HasPrefix(body, "{") {
+		if updated, ok := injectJSONPayload(body, paramName, testValue); ok {
+			return updated
+		}
+	}
+	if payloadFormat == "form" || strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(body, "=") {
+		if updated, ok := injectFormPayload(body, paramName, testValue); ok {
+			return updated
+		}
+	}
+	return apiReq.Body
+}
+
+func injectJSONPayload(body, paramName, testValue string) (string, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return "", false
+	}
+	payload[paramName] = testValue
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
+}
+
+func injectFormPayload(body, paramName, testValue string) (string, bool) {
+	form, err := url.ParseQuery(body)
+	if err != nil {
+		return "", false
+	}
+	form.Set(paramName, testValue)
+	return form.Encode(), true
 }
 
 func cloneAPIRequest(apiReq structs.APIRequest) structs.APIRequest {
@@ -369,7 +579,9 @@ func cloneAPIRequest(apiReq structs.APIRequest) structs.APIRequest {
 }
 
 func sendSnapshot(apiReq structs.APIRequest) (responseSnapshot, error) {
-	resp, err := vuln.SendAPIRequest(apiReq, false)
+	start := time.Now()
+	resp, err := vuln.SendAPIRequestWithTimeout(apiReq, false, sqlProbeTimeoutSecs)
+	duration := time.Since(start)
 	if err != nil {
 		return responseSnapshot{}, err
 	}
@@ -379,7 +591,17 @@ func sendSnapshot(apiReq structs.APIRequest) (responseSnapshot, error) {
 		body:       body,
 		bodyLower:  strings.ToLower(body),
 		packet:     buildResponsePacket(resp.Status(), resp.Header(), body),
+		duration:   duration,
 	}, nil
+}
+
+func headerValue(headers map[string]string, key string) string {
+	for existingKey, value := range headers {
+		if strings.EqualFold(existingKey, key) {
+			return value
+		}
+	}
+	return ""
 }
 
 func buildResponsePacket(status string, headers map[string][]string, body string) string {

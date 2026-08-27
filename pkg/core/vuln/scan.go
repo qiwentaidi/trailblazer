@@ -13,6 +13,10 @@ import (
 )
 
 func SendAPIRequest(apiReq structs.APIRequest, redirect bool) (*resty.Response, error) {
+	return SendAPIRequestWithTimeout(apiReq, redirect, 10)
+}
+
+func SendAPIRequestWithTimeout(apiReq structs.APIRequest, redirect bool, timeoutSeconds int) (*resty.Response, error) {
 	finalURL, resolvedBody := resolveAPIRequestTransport(apiReq)
 	requestBody := strings.NewReader(resolvedBody)
 
@@ -21,7 +25,7 @@ func SendAPIRequest(apiReq structs.APIRequest, redirect bool) (*resty.Response, 
 		finalURL,
 		apiReq.Headers,
 		requestBody,
-		10,
+		timeoutSeconds,
 		clients.NewRestyClient(nil, redirect),
 	)
 	return resp, err
