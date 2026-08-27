@@ -6,7 +6,7 @@
     "dev": "umi dev",
     "dev:mock": "UMI_APP_ENABLE_MOCK_API=true umi dev",
     "lint": "eslint . --ext .ts,.tsx",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "umi setup && tsc --noEmit"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
