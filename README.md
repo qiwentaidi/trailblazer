@@ -7,8 +7,7 @@ Trailblazer 是一个面向 Web 资产发现、API 探测、运行时请求/响�
 - SDK：供 Go 程序嵌入调用
 - CLI：供命令行或脚本直接执行扫描
 - 配置解析：支持可选的 YAML 配置文件
-- 事件回调：实时消费资产、接口、协议轨迹和漏洞结果
-- 协议能力：协议轨迹分析和离线解密
+- 事件回调：实时消费资产、接口和漏洞结果
 - 存储抽象：默认使用单次扫描内存存储，也可以接入业务方自己的存储
 - Web 管理端：HTTP API、认证、SQLite 持久化和管理前端
 
@@ -18,7 +17,7 @@ Trailblazer 是一个面向 Web 资产发现、API 探测、运行时请求/响�
 - 可访问目标站点的网络环境
 - 可启动 Chromium/Chrome 的运行环境
 
-Trailblazer 的浏览器运行时能力依赖 `chromedp`。如果目标站点需要执行 JavaScript、加载异步接口或分析协议轨迹，必须保证本机可以启动浏览器。
+Trailblazer 的浏览器运行时能力依赖 `chromedp`。如果目标站点需要执行 JavaScript 或加载异步接口，必须保证本机可以启动浏览器。
 
 只扫描你有权测试的目标，并确保目标方允许主动探测、漏洞验证和浏览器访问。
 
@@ -91,7 +90,7 @@ result, err := sdk.PerformScan(targets, options)
 
 SDK 会使用这两个值：
 
-- 传给扫描引擎，关联 JS、API 和协议轨迹
+- 传给扫描引擎，关联 JS 和 API 结果
 - 作为 `DataStore` 查询条件
 - 写入 `ScanResult.TaskID` 和 `ScanResult.Version`
 - 在未设置时回退到 `TaskID=cli-mode`、`Version=0`
@@ -297,10 +296,8 @@ options.OnResult = func(event sdk.ScanEvent) bool {
 		fmt.Printf("asset: %#v\n", event.Data)
 	case sdk.EventTypeAPIRecord:
 		fmt.Printf("api record: %#v\n", event.Data)
-	case sdk.EventTypeProtocolTrace:
-		fmt.Printf("protocol trace: %#v\n", event.Data)
-	case sdk.EventTypeVulnerability:
-		fmt.Printf("vulnerability: %#v\n", event.Data)
+		case sdk.EventTypeVulnerability:
+			fmt.Printf("vulnerability: %#v\n", event.Data)
 	case sdk.EventTypeError:
 		fmt.Printf("error: %#v\n", event.Data)
 	}
@@ -380,7 +377,7 @@ options.VulnDetection.Upload.Enabled = false
 
 ## 9. 自定义 DataStore
 
-SDK 默认使用内存存储复用单次扫描过程中捕获的 JS、API 请求/响应和协议轨迹，因此单次扫描不依赖 Elasticsearch。
+SDK 默认使用内存存储复用单次扫描过程中捕获的 JS 与 API 请求/响应，因此单次扫描不依赖 Elasticsearch。
 
 如果需要跨任务保存这些上下文，可以实现 `sdk.ScanDataStore` 并注入：
 
@@ -453,21 +450,6 @@ https://example.com
 https://demo.example.org
 ```
 
-## 11. 协议轨迹能力
-
-SDK 可对扫描过程中获取的协议轨迹做离线分析：
-
-```go
-evidence := sdk.AnalyzeProtocolTrace(trace)
-fmt.Println(evidence.Status, evidence.Summary)
-```
-
-如果已经获得密钥和密文，也可以调用：
-
-```go
-result, err := sdk.DecryptProtocolTrace(trace, keyHex, ciphertext)
-```
-
-密钥、密文和响应内容可能包含敏感信息，生产环境中应限制日志输出并做好访问控制。
+## 11. SDK 接口说明
 
 更细的接口说明见 [`docs/sdk-usage.md`](./docs/sdk-usage.md)。

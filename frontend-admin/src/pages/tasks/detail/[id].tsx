@@ -20,9 +20,7 @@ import {
   fetchTaskAssets,
   fetchTaskDetail,
   fetchTaskJSResources,
-  fetchTaskProtocolTraces,
   fetchTaskRisks,
-  fetchTaskStaticProtocolAnalysis,
   fetchTaskTree,
   fetchTaskVersions,
   normalizeRisks,
@@ -34,9 +32,7 @@ import type {
   APIResource,
   AssetData,
   JSResource,
-  ProtocolTrace,
   Risk,
-  StaticProtocolAnalysis,
   TaskSummary,
   TaskVersionSummary,
   TreeNode,
@@ -45,7 +41,6 @@ import { formatDateTime } from '@/utils/datetime';
 import { history, useLocation, useParams } from 'umi';
 
 import AssetsPanel from './components/AssetsPanel';
-import ProtocolAnalysisPanel from './components/ProtocolAnalysisPanel';
 import RiskWorkbench from './components/RiskWorkbench';
 import SiteTreePanel from './components/SiteTreePanel';
 import TaskOverview from './components/TaskOverview';
@@ -115,16 +110,12 @@ export default function TaskDetailPage() {
   const [assets, setAssets] = useState<AssetData | null>(null);
   const [jsResources, setJSResources] = useState<JSResource[]>([]);
   const [apiResources, setAPIResources] = useState<APIResource[]>([]);
-  const [protocolTraces, setProtocolTraces] = useState<ProtocolTrace[]>([]);
-  const [staticAnalysis, setStaticAnalysis] =
-    useState<StaticProtocolAnalysis | null>(null);
   const [versions, setVersions] = useState<TaskVersionSummary[]>([]);
   const [taskLoading, setTaskLoading] = useState(false);
   const [treeLoading, setTreeLoading] = useState(false);
   const [riskLoading, setRiskLoading] = useState(false);
   const [assetLoading, setAssetLoading] = useState(false);
   const [searchContentLoading, setSearchContentLoading] = useState(false);
-  const [protocolLoading, setProtocolLoading] = useState(false);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
@@ -217,32 +208,6 @@ export default function TaskDetailPage() {
     } finally {
       if (isMounted.current && activeTaskIdRef.current === requestTaskId) {
         setAssetLoading(false);
-      }
-    }
-  };
-
-  const loadProtocolAnalysis = async () => {
-    const requestTaskId = taskId;
-    setProtocolLoading(true);
-    try {
-      const [traceResponse, staticResponse] = await Promise.all([
-        fetchTaskProtocolTraces(taskId, { version: selectedVersion }),
-        fetchTaskStaticProtocolAnalysis(taskId, { version: selectedVersion }),
-      ]);
-      if (!isMounted.current || activeTaskIdRef.current !== requestTaskId) {
-        return;
-      }
-      setProtocolTraces(traceResponse?.data || []);
-      setStaticAnalysis(staticResponse?.data || null);
-    } catch (error) {
-      console.error(error);
-      if (isMounted.current && activeTaskIdRef.current === requestTaskId) {
-        setProtocolTraces([]);
-        setStaticAnalysis(null);
-      }
-    } finally {
-      if (isMounted.current && activeTaskIdRef.current === requestTaskId) {
-        setProtocolLoading(false);
       }
     }
   };
@@ -371,15 +336,12 @@ export default function TaskDetailPage() {
     setAssets(null);
     setJSResources([]);
     setAPIResources([]);
-    setProtocolTraces([]);
-    setStaticAnalysis(null);
     setVersions([]);
     setTaskLoading(false);
     setTreeLoading(false);
     setRiskLoading(false);
     setAssetLoading(false);
     setSearchContentLoading(false);
-    setProtocolLoading(false);
     riskCountRef.current = 0;
     riskLoadingRef.current = false;
     riskLoadingTaskIdRef.current = '';
@@ -391,7 +353,6 @@ export default function TaskDetailPage() {
         loadRisks(true),
         loadAssets(),
         loadSearchContent(),
-        loadProtocolAnalysis(),
         loadVersions(),
       ]);
       if (isMounted.current && activeTaskIdRef.current === requestTaskId) {
@@ -540,7 +501,6 @@ export default function TaskDetailPage() {
       loadTree(),
       loadAssets(),
       loadSearchContent(),
-      loadProtocolAnalysis(),
     ]);
   };
 
@@ -599,11 +559,7 @@ export default function TaskDetailPage() {
 
   if (
     !initialLoaded &&
-    (taskLoading ||
-      treeLoading ||
-      riskLoading ||
-      assetLoading ||
-      protocolLoading)
+    (taskLoading || treeLoading || riskLoading || assetLoading)
   ) {
     return (
       <div
@@ -765,7 +721,6 @@ export default function TaskDetailPage() {
                 taskId={taskId}
                 version={selectedVersion}
                 risks={risks}
-                protocolTraces={protocolTraces}
                 loading={riskLoading}
                 polling={Boolean(taskId)}
                 onRefresh={() => void loadRisks(true)}
@@ -778,19 +733,6 @@ export default function TaskDetailPage() {
             key: 'assets',
             label: '资产',
             children: <AssetsPanel assets={assets} />,
-          },
-          {
-            key: 'protocol',
-            label: '分析链路',
-            children: (
-              <ProtocolAnalysisPanel
-                taskId={taskId}
-                version={selectedVersion}
-                loading={protocolLoading}
-                traces={protocolTraces}
-                staticAnalysis={staticAnalysis}
-              />
-            ),
           },
         ]}
       />

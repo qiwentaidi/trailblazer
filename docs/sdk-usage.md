@@ -9,15 +9,11 @@
 - 风险项提取
 - 未授权等漏洞检测
 - 浏览器运行时 API 请求/响应抓取
-- 协议轨迹抓取
-- 协议轨迹证据分析
-- 基于协议轨迹做离线解密
 
 本文档对应当前仓库中的 SDK 实现：
 
 - SDK 入口文件: [`pkg/sdk/sdk.go`](../pkg/sdk/sdk.go)
 - SDK 实现文件: [`pkg/lib/sdk.go`](../pkg/lib/sdk.go)
-- 协议证据分析: [`pkg/lib/protocol_trace_evidence.go`](../pkg/lib/protocol_trace_evidence.go)
 
 ## 2. 接口总览
 
@@ -27,10 +23,8 @@ SDK 当前主要导出以下能力：
 - `LoadScanOptionsFromFile(configPath string) (*ScanOptions, error)`
 - `PerformScan(urls []string, options *ScanOptions) (*ScanResult, error)`
 - `PerformScanWithConfigFile(urls []string, configPath string, outputPath string) error`
-- `DecryptProtocolTrace(trace ProtocolTrace, keyHex, ciphertext string) (*DecryptResult, error)`
-- `AnalyzeProtocolTrace(trace ProtocolTrace) TraceEvidence`
 
-同时，SDK 现在支持通过 `DataStore` 注入扫描结果存储读取能力，用于在漏洞分析、JS 协议分析、运行时上下文补全阶段复用已有采集结果，而不强依赖 ES。
+同时，SDK 现在支持通过 `DataStore` 注入扫描结果存储读取能力，用于在漏洞分析和运行时上下文补全阶段复用已有采集结果，而不强依赖 ES。
 
 ## 3. 接入要求
 
@@ -50,7 +44,7 @@ SDK 的扫描链路依赖浏览器运行时抓取能力，因此运行环境需�
 - 可访问目标站点网络
 - 本机可启动浏览器环境
 
-如果运行环境本身无法启动浏览器，运行时抓取和协议轨迹能力会受影响。
+如果运行环境本身无法启动浏览器，运行时 API 抓取能力会受影响。
 
 ### 3.3 导入方式
 
@@ -116,7 +110,7 @@ import "github.com/qiwentaidi/trailblazer/pkg/sdk"
 - 只在现有扫描入口新增一次 `sdk.PerformScan`
 - 用 `options.OnResult` 把结果桥接回你的系统
 - 不要求接入 Trailblazer 的前端、任务表、ES 存储
-- 如果你已有自己的数据库，可以实现 `database.ScanDataStore` 直接接入分析链路
+- 如果你已有自己的数据库，可以实现 `database.ScanDataStore` 直接接入运行时上下文
 
 推荐接入点：
 
@@ -138,14 +132,11 @@ SDK 运行时会用到三类上下文数据：
 
 - JS 资源
 - API 请求/响应记录
-- 协议轨迹
 
 这些数据不仅用于结果展示，也会参与：
 
 - JS 中接口上下文补全
 - 未授权等漏洞检测时的请求/响应复用
-- 静态协议分析
-- 协议轨迹证据提取与解密辅助
 
 当前统一通过 `database.ScanDataStore` 抽象读取：
 
@@ -153,7 +144,6 @@ SDK 运行时会用到三类上下文数据：
 type ScanDataStore interface {
 	ListJSResources(taskID string, versions ...int) ([]database.JSResource, error)
 	ListAPIResources(taskID string, versions ...int) ([]database.APIResource, error)
-	ListProtocolTraces(taskID string, versions ...int) ([]database.ProtocolTraceRecord, error)
 }
 ```
 
@@ -161,12 +151,12 @@ type ScanDataStore interface {
 
 - 平台内运行时，默认实现仍然是 ES
 - SDK 独立运行时，如果你没有显式传入 `options.DataStore`，会自动创建一个内存版 `MemoryScanDataStore`
-- SDK 在浏览器抓取阶段捕获到的 API 请求/响应和协议轨迹，会先写入这个内存存储，再继续后续分析
+- SDK 在浏览器抓取阶段捕获到的 API 请求/响应，会先写入这个内存存储，再继续后续分析
 
 这意味着：
 
 - SDK 现在不会因为没有 ES 而丢失分析所需的运行时上下文
-- 如果你想把 JS、接口、协议轨迹改存到 MySQL、PostgreSQL、SQLite 或自定义存储，只需要实现这个接口
+- 如果你想把 JS 和接口记录改存到 MySQL、PostgreSQL、SQLite 或自定义存储，只需要实现这个接口
 
 ## 5. 最小调用示例
 
@@ -249,7 +239,7 @@ func main() {
 
 如果你希望在 SDK 外部持久化浏览器抓到的上下文，推荐做法是：
 
-- 在 `options.OnResult` 中接收 `EventTypeAPIRecord` / `EventTypeProtocolTrace`
+- 在 `options.OnResult` 中接收 `EventTypeAPIRecord`
 - 同步写入你自己的数据库
 - 让 `DataStore` 从你的数据库读回这些内容
 
@@ -273,7 +263,6 @@ type EventSink interface {
 	OnRisk(event sdk.ScanEvent)
 	OnVulnerability(event sdk.ScanEvent)
 	OnAPIRecord(event sdk.ScanEvent)
-	OnProtocolTrace(event sdk.ScanEvent)
 }
 
 func RunTrailblazerScan(target string, sink EventSink) (*sdk.ScanResult, error) {
@@ -290,8 +279,6 @@ func RunTrailblazerScan(target string, sink EventSink) (*sdk.ScanResult, error) 
 			sink.OnVulnerability(event)
 		case sdk.EventTypeAPIRecord:
 			sink.OnAPIRecord(event)
-		case sdk.EventTypeProtocolTrace:
-			sink.OnProtocolTrace(event)
 		case sdk.EventTypeError:
 			log.Printf("[trailblazer] %v", event.Data)
 		}
@@ -307,7 +294,7 @@ func RunTrailblazerScan(target string, sink EventSink) (*sdk.ScanResult, error) 
 - 改动点少，只新增一个桥接层
 - 你的业务系统继续用自己的事件模型
 - 后续 SDK 升级时，收敛到一个改动面
-- 可以在桥接层里顺手把 API/协议轨迹持久化到你自己的存储
+- 可以在桥接层里顺手把 API 记录持久化到你自己的存储
 
 ## 7. 从配置文件加载
 
@@ -360,12 +347,11 @@ type OpenAIOptions struct {
 用途：
 
 - AI 辅助敏感信息过滤
-- 协议轨迹解释能力依然主要走 Web 端接口，SDK 当前重点是扫描与结果返回
 
 说明：
 
 - `Enabled=false` 时，不调用 AI
-- 若只使用扫描、抓包、协议轨迹、解密能力，可不配置 OpenAI
+- 若只使用扫描和抓包能力，可不配置 OpenAI
 
 ### 6.2 BlackDomain
 
@@ -446,7 +432,7 @@ type VulnDetectionOptions struct {
 说明：
 
 - `Enabled=false` 时，会关闭全部漏洞模块
-- 即使关闭漏洞模块，资产提取、API 记录、协议轨迹抓取仍然会继续执行
+- 即使关闭漏洞模块，资产提取和 API 记录抓取仍然会继续执行
 
 ### 6.7 OutputPath
 
@@ -503,7 +489,6 @@ options.OnResult = func(event sdk.ScanEvent) bool {
 - `EventTypeVulnerability`
 - `EventTypeAsset`
 - `EventTypeAPIRecord`
-- `EventTypeProtocolTrace`
 - `EventTypeProgress`
 - `EventTypeError`
 
@@ -534,11 +519,6 @@ options.OnResult = func(event sdk.ScanEvent) bool {
 		record, ok := event.Data.(sdk.APIRecord)
 		if ok {
 			fmt.Printf("[api] %s %s\n", record.Method, record.URL)
-		}
-	case sdk.EventTypeProtocolTrace:
-		trace, ok := event.Data.(sdk.ProtocolTrace)
-		if ok {
-			fmt.Printf("[trace] %s %s\n", trace.Method, trace.RequestURL)
 		}
 	case sdk.EventTypeVulnerability:
 		vuln, ok := event.Data.(sdk.VulnerabilityItem)
@@ -591,30 +571,9 @@ type TargetResult struct {
 - `TraceID`
 - `HasProtocolTrace`
 
-### 8.4 ProtocolTraces
+### 8.4 Vulnerabilities
 
-`ProtocolTrace` 表示一次请求链路上的协议轨迹，常见用途：
-
-- 判断请求是否加密
-- 判断响应是否存在解密步骤
-- 还原动态参数
-- 为后续解密提供材料
-
-关键字段：
-
-- `RequestURL`
-- `Method`
-- `RequestBeforeTransform`
-- `FinalRequestBody`
-- `RequestSteps`
-- `ResponseSteps`
-- `DynamicParams`
-- `SessionMaterials`
-- `Algorithms`
-
-### 8.5 Vulnerabilities
-
-漏洞结果中与协议链路相关的重要字段：
+漏洞结果中的常用复核字段：
 
 - `TraceID`
 - `HasProtocolTrace`
@@ -623,23 +582,7 @@ type TargetResult struct {
 - `DecryptionDetail`
 - `ResponseLength`
 
-## 11. 协议轨迹能力
-
-SDK 目前支持两类协议相关能力：
-
-### 9.1 运行时协议轨迹抓取
-
-这部分来自浏览器运行时 hook 和网络抓取，不依赖 JS 持久化。
-
-能拿到：
-
-- 请求前明文
-- 最终请求体
-- 请求/响应处理步骤
-- 会话材料
-- 算法提示
-
-### 9.2 静态上下文增强
+## 11. 静态上下文增强
 
 SDK 当前已接入静态 hint 构建，用于增强：
 
@@ -660,79 +603,6 @@ SDK 当前已接入静态 hint 构建，用于增强：
 
 - 不依赖保存完整 JS 才能做上下文补全
 - 但仍然保留静态上下文增强能力
-
-## 12. 协议轨迹证据分析
-
-调用：
-
-```go
-evidence := sdk.AnalyzeProtocolTrace(trace)
-```
-
-返回：
-
-```go
-type TraceEvidence struct {
-	Status                 string
-	Summary                string
-	DetectedAlgorithms     []string
-	VariantSuggestions     []TraceVariantSuggestion
-	HasResponseCiphertext  bool
-	HasResponsePlaintext   bool
-	HasResponseDecryptStep bool
-	HasResponseDecodeStep  bool
-	HasRequestEncryptStep  bool
-}
-```
-
-当前状态常量：
-
-- `TraceEvidenceResponsePlaintextCaptured`
-- `TraceEvidenceResponsePathNotCaptured`
-- `TraceEvidenceResponseDecryptAttempted`
-- `TraceEvidenceEncodingVariantSuspected`
-- `TraceEvidenceRequestChainOnly`
-- `TraceEvidenceInsufficient`
-
-示例：
-
-```go
-evidence := sdk.AnalyzeProtocolTrace(trace)
-fmt.Println(evidence.Status)
-fmt.Println(evidence.Summary)
-```
-
-## 13. 协议轨迹解密
-
-前端 runtime 解密会在隔离容器中执行目标站点提取出的 Node.js 模块。运行该能力需要本机可用的 Docker 或 Podman；默认使用 `node:22-alpine` 镜像。可通过以下环境变量调整容器运行时和镜像：
-
-```bash
-export TRAILBLAZER_CONTAINER_RUNTIME=docker
-export TRAILBLAZER_NODE_WORKER_IMAGE=node:22-alpine
-```
-
-worker 默认使用非 root 用户、只读根文件系统、无网络、无宿主目录挂载，并限制 CPU、内存、进程数和执行时长。若没有可用容器运行时，runtime 解密会返回错误，并继续由上层解密流程处理其他可用路径。
-
-调用：
-
-```go
-result, err := sdk.DecryptProtocolTrace(trace, "", ciphertext)
-if err != nil {
-	log.Fatalf("decrypt failed: %v", err)
-}
-fmt.Println(result.Plaintext)
-```
-
-说明：
-
-- `keyHex` 可以手动传入
-- 若传空，SDK 会优先从 `trace.SessionMaterials` 里取可用密钥材料
-- 若轨迹中已保存响应明文，可能会直接复用已保存明文
-
-适合场景：
-
-- 离线验证响应密文
-- 利用已捕获协议轨迹回放解密
 
 ## 14. 静态上下文支持范围
 
@@ -773,14 +643,11 @@ result, err := sdk.PerformScan(urls, options)
 - 风险中心
 - 任务系统
 
-### 13.3 只关心协议问题
+### 13.3 只关心接口上下文
 
 优先关注：
 
 - `TargetResult.APIRecords`
-- `TargetResult.ProtocolTraces`
-- `AnalyzeProtocolTrace`
-- `DecryptProtocolTrace`
 
 ### 13.4 不想做主动漏洞测试
 
@@ -794,7 +661,6 @@ options.VulnDetection.Enabled = false
 
 - 资产提取
 - API 记录抓取
-- 协议轨迹抓取
 - 静态上下文增强
 
 ## 16. 当前限制
@@ -822,7 +688,6 @@ options.VulnDetection.Enabled = false
 1. 先用 `NewScanOptions()` 跑通最小扫描
 2. 再接入 `OnResult` 做事件消费
 3. 再按需要开启或关闭漏洞模块
-4. 最后接入协议轨迹分析与解密能力
 
 ## 19. 一份完整示例
 
@@ -853,11 +718,6 @@ func main() {
 		case sdk.EventTypeAPIRecord:
 			if record, ok := event.Data.(sdk.APIRecord); ok {
 				fmt.Printf("[api] %s %s code=%d\n", record.Method, record.URL, record.ResponseCode)
-			}
-		case sdk.EventTypeProtocolTrace:
-			if trace, ok := event.Data.(sdk.ProtocolTrace); ok {
-				evidence := sdk.AnalyzeProtocolTrace(trace)
-				fmt.Printf("[trace] %s %s status=%s\n", trace.Method, trace.RequestURL, evidence.Status)
 			}
 		case sdk.EventTypeVulnerability:
 			if vuln, ok := event.Data.(sdk.VulnerabilityItem); ok {

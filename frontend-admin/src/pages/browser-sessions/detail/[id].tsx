@@ -18,21 +18,8 @@ import { fetchBrowserSessionDetail } from '@/services/browserSessions';
 import type {
   BrowserSessionDetail,
   BrowserSessionRequestSummary,
-  BrowserSessionTraceSummary,
-  ProtocolTraceStep,
 } from '@/types/task';
 import { formatDateTime } from '@/utils/datetime';
-
-const SESSION_MATERIAL_HIGHLIGHTS = [
-  'rsa_public_key',
-  'rsa_public_key_source',
-  'key_exchange_public_key',
-  'key_exchange_header',
-  'latest_plaintext',
-  'latest_ciphertext',
-  'latest_response_plaintext',
-  'latest_response_ciphertext',
-];
 
 function renderCopyableParagraph(label: string, value?: string, rows = 4) {
   return (
@@ -43,101 +30,6 @@ function renderCopyableParagraph(label: string, value?: string, rows = 4) {
     >
       {label}：{value || '-'}
     </Typography.Paragraph>
-  );
-}
-
-function renderTraceSteps(title: string, steps?: ProtocolTraceStep[]) {
-  if (!steps?.length) {
-    return <Typography.Text type="secondary">{title}：-</Typography.Text>;
-  }
-
-  return (
-    <Space direction="vertical" size={8} style={{ width: '100%' }}>
-      <Typography.Text strong>{title}</Typography.Text>
-      {steps.map((step, index) => (
-        <Card
-          key={`${title}-${index}-${step.call_id || step.function_path || step.source || 'step'}`}
-          size="small"
-          style={{ background: '#fff' }}
-        >
-          <Space direction="vertical" size={4} style={{ width: '100%' }}>
-            <Typography.Text>
-              步骤 {index + 1}：{step.algorithm || step.source || '未命名步骤'}
-            </Typography.Text>
-            <Typography.Text type="secondary">
-              来源：{step.function_path || step.source || '-'}
-              {step.module_id ? ` / 模块 ${step.module_id}` : ''}
-            </Typography.Text>
-            {renderCopyableParagraph('输入', step.input_preview, 3)}
-            {renderCopyableParagraph('输出', step.output_preview, 3)}
-          </Space>
-        </Card>
-      ))}
-    </Space>
-  );
-}
-
-function renderSessionMaterials(trace?: BrowserSessionTraceSummary | null) {
-  const materials = trace?.session_materials || {};
-  const entries = Object.entries(materials).filter(([, value]) => !!value);
-  if (!entries.length) {
-    return <Typography.Text type="secondary">会话材料：-</Typography.Text>;
-  }
-
-  const orderedEntries = [
-    ...SESSION_MATERIAL_HIGHLIGHTS.filter((key) => materials[key]).map((key) => [
-      key,
-      materials[key],
-    ]),
-    ...entries.filter(([key]) => !SESSION_MATERIAL_HIGHLIGHTS.includes(key)),
-  ] as Array<[string, string]>;
-
-  return (
-    <Space direction="vertical" size={8} style={{ width: '100%' }}>
-      <Typography.Text strong>会话材料</Typography.Text>
-      {orderedEntries.map(([key, value]) => (
-        <Card key={key} size="small" style={{ background: '#fff' }}>
-          {renderCopyableParagraph(key, value, key.includes('key') ? 6 : 4)}
-        </Card>
-      ))}
-    </Space>
-  );
-}
-
-function findTraceForRequest(
-  request: BrowserSessionRequestSummary | null,
-  traces?: BrowserSessionTraceSummary[],
-) {
-  if (!request || !traces?.length) {
-    return null;
-  }
-
-  if (request.trace_id) {
-    const exactTrace = traces.find((trace) => trace.trace_id === request.trace_id);
-    if (exactTrace) {
-      return exactTrace;
-    }
-  }
-
-  return (
-    traces.find(
-      (trace) =>
-        trace.request_url === request.url &&
-        (trace.method || 'GET').toUpperCase() === (request.method || 'GET').toUpperCase(),
-    ) || null
-  );
-}
-
-function collectTraceMaterials(
-  selectedTrace: BrowserSessionTraceSummary | null,
-  traces?: BrowserSessionTraceSummary[],
-) {
-  if (selectedTrace?.session_materials && Object.keys(selectedTrace.session_materials).length) {
-    return selectedTrace;
-  }
-  return (
-    traces?.find((trace) => trace.session_materials && Object.keys(trace.session_materials).length) ||
-    null
   );
 }
 
@@ -252,14 +144,6 @@ export default function BrowserSessionDetailPage() {
       null,
     [detail?.requests, selectedRequestId],
   );
-  const selectedTrace = useMemo(
-    () => findTraceForRequest(selectedRequest, detail?.suspiciousTraces),
-    [detail?.suspiciousTraces, selectedRequest],
-  );
-  const materialTrace = useMemo(
-    () => collectTraceMaterials(selectedTrace, detail?.suspiciousTraces),
-    [detail?.suspiciousTraces, selectedTrace],
-  );
   const rawRequest = useMemo(() => buildRawRequest(selectedRequest), [selectedRequest]);
   const rawResponse = useMemo(() => buildRawResponse(selectedRequest), [selectedRequest]);
 
@@ -301,8 +185,6 @@ export default function BrowserSessionDetailPage() {
       render: (_value, request) =>
         request.is_suspicious ? (
           <Tag color="warning">可疑加密</Tag>
-        ) : request.has_protocol_trace ? (
-          <Tag color="processing">协议链路</Tag>
         ) : (
           '-'
         ),
@@ -409,35 +291,12 @@ export default function BrowserSessionDetailPage() {
                   <Empty description="请选择一条流量" />
                 ) : (
                   <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                    {selectedTrace ? (
-                      <Card size="small" style={{ background: '#fafafa' }}>
-                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                          <Typography.Text strong>链路</Typography.Text>
-                          <Typography.Text type="secondary">
-                            {selectedTrace.suspicious_reason || '命中可疑协议信号'}
-                          </Typography.Text>
-                          <Typography.Text>
-                            算法：
-                            {selectedTrace.algorithms?.length
-                              ? selectedTrace.algorithms.join(', ')
-                              : '未识别'}
-                          </Typography.Text>
-                          {renderTraceSteps('请求链路甬道', selectedTrace.request_steps)}
-                          {renderTraceSteps('响应链路甬道', selectedTrace.response_steps)}
-                        </Space>
-                      </Card>
-                    ) : (
-                      <Empty description="当前流量暂无链路" />
-                    )}
-                    {materialTrace ? (
-                      <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                        <Typography.Text type="secondary">
-                          材料来源：{materialTrace.request_url || '当前会话'}
-                        </Typography.Text>
-                        {renderSessionMaterials(materialTrace)}
-                      </Space>
-                    ) : (
-                      <Empty description="当前会话暂无材料" />
+                    {renderCopyableParagraph('URL', selectedRequest.url, 3)}
+                    {renderCopyableParagraph('方法', selectedRequest.method || 'GET', 1)}
+                    {renderCopyableParagraph(
+                      '响应类型',
+                      selectedRequest.mime_type || '-',
+                      1,
                     )}
                   </Space>
                 )}

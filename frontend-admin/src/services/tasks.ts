@@ -4,11 +4,7 @@ import type {
   AssetValue,
   JSResource,
   PagedResponse,
-  ProtocolAIExplanationResult,
-  ProtocolDecryptResult,
-  ProtocolTrace,
   Risk,
-  StaticProtocolAnalysis,
   TaskSummary,
   TaskTreeData,
   TaskVersionSummary,
@@ -30,44 +26,8 @@ type BackendAssetData = Omit<Partial<AssetData>, 'apiRoot' | 'apiRouter'> & {
   apiRouter?: BackendAssetItem[];
 };
 type TaskAssetResponse = { data: BackendAssetData };
-type TaskProtocolTraceResponse = { data: ProtocolTrace[] };
-type TaskStaticProtocolResponse = { data: StaticProtocolAnalysis };
 type TaskJSResponse = { data: BackendJSResource[] };
 type TaskAPIResponse = { data: BackendAPIResource[] };
-type ProtocolDecryptResponse = {
-  data?: {
-    key_hex?: string;
-    ciphertext?: string;
-    plaintext?: string;
-    mode?: string;
-    source?: string;
-    detail?: string;
-    function_hint?: string;
-  };
-};
-type ProtocolExplainResponse = {
-  data?: {
-    trace_id?: string;
-    explanation?: string;
-    model?: string;
-  };
-};
-type ProtocolExplainStreamEvent =
-  | {
-      type: 'start';
-      traceId?: string;
-    }
-  | {
-      type: 'delta';
-      traceId?: string;
-      delta?: string;
-    }
-  | {
-      type: 'done';
-      traceId?: string;
-      explanation?: string;
-      model?: string;
-    };
 type TaskDetailResponse = {
   task_id?: string;
   task_name?: string;
@@ -170,26 +130,6 @@ type BackendAPIResource = {
   fetched_at?: string;
 };
 
-interface DecryptRiskPayload {
-  traceId: string;
-  ciphertext: string;
-  keyHex?: string;
-}
-
-interface RuntimeDecryptRiskPayload {
-  traceId: string;
-  ciphertext: string;
-  pageUrl?: string;
-  requestUrl?: string;
-}
-
-export type ProtocolDecryptPayload = DecryptRiskPayload;
-
-export type ProtocolRuntimeDecryptPayload = RuntimeDecryptRiskPayload;
-export interface ProtocolExplainPayload {
-  traceId: string;
-}
-
 interface TaskVersionOptions {
   version?: number;
 }
@@ -202,11 +142,6 @@ interface TaskTreeOptions extends TaskVersionOptions {
 
 interface UpdateRiskStatusPayload {
   status: NonNullable<Risk['status']>;
-}
-
-interface ProtocolExplainStreamOptions extends TaskVersionOptions {
-  signal?: AbortSignal;
-  onEvent?: (event: ProtocolExplainStreamEvent) => void;
 }
 
 interface CreateTaskPayload {
@@ -386,25 +321,6 @@ export const fetchTaskAssets = (id: string, options: TaskVersionOptions = {}) =>
       data: normalizeAssetData(response?.data),
     }));
 
-export const fetchTaskProtocolTraces = (
-  id: string,
-  options: TaskVersionOptions = {},
-) =>
-  request.get<TaskProtocolTraceResponse>(`/api/task/${id}/protocol-traces`, {
-    params: buildVersionParams(options.version),
-  });
-
-export const fetchTaskStaticProtocolAnalysis = (
-  id: string,
-  options: TaskVersionOptions = {},
-) =>
-  request.get<TaskStaticProtocolResponse>(
-    `/api/task/${id}/static-protocol-analysis`,
-    {
-      params: buildVersionParams(options.version),
-    },
-  );
-
 export const fetchTaskJS = (id: string, options: TaskVersionOptions = {}) =>
   request.get<TaskJSResponse>(`/api/task/${id}/js`, {
     params: buildVersionParams(options.version),
@@ -451,249 +367,6 @@ export const fetchTaskAPIs = async (
     headers: item.headers || {},
     fetchedAt: item.fetched_at || '',
   }));
-};
-
-export const decryptProtocolPayload = async (
-  taskId: string,
-  payload: ProtocolDecryptPayload,
-  options: TaskVersionOptions = {},
-): Promise<ProtocolDecryptResult | null> => {
-  const response = await request.post<ProtocolDecryptResponse>(
-    `/api/task/${taskId}/protocol-tools/decrypt`,
-    payload,
-    {
-      params: buildVersionParams(options.version),
-    },
-  );
-
-  const result = response?.data;
-  if (!result) {
-    return null;
-  }
-
-  return {
-    keyHex: result.key_hex || '',
-    ciphertext: result.ciphertext || '',
-    plaintext: result.plaintext || '',
-    mode: result.mode || '',
-    source: result.source || '',
-    detail: result.detail || '',
-    functionHint: result.function_hint || '',
-  };
-};
-
-export const runtimeDecryptProtocolPayload = async (
-  taskId: string,
-  payload: ProtocolRuntimeDecryptPayload,
-  options: TaskVersionOptions = {},
-): Promise<ProtocolDecryptResult | null> => {
-  const response = await request.post<ProtocolDecryptResponse>(
-    `/api/task/${taskId}/protocol-tools/runtime-decrypt`,
-    payload,
-    {
-      params: buildVersionParams(options.version),
-    },
-  );
-
-  const result = response?.data;
-  if (!result) {
-    return null;
-  }
-
-  return {
-    keyHex: result.key_hex || '',
-    ciphertext: result.ciphertext || '',
-    plaintext: result.plaintext || '',
-    mode: result.mode || '',
-    source: result.source || '',
-    detail: result.detail || '',
-    functionHint: result.function_hint || '',
-  };
-};
-
-export const decryptRiskResponse = async (
-  taskId: string,
-  payload: DecryptRiskPayload,
-  options: TaskVersionOptions = {},
-): Promise<ProtocolDecryptResult | null> =>
-  decryptProtocolPayload(taskId, payload, options);
-
-export const runtimeDecryptRiskResponse = async (
-  taskId: string,
-  payload: RuntimeDecryptRiskPayload,
-  options: TaskVersionOptions = {},
-): Promise<ProtocolDecryptResult | null> =>
-  runtimeDecryptProtocolPayload(taskId, payload, options);
-
-export const explainProtocolTrace = async (
-  taskId: string,
-  payload: ProtocolExplainPayload,
-  options: TaskVersionOptions = {},
-): Promise<ProtocolAIExplanationResult | null> => {
-  const response = await request.post<ProtocolExplainResponse>(
-    `/api/task/${taskId}/protocol-tools/explain`,
-    payload,
-    {
-      params: buildVersionParams(options.version),
-    },
-  );
-
-  const result = response?.data;
-  if (!result) {
-    return null;
-  }
-
-  return {
-    traceId: result.trace_id || '',
-    explanation: result.explanation || '',
-    model: result.model || '',
-  };
-};
-
-const parseProtocolExplainStreamEvents = (buffer: string) => {
-  const events: Array<{ event: string; data: string }> = [];
-  let rest = buffer;
-  let separatorIndex = rest.indexOf('\n\n');
-
-  while (separatorIndex >= 0) {
-    const rawEvent = rest.slice(0, separatorIndex);
-    rest = rest.slice(separatorIndex + 2);
-
-    const lines = rawEvent.split(/\r?\n/);
-    let eventName = 'message';
-    const dataLines: string[] = [];
-
-    lines.forEach((line) => {
-      if (line.startsWith('event:')) {
-        eventName = line.slice('event:'.length).trim();
-        return;
-      }
-      if (line.startsWith('data:')) {
-        dataLines.push(line.slice('data:'.length).trim());
-      }
-    });
-
-    if (dataLines.length) {
-      events.push({
-        event: eventName,
-        data: dataLines.join('\n'),
-      });
-    }
-
-    separatorIndex = rest.indexOf('\n\n');
-  }
-
-  return { events, rest };
-};
-
-export const explainProtocolTraceStream = async (
-  taskId: string,
-  payload: ProtocolExplainPayload,
-  options: ProtocolExplainStreamOptions = {},
-): Promise<ProtocolAIExplanationResult | null> => {
-  const params = new URLSearchParams();
-  if (options.version) {
-    params.set('version', String(options.version));
-  }
-
-  const token = readStoredAuthToken();
-  const query = params.toString();
-  const response = await fetch(
-    `${getApiBaseURL()}/api/task/${taskId}/protocol-tools/explain${query ? `?${query}` : ''}`,
-    {
-      method: 'POST',
-      headers: {
-        Accept: 'text/event-stream',
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(payload),
-      signal: options.signal,
-    },
-  );
-
-  if (!response.ok) {
-    const rawText = await response.text();
-    let detail = rawText;
-
-    try {
-      const parsed = JSON.parse(rawText);
-      detail = parsed?.detail || parsed?.error || rawText;
-    } catch {
-      // keep raw text
-    }
-
-    throw new Error(detail || 'AI 解释生成失败');
-  }
-
-  if (!response.body) {
-    throw new Error('AI 流式解释未返回响应体');
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let accumulated = '';
-  let finalResult: ProtocolAIExplanationResult | null = null;
-  let doneReading = false;
-
-  while (!doneReading) {
-    const { done, value } = await reader.read();
-    doneReading = done;
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-
-    const { events, rest } = parseProtocolExplainStreamEvents(buffer);
-    buffer = rest;
-
-    events.forEach(({ event, data }) => {
-      const parsed = JSON.parse(data);
-
-      if (event === 'start') {
-        options.onEvent?.({
-          type: 'start',
-          traceId: parsed.trace_id || payload.traceId,
-        });
-        return;
-      }
-
-      if (event === 'delta') {
-        accumulated += parsed.delta || '';
-        options.onEvent?.({
-          type: 'delta',
-          traceId: parsed.trace_id || payload.traceId,
-          delta: parsed.delta || '',
-        });
-        return;
-      }
-
-      if (event === 'done') {
-        finalResult = {
-          traceId: parsed.trace_id || payload.traceId,
-          explanation: parsed.explanation || accumulated,
-          model: parsed.model || '',
-        };
-        options.onEvent?.({
-          type: 'done',
-          traceId: finalResult.traceId,
-          explanation: finalResult.explanation,
-          model: finalResult.model,
-        });
-        return;
-      }
-
-      if (event === 'error') {
-        throw new Error(parsed.detail || parsed.error || 'AI 解释生成失败');
-      }
-    });
-  }
-
-  return (
-    finalResult || {
-      traceId: payload.traceId,
-      explanation: accumulated,
-      model: '',
-    }
-  );
 };
 
 export const deleteTaskRisk = (riskId: string) =>

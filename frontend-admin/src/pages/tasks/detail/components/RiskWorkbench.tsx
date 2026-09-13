@@ -17,22 +17,18 @@ import {
   message,
 } from 'antd';
 
-import { useCodecWorkbench } from '@/components/codec';
 import {
-  decryptRiskResponse,
   deleteTaskRisk,
   deleteTaskRiskCluster,
-  runtimeDecryptRiskResponse,
   updateTaskRiskStatus,
 } from '@/services/tasks';
-import type { ProtocolDecryptResult, ProtocolTrace, Risk } from '@/types/task';
+import type { Risk } from '@/types/task';
 import { formatDateTime } from '@/utils/datetime';
 
 interface Props {
   taskId: string;
   version?: number;
   risks: Risk[];
-  protocolTraces?: ProtocolTrace[];
   loading?: boolean;
   polling?: boolean;
   initialSortMode?: RiskSortMode;
@@ -239,21 +235,6 @@ const buildRiskHitFeatures = (risk: Risk) => {
       color: 'purple',
     });
   }
-  if (risk.hasProtocolTrace || (risk.traceId || '').trim()) {
-    features.push({
-      key: 'protocol-trace',
-      label: '协议轨迹',
-      color: 'geekblue',
-    });
-  }
-  if ((risk.responseCiphertext || '').trim()) {
-    features.push({
-      key: 'ciphertext',
-      label: '响应密文',
-      color: 'gold',
-    });
-  }
-
   return features;
 };
 
@@ -285,79 +266,6 @@ const buildClusterHitFeatures = (
     label: `${value.label} ${value.count}/${entry.count}`,
     color: value.color,
   }));
-};
-
-const parseRawRequestHeaders = (request?: string) => {
-  if (!request) {
-    return {} as Record<string, string>;
-  }
-
-  const lines = request.split(/\r?\n/);
-  const headers: Record<string, string> = {};
-
-  for (const line of lines.slice(1)) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      break;
-    }
-    const separatorIndex = trimmed.indexOf(':');
-    if (separatorIndex <= 0) {
-      continue;
-    }
-    const key = trimmed.slice(0, separatorIndex).trim();
-    const value = trimmed.slice(separatorIndex + 1).trim();
-    if (key) {
-      headers[key] = value;
-    }
-  }
-
-  return headers;
-};
-
-const normalizeCiphertext = (value?: string) => {
-  const trimmed = (value || '').trim();
-  if (!trimmed) {
-    return '';
-  }
-  return trimmed.replace(/^"(.*)"$/s, '$1').trim();
-};
-
-const inferCiphertextFormat = (value: string) =>
-  /^[0-9a-f]+$/i.test(value) && value.length % 2 === 0 ? 'Hex' : 'Base64';
-
-const inferNonceValue = (risk: Risk, trace?: ProtocolTrace | null) => {
-  const headerMap = {
-    ...parseRawRequestHeaders(risk.request),
-    ...(trace?.request_headers || {}),
-  };
-  const headerEntries = Object.entries(headerMap);
-  const directMatch = headerEntries.find(([key]) =>
-    ['nonce', 'x-nonce', 'gv59jppeesnw'].includes(key.toLowerCase()),
-  );
-  if (directMatch?.[1]) {
-    return directMatch[1];
-  }
-
-  const detailMatch = risk.decryptionDetail?.match(/nonce=([^;,\s]+)/i);
-  return detailMatch?.[1] || '';
-};
-
-const inferSm4Mode = (trace?: ProtocolTrace | null) => {
-  const algorithms = [
-    ...(trace?.algorithms || []),
-    ...(trace?.request_steps || []).map((step) => step.algorithm || ''),
-    ...(trace?.response_steps || []).map((step) => step.algorithm || ''),
-  ]
-    .join(' ')
-    .toLowerCase();
-
-  if (algorithms.includes('ecb')) {
-    return 'ECB';
-  }
-  if (algorithms.includes('cbc') || algorithms.includes('sm4')) {
-    return 'CBC';
-  }
-  return 'CBC';
 };
 
 const shortenMiddle = (value: string, head = 40, tail = 24) => {
@@ -509,7 +417,6 @@ export default function RiskWorkbench({
   taskId,
   version,
   risks,
-  protocolTraces = [],
   loading,
   polling,
   initialSortMode = 'level_desc',
@@ -517,7 +424,6 @@ export default function RiskWorkbench({
   onDeleted,
   onUpdated,
 }: Props) {
-  const { openCodecWorkbench } = useCodecWorkbench();
   const [keyword, setKeyword] = useState('');
   const [level, setLevel] = useState<Risk['level'] | undefined>();
   const [status, setStatus] = useState<string | undefined>();
@@ -525,11 +431,6 @@ export default function RiskWorkbench({
   const [selected, setSelected] = useState<Risk | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [updatingRiskId, setUpdatingRiskId] = useState('');
-  const [decrypting, setDecrypting] = useState(false);
-  const [runtimeDecrypting, setRuntimeDecrypting] = useState(false);
-  const [decryptResult, setDecryptResult] =
-    useState<ProtocolDecryptResult | null>(null);
-  const [decryptError, setDecryptError] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [sortMode, setSortMode] = useState<RiskSortMode>(initialSortMode);
@@ -555,10 +456,6 @@ export default function RiskWorkbench({
     setSelected(null);
     setDeleting(false);
     setUpdatingRiskId('');
-    setDecrypting(false);
-    setRuntimeDecrypting(false);
-    setDecryptResult(null);
-    setDecryptError('');
     setPage(1);
     setPageSize(DEFAULT_PAGE_SIZE);
     setSortMode(initialSortMode);
@@ -566,13 +463,6 @@ export default function RiskWorkbench({
     setClusterPages({});
     setStatusOverrides({});
   }, [initialSortMode, taskId]);
-
-  useEffect(() => {
-    setDecrypting(false);
-    setRuntimeDecrypting(false);
-    setDecryptResult(null);
-    setDecryptError('');
-  }, [selected?.id]);
 
   const clusterOptions = useMemo(() => {
     const labels = Array.from(
@@ -709,15 +599,6 @@ export default function RiskWorkbench({
       setPage(maxPage);
     }
   }, [pagedEntries.total, page, pageSize]);
-  const selectedTrace = useMemo(
-    () =>
-      selected?.traceId
-        ? protocolTraces.find((trace) => trace.trace_id === selected.traceId) ||
-          null
-        : null,
-    [protocolTraces, selected?.traceId],
-  );
-
   const toggleGroup = (clusterId: string) => {
     setExpandedGroups((current) => ({
       ...current,
@@ -856,115 +737,6 @@ export default function RiskWorkbench({
         setDeleting(false);
       }
     }
-  };
-
-  const handleDecrypt = async (risk: Risk) => {
-    if (!risk.traceId || !risk.responseCiphertext) {
-      return;
-    }
-
-    setDecrypting(true);
-    setDecryptError('');
-    try {
-      const result = await decryptRiskResponse(
-        taskId,
-        {
-          traceId: risk.traceId,
-          ciphertext: risk.responseCiphertext,
-        },
-        {
-          version,
-        },
-      );
-      setDecryptResult(result);
-      if (result?.plaintext) {
-        message.success('离线二次解密成功');
-        return;
-      }
-      setDecryptError('解密接口未返回明文结果');
-      message.warning('未返回可读明文');
-    } catch (error) {
-      console.error(error);
-      setDecryptResult(null);
-      setDecryptError('离线二次解密失败，请检查协议轨迹材料是否完整');
-      message.error('离线二次解密失败');
-    } finally {
-      setDecrypting(false);
-    }
-  };
-
-  const handleRuntimeDecrypt = async (risk: Risk) => {
-    if (!risk.traceId || !risk.responseCiphertext) {
-      return;
-    }
-
-    setRuntimeDecrypting(true);
-    setDecryptError('');
-    try {
-      const result = await runtimeDecryptRiskResponse(
-        taskId,
-        {
-          traceId: risk.traceId,
-          ciphertext: risk.responseCiphertext,
-          requestUrl: risk.url,
-        },
-        {
-          version,
-        },
-      );
-      setDecryptResult(result);
-      if (result?.plaintext) {
-        message.success('在线 runtime 解密成功');
-        return;
-      }
-      setDecryptError('在线 runtime 解密未返回明文结果');
-      message.warning('未返回可读明文');
-    } catch (error) {
-      console.error(error);
-      setDecryptResult(null);
-      setDecryptError('在线 runtime 解密失败，请检查浏览器上下文是否仍可复用');
-      message.error('在线 runtime 解密失败');
-    } finally {
-      setRuntimeDecrypting(false);
-    }
-  };
-
-  const handleOpenCodecWorkbench = (risk: Risk) => {
-    const ciphertext = normalizeCiphertext(
-      risk.responseCiphertext || risk.response,
-    );
-    if (!ciphertext) {
-      message.warning('当前风险没有可用于解密的响应密文');
-      return;
-    }
-
-    const trace = risk.traceId
-      ? protocolTraces.find((item) => item.trace_id === risk.traceId) || null
-      : null;
-    const sm4KeyHex =
-      decryptResult?.keyHex ||
-      trace?.session_materials?.sm4_key_hex ||
-      trace?.session_materials?.request_sm4_key_hex ||
-      trace?.session_materials?.response_sm4_key_hex ||
-      '';
-    const nonce = inferNonceValue(risk, trace);
-
-    openCodecWorkbench({
-      operationId: 'sm4',
-      mode: 'decode',
-      input: ciphertext,
-      replaceInput: true,
-      options: {
-        key: sm4KeyHex,
-        keyFormat: sm4KeyHex ? 'Hex' : 'UTF8',
-        iv: nonce,
-        ivFormat: 'UTF8',
-        mode: inferSm4Mode(trace),
-        inputFormat: inferCiphertextFormat(ciphertext),
-        outputFormat: 'Hex',
-      },
-    });
-    message.success('已将密文和可复用协议材料预填到解密工具');
   };
 
   return (
@@ -1564,33 +1336,6 @@ export default function RiskWorkbench({
                       : ''}
                   </Typography.Text>
                 ) : null}
-                {hasDisplayText(selected.traceId) ||
-                selected.hasProtocolTrace ? (
-                  <Typography.Text>
-                    协议轨迹: {selected.traceId}
-                    {selected.hasProtocolTrace ? '（已关联）' : ''}
-                  </Typography.Text>
-                ) : null}
-                {selectedTrace?.session_materials?.sm4_key_hex ? (
-                  <Typography.Text>
-                    历史 SM4 Key: {selectedTrace.session_materials.sm4_key_hex}
-                  </Typography.Text>
-                ) : null}
-                {inferNonceValue(selected, selectedTrace) ? (
-                  <Typography.Text>
-                    当前 Nonce: {inferNonceValue(selected, selectedTrace)}
-                  </Typography.Text>
-                ) : null}
-                {hasDisplayText(selected.decryptionStatus) ? (
-                  <Typography.Text>
-                    解密状态: {selected.decryptionStatus}
-                  </Typography.Text>
-                ) : null}
-                {hasDisplayText(selected.decryptionDetail) ? (
-                  <Typography.Text>
-                    解密说明: {selected.decryptionDetail}
-                  </Typography.Text>
-                ) : null}
                 {hasDisplayText(selected.createdAt) ? (
                   <Typography.Text>
                     创建时间: {formatDateTime(selected.createdAt)}
@@ -1603,44 +1348,6 @@ export default function RiskWorkbench({
                 ) : null}
               </Space>
             </Card>
-
-            {selected.responseCiphertext ? (
-              <Card size="small" title="二次解密候选密文">
-                <pre
-                  style={{
-                    margin: 0,
-                    overflow: 'auto',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {selected.responseCiphertext}
-                </pre>
-              </Card>
-            ) : null}
-
-            {selected.traceId && selected.responseCiphertext ? (
-              <Card size="small" title="二次解密操作">
-                <Space wrap>
-                  <Button
-                    loading={decrypting}
-                    onClick={() => void handleDecrypt(selected)}
-                  >
-                    尝试离线二次解密
-                  </Button>
-                  <Button onClick={() => handleOpenCodecWorkbench(selected)}>
-                    用解密工具打开
-                  </Button>
-                  <Button
-                    type="primary"
-                    loading={runtimeDecrypting}
-                    onClick={() => void handleRuntimeDecrypt(selected)}
-                  >
-                    尝试在线 runtime 解密
-                  </Button>
-                </Space>
-              </Card>
-            ) : null}
 
             {hasDisplayText(selected.request) ? (
               <Card size="small" title="请求报文">
@@ -1781,48 +1488,6 @@ export default function RiskWorkbench({
                     </List.Item>
                   )}
                 />
-              </Card>
-            ) : null}
-
-            {decryptResult?.plaintext || decryptError ? (
-              <Card size="small" title="二次解密结果">
-                <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                  {decryptResult?.mode ? (
-                    <Typography.Text type="secondary">
-                      解密模式: {decryptResult.mode}
-                    </Typography.Text>
-                  ) : null}
-                  {decryptResult?.source ? (
-                    <Typography.Text type="secondary">
-                      结果来源: {decryptResult.source}
-                    </Typography.Text>
-                  ) : null}
-                  {decryptResult?.functionHint ? (
-                    <Typography.Text type="secondary">
-                      函数线索: {decryptResult.functionHint}
-                    </Typography.Text>
-                  ) : null}
-                  {decryptResult?.detail ? (
-                    <Typography.Text type="secondary">
-                      说明: {decryptResult.detail}
-                    </Typography.Text>
-                  ) : null}
-                  {decryptResult?.keyHex ? (
-                    <Typography.Text type="secondary">
-                      使用密钥: {decryptResult.keyHex}
-                    </Typography.Text>
-                  ) : null}
-                  <pre
-                    style={{
-                      margin: 0,
-                      overflow: 'auto',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    {decryptResult?.plaintext || decryptError}
-                  </pre>
-                </Space>
               </Card>
             ) : null}
 

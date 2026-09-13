@@ -115,16 +115,6 @@ export interface TestResult {
   createdAt: string;
 }
 
-export interface RuntimeDecryptResult {
-  keyHex: string;
-  ciphertext: string;
-  plaintext: string;
-  mode: string;
-  source: string;
-  detail: string;
-  functionHint: string;
-}
-
 export interface DecisionRecord {
   id: string;
   route: string;

@@ -1,7 +1,6 @@
 import type {
   ApprovalDecision,
   CollaborationSession,
-  RuntimeDecryptResult,
 } from '@/types/collaborativeTesting';
 import { getApiBaseURL } from '@/utils/apiBase';
 import request from '@/utils/request';
@@ -145,35 +144,6 @@ export const executeCollaborativeAction = async (
     payload,
   );
   return response.data;
-};
-
-export const runtimeDecryptCollaborativeResult = async (
-  sessionId: string,
-  resultId: string,
-): Promise<RuntimeDecryptResult> => {
-  const response = await request.post<{
-    data: {
-      key_hex?: string;
-      ciphertext?: string;
-      plaintext?: string;
-      mode?: string;
-      source?: string;
-      detail?: string;
-      function_hint?: string;
-    };
-  }>(
-    `/api/collaborative-tests/${sessionId}/test-results/${resultId}/runtime-decrypt`,
-  );
-  const result = response.data;
-  return {
-    keyHex: result.key_hex || '',
-    ciphertext: result.ciphertext || '',
-    plaintext: result.plaintext || '',
-    mode: result.mode || '',
-    source: result.source || '',
-    detail: result.detail || '',
-    functionHint: result.function_hint || '',
-  };
 };
 
 export const stageLabel: Record<CollaborationSession['stage'], string> = {

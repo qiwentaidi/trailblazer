@@ -1,8 +1,6 @@
 import request from '@/utils/request';
 import {
   createTaskRecord,
-  decryptProtocolPayload,
-  decryptRiskResponse,
   deleteTaskRecord,
   deleteTaskRiskCluster,
   deriveAssetData,
@@ -10,8 +8,6 @@ import {
   fetchTasks,
   normalizeRisks,
   restartTaskScan,
-  runtimeDecryptProtocolPayload,
-  runtimeDecryptRiskResponse,
   startTaskScan,
   stopTaskScan,
   updateTaskRiskStatus,
@@ -263,51 +259,6 @@ describe('tasks service', () => {
     });
   });
 
-  test('decrypts a risk response through the protocol tools endpoint', async () => {
-    (request.post as jest.Mock).mockResolvedValue({
-      data: {
-        key_hex: '00112233',
-        ciphertext: 'abcd1234',
-        plaintext: '{"ok":true}',
-        mode: 'offline',
-        source: 'sm4',
-        detail: '通过历史材料完成解密',
-        function_hint: 'module.sd',
-      },
-    });
-
-    const result = await decryptRiskResponse(
-      'task-1',
-      {
-        traceId: 'trace-1',
-        ciphertext: 'abcd1234',
-      },
-      {
-        version: 3,
-      },
-    );
-
-    expect(request.post).toHaveBeenCalledWith(
-      '/api/task/task-1/protocol-tools/decrypt',
-      {
-        traceId: 'trace-1',
-        ciphertext: 'abcd1234',
-      },
-      {
-        params: { version: 3 },
-      },
-    );
-    expect(result).toEqual({
-      keyHex: '00112233',
-      ciphertext: 'abcd1234',
-      plaintext: '{"ok":true}',
-      mode: 'offline',
-      source: 'sm4',
-      detail: '通过历史材料完成解密',
-      functionHint: 'module.sd',
-    });
-  });
-
   test('deletes a deny-template cluster through the task cluster endpoint', async () => {
     await deleteTaskRiskCluster('task-1', 'cluster-auth-1', {
       version: 4,
@@ -321,125 +272,4 @@ describe('tasks service', () => {
     );
   });
 
-  test('decrypts an arbitrary payload through a selected protocol trace', async () => {
-    (request.post as jest.Mock).mockResolvedValue({
-      data: {
-        ciphertext: 'cipher-from-panel',
-        plaintext: '{"from":"panel"}',
-        mode: 'offline',
-        source: 'captured-response-plaintext',
-        detail: '通过所选链路复用历史明文证据',
-        function_hint: 'module.sd',
-      },
-    });
-
-    const result = await decryptProtocolPayload(
-      'task-1',
-      {
-        traceId: 'trace-2',
-        ciphertext: 'cipher-from-panel',
-      },
-      {
-        version: 5,
-      },
-    );
-
-    expect(request.post).toHaveBeenCalledWith(
-      '/api/task/task-1/protocol-tools/decrypt',
-      {
-        traceId: 'trace-2',
-        ciphertext: 'cipher-from-panel',
-      },
-      {
-        params: { version: 5 },
-      },
-    );
-    expect(result?.plaintext).toBe('{"from":"panel"}');
-  });
-
-  test('runtime decrypts a risk response through the runtime protocol endpoint', async () => {
-    (request.post as jest.Mock).mockResolvedValue({
-      data: {
-        ciphertext: 'abcd1234',
-        plaintext: '{"ok":true}',
-        mode: 'runtime',
-        source: 'browser-context',
-        detail: '通过浏览器上下文在线执行页面解密逻辑完成还原',
-        function_hint: 'module.sd',
-      },
-    });
-
-    const result = await runtimeDecryptRiskResponse(
-      'task-1',
-      {
-        traceId: 'trace-1',
-        ciphertext: 'abcd1234',
-        requestUrl: 'https://example.com/api/orders',
-      },
-      {
-        version: 3,
-      },
-    );
-
-    expect(request.post).toHaveBeenCalledWith(
-      '/api/task/task-1/protocol-tools/runtime-decrypt',
-      {
-        traceId: 'trace-1',
-        ciphertext: 'abcd1234',
-        requestUrl: 'https://example.com/api/orders',
-      },
-      {
-        params: { version: 3 },
-      },
-    );
-    expect(result).toEqual({
-      keyHex: '',
-      ciphertext: 'abcd1234',
-      plaintext: '{"ok":true}',
-      mode: 'runtime',
-      source: 'browser-context',
-      detail: '通过浏览器上下文在线执行页面解密逻辑完成还原',
-      functionHint: 'module.sd',
-    });
-  });
-
-  test('runtime decrypts an arbitrary payload through a selected protocol trace', async () => {
-    (request.post as jest.Mock).mockResolvedValue({
-      data: {
-        ciphertext: 'cipher-from-panel',
-        plaintext: '{"from":"runtime-panel"}',
-        mode: 'runtime',
-        source: 'browser-context',
-        detail: '通过浏览器上下文在线执行页面解密逻辑完成还原',
-        function_hint: 'module.sd',
-      },
-    });
-
-    const result = await runtimeDecryptProtocolPayload(
-      'task-1',
-      {
-        traceId: 'trace-2',
-        ciphertext: 'cipher-from-panel',
-        requestUrl: 'https://example.com/api/panel',
-        pageUrl: 'https://example.com/page',
-      },
-      {
-        version: 5,
-      },
-    );
-
-    expect(request.post).toHaveBeenCalledWith(
-      '/api/task/task-1/protocol-tools/runtime-decrypt',
-      {
-        traceId: 'trace-2',
-        ciphertext: 'cipher-from-panel',
-        requestUrl: 'https://example.com/api/panel',
-        pageUrl: 'https://example.com/page',
-      },
-      {
-        params: { version: 5 },
-      },
-    );
-    expect(result?.plaintext).toBe('{"from":"runtime-panel"}');
-  });
 });

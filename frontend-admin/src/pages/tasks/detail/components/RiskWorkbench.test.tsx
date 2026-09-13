@@ -1,36 +1,18 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-import { CodecWorkbenchProvider, useCodecWorkbench } from '@/components/codec';
+import { CodecWorkbenchProvider } from '@/components/codec';
 import RiskWorkbench, { filterRisks } from './RiskWorkbench';
 
 jest.mock('@/services/tasks', () => ({
   __esModule: true,
   deleteTaskRisk: jest.fn(),
   deleteTaskRiskCluster: jest.fn(),
-  decryptRiskResponse: jest.fn(),
-  runtimeDecryptRiskResponse: jest.fn(),
   updateTaskRiskStatus: jest.fn(),
 }));
 
-jest.mock('@/components/codec', () => {
-  const actual = jest.requireActual('@/components/codec');
-  return {
-    ...actual,
-    useCodecWorkbench: jest.fn(),
-  };
-});
-
-const {
-  decryptRiskResponse,
-  runtimeDecryptRiskResponse,
-  updateTaskRiskStatus,
-} = jest.requireMock('@/services/tasks') as {
-  decryptRiskResponse: jest.Mock;
-  runtimeDecryptRiskResponse: jest.Mock;
+const { updateTaskRiskStatus } = jest.requireMock('@/services/tasks') as {
   updateTaskRiskStatus: jest.Mock;
 };
-const mockedUseCodecWorkbench = useCodecWorkbench as jest.Mock;
-const openCodecWorkbench = jest.fn();
 
 const buildRisk = (index: number) => ({
   id: `risk-${index}`,
@@ -92,10 +74,6 @@ describe('RiskWorkbench', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedUseCodecWorkbench.mockReturnValue({
-      openCodecWorkbench,
-      closeCodecWorkbench: jest.fn(),
-    });
   });
 
   test('shows only the first page of risks by default', () => {
@@ -507,114 +485,6 @@ describe('RiskWorkbench', () => {
     expect(screen.queryByText('方法:')).not.toBeInTheDocument();
   });
 
-  test('decrypts ciphertext from a linked protocol trace in the risk drawer', async () => {
-    decryptRiskResponse.mockResolvedValue({
-      keyHex: '00112233',
-      ciphertext: 'abcd1234',
-      plaintext: '{"code":200}',
-      mode: 'offline',
-      source: 'sm4',
-      detail: '通过历史材料完成解密',
-      functionHint: 'module.sd',
-    });
-
-    render(
-      <CodecWorkbenchProvider>
-        <RiskWorkbench
-          taskId="task-1"
-          version={2}
-          risks={[
-            {
-              ...buildRisk(1),
-              title: '未授权访问',
-              type: '未授权访问',
-              traceId: 'trace-1',
-              hasProtocolTrace: true,
-              responseCiphertext: 'abcd1234',
-              decryptionStatus: 'not_tried',
-            },
-          ]}
-        />
-      </CodecWorkbenchProvider>,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
-    fireEvent.click(screen.getByRole('button', { name: '尝试离线二次解密' }));
-
-    await waitFor(() => {
-      expect(decryptRiskResponse).toHaveBeenCalledWith(
-        'task-1',
-        {
-          traceId: 'trace-1',
-          ciphertext: 'abcd1234',
-        },
-        {
-          version: 2,
-        },
-      );
-    });
-
-    expect(await screen.findByText('{"code":200}')).toBeInTheDocument();
-    expect(screen.getByText(/使用密钥: 00112233/)).toBeInTheDocument();
-    expect(screen.getByText(/解密模式: offline/)).toBeInTheDocument();
-    expect(screen.getByText(/结果来源: sm4/)).toBeInTheDocument();
-    expect(screen.getByText(/函数线索: module.sd/)).toBeInTheDocument();
-  });
-
-  test('runtime decrypts ciphertext from a linked protocol trace in the risk drawer', async () => {
-    runtimeDecryptRiskResponse.mockResolvedValue({
-      ciphertext: 'abcd1234',
-      plaintext: '{"code":201}',
-      mode: 'runtime',
-      source: 'browser-context',
-      detail: '通过浏览器上下文在线执行页面解密逻辑完成还原',
-      functionHint: 'module.sd',
-    });
-
-    render(
-      <CodecWorkbenchProvider>
-        <RiskWorkbench
-          taskId="task-1"
-          version={2}
-          risks={[
-            {
-              ...buildRisk(1),
-              title: '未授权访问',
-              type: '未授权访问',
-              traceId: 'trace-1',
-              hasProtocolTrace: true,
-              responseCiphertext: 'abcd1234',
-              decryptionStatus: 'not_tried',
-            },
-          ]}
-        />
-      </CodecWorkbenchProvider>,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
-    fireEvent.click(
-      screen.getByRole('button', { name: '尝试在线 runtime 解密' }),
-    );
-
-    await waitFor(() => {
-      expect(runtimeDecryptRiskResponse).toHaveBeenCalledWith(
-        'task-1',
-        {
-          traceId: 'trace-1',
-          ciphertext: 'abcd1234',
-          requestUrl: 'https://example.com/api/1',
-        },
-        {
-          version: 2,
-        },
-      );
-    });
-
-    expect(await screen.findByText('{"code":201}')).toBeInTheDocument();
-    expect(screen.getByText(/解密模式: runtime/)).toBeInTheDocument();
-    expect(screen.getByText(/结果来源: browser-context/)).toBeInTheDocument();
-  });
-
   test('renders static contexts in the risk drawer', () => {
     render(
       <CodecWorkbenchProvider>
@@ -747,8 +617,8 @@ describe('RiskWorkbench', () => {
     );
 
     expect(screen.getByText('上下文命中 1')).toBeInTheDocument();
-    expect(screen.getByText('协议轨迹')).toBeInTheDocument();
-    expect(screen.getByText('响应密文')).toBeInTheDocument();
+    expect(screen.queryByText('协议轨迹')).not.toBeInTheDocument();
+    expect(screen.queryByText('响应密文')).not.toBeInTheDocument();
   });
 
   test('shows business classification instead of repeating the generic vulnerability name', () => {
@@ -775,59 +645,5 @@ describe('RiskWorkbench', () => {
     expect(screen.getByText('漏洞大类: 访问控制缺陷')).toBeInTheDocument();
     expect(screen.getByText('漏洞小类: 未授权业务查询')).toBeInTheDocument();
     expect(screen.getByText('业务对象: 业务查询结果')).toBeInTheDocument();
-  });
-
-  test('opens codec workbench with inferred sm4 materials from the selected risk', () => {
-    render(
-      <CodecWorkbenchProvider>
-        <RiskWorkbench
-          taskId="task-1"
-          version={2}
-          risks={[
-            {
-              ...buildRisk(1),
-              title: '未授权访问',
-              type: '未授权访问',
-              traceId: 'trace-1',
-              hasProtocolTrace: true,
-              request: `POST /api/demo HTTP/1.1
-Host: example.com
-gv59JPPEesNW: T4e3NhfC
-
-abcd1234`,
-              responseCiphertext: '"5cb35ee620256..."',
-              decryptionStatus: 'not_tried',
-            },
-          ]}
-          protocolTraces={[
-            {
-              trace_id: 'trace-1',
-              session_materials: {
-                sm4_key_hex: '31393435323038373838333136383734',
-              },
-            } as any,
-          ]}
-        />
-      </CodecWorkbenchProvider>,
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: '查看详情' }));
-    fireEvent.click(screen.getByRole('button', { name: '用解密工具打开' }));
-
-    expect(openCodecWorkbench).toHaveBeenCalledWith({
-      operationId: 'sm4',
-      mode: 'decode',
-      input: '5cb35ee620256...',
-      replaceInput: true,
-      options: {
-        key: '31393435323038373838333136383734',
-        keyFormat: 'Hex',
-        iv: 'T4e3NhfC',
-        ivFormat: 'UTF8',
-        mode: 'CBC',
-        inputFormat: 'Base64',
-        outputFormat: 'Hex',
-      },
-    });
   });
 });

@@ -845,26 +845,8 @@ func TestCaptureNetworkActivityHooksJSEncryptPrototype(t *testing.T) {
 		t.Fatalf("expected encrypted request to reach test server")
 	}
 
-	var foundRealRSA bool
-	var foundPlaintext bool
-	for _, trace := range traces {
-		if !strings.HasSuffix(trace.RequestURL, "/api/submit") {
-			continue
-		}
-		if strings.Contains(trace.RequestBeforeTransform, "plain-value") {
-			foundPlaintext = true
-		}
-		for _, step := range trace.RequestSteps {
-			if step.Algorithm == "rsa.encrypt" && step.InputPreview == "plain-value" && step.OutputPreview == rsaCipher {
-				foundRealRSA = true
-			}
-		}
-	}
-	if !foundRealRSA {
-		t.Fatalf("expected real JSEncrypt rsa.encrypt step, got %#v", traces)
-	}
-	if !foundPlaintext {
-		t.Fatalf("expected request plaintext to be reconstructed from matched rsa step, got %#v", traces)
+	if len(traces) != 0 {
+		t.Fatalf("expected protocol hook capture to be disabled, got %#v", traces)
 	}
 }
 
@@ -923,23 +905,7 @@ func TestCaptureNetworkActivityDoesNotCarryRSAStepsIntoFollowingGET(t *testing.T
 		t.Fatalf("expected both POST and GET requests, post=%d get=%d", postRequests.Load(), getRequests.Load())
 	}
 
-	var foundGET bool
-	for _, trace := range traces {
-		if !strings.Contains(trace.RequestURL, "/api/captcha") {
-			continue
-		}
-		foundGET = true
-		if len(trace.RequestSteps) != 0 {
-			t.Fatalf("expected GET trace not to inherit request crypto steps, got %#v", trace.RequestSteps)
-		}
-		if len(trace.Algorithms) != 0 {
-			t.Fatalf("expected GET trace algorithms to be empty, got %#v", trace.Algorithms)
-		}
-		if trace.RequestBeforeTransform != "" {
-			t.Fatalf("expected GET trace request plaintext to be empty, got %q", trace.RequestBeforeTransform)
-		}
-	}
-	if !foundGET {
-		t.Fatalf("expected GET trace for /api/captcha, got %#v", traces)
+	if len(traces) != 0 {
+		t.Fatalf("expected protocol hook capture to be disabled, got %#v", traces)
 	}
 }

@@ -3,7 +3,6 @@ package crawl
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -16,7 +15,6 @@ import (
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/security"
 	"github.com/chromedp/chromedp"
 )
@@ -30,6 +28,10 @@ const (
 	defaultCaptureUserAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 	defaultCaptureLanguage      = "zh-CN,zh;q=0.9,en;q=0.8"
 	defaultCapturePlatform      = "MacIntel"
+	// A busy page can complete hundreds of resources together. Reading every
+	// response body over one CDP connection creates an unbounded work burst.
+	maxConcurrentResponseBodyCaptures = 4
+	captureWorkerDrainTimeout         = 8 * time.Second
 )
 
 const stealthBrowserScript = `(function () {
@@ -264,53 +266,14 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 
 	linkSet := make(map[string]bool)
 	apiRecordSet := make(map[string]bool)
-	protocolTraceIndex := make(map[string]int)
-	frontendRouteIndex := make(map[string]int)
 	requestMap := make(map[network.RequestID]*NetworkRecord)
 	finalizedRequest := make(map[network.RequestID]bool)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	responseBodySlots := make(chan struct{}, maxConcurrentResponseBodyCaptures)
 
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch ev := ev.(type) {
-		case *runtime.EventBindingCalled:
-			if ev.Name != protocolHookBindingName {
-				return
-			}
-
-			var payload struct {
-				Kind string `json:"kind"`
-				ProtocolTraceRecord
-				Path         string    `json:"path"`
-				Name         string    `json:"name,omitempty"`
-				SourceKind   string    `json:"source_kind,omitempty"`
-				Source       string    `json:"source,omitempty"`
-				PageURL      string    `json:"page_url,omitempty"`
-				DiscoveredAt time.Time `json:"discovered_at"`
-			}
-			if err := json.Unmarshal([]byte(ev.Payload), &payload); err != nil {
-				return
-			}
-			if payload.Kind != "request-trace" && payload.Kind != "response-trace" && payload.Kind != "trace-update" && payload.Kind != "frontend-route" {
-				return
-			}
-
-			mu.Lock()
-			if payload.Kind == "frontend-route" {
-				upsertFrontendRouteRecord(frontendRouteIndex, &frontendRoutes, FrontendRouteRecord{
-					Path:         payload.Path,
-					Name:         payload.Name,
-					SourceKind:   payload.SourceKind,
-					Source:       payload.Source,
-					PageURL:      payload.PageURL,
-					DiscoveredAt: payload.DiscoveredAt,
-				})
-			} else {
-				upsertProtocolTraceRecord(protocolTraceIndex, &protocolTraces, payload.ProtocolTraceRecord)
-			}
-			emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces, frontendRoutes)
-			mu.Unlock()
-
 		case *network.EventRequestWillBeSent:
 			if !isHTTPURL(ev.Request.URL) {
 				return
@@ -357,9 +320,31 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 			mu.Unlock()
 
 		case *network.EventLoadingFinished:
+			// Only XHR/fetch responses are API evidence. Capturing every static
+			// asset body is both unnecessary and can overload CDP on busy pages.
+			mu.Lock()
+			record, shouldCaptureBody := requestMap[ev.RequestID]
+			shouldCaptureBody = shouldCaptureBody && isAPIResource(record)
+			mu.Unlock()
+			if !shouldCaptureBody {
+				mu.Lock()
+				if record, ok := requestMap[ev.RequestID]; ok && !finalizedRequest[ev.RequestID] {
+					appendAPIRecord(apiRecordSet, &apiRecords, record)
+					finalizedRequest[ev.RequestID] = true
+				}
+				mu.Unlock()
+				return
+			}
+
 			wg.Add(1)
 			go func(requestID network.RequestID) {
 				defer wg.Done()
+				select {
+				case responseBodySlots <- struct{}{}:
+					defer func() { <-responseBodySlots }()
+				case <-ctx.Done():
+					return
+				}
 
 				var (
 					requestBody  string
@@ -382,6 +367,9 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 
 				mu.Lock()
 				defer mu.Unlock()
+				if ctx.Err() != nil {
+					return
+				}
 
 				record, ok := requestMap[requestID]
 				if !ok || finalizedRequest[requestID] {
@@ -421,14 +409,8 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 	})
 
 	actions := []chromedp.Action{
-		runtime.Enable(),
-		runtime.AddBinding(protocolHookBindingName),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			_, err := page.AddScriptToEvaluateOnNewDocument(stealthBrowserScript).Do(ctx)
-			return err
-		}),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			_, err := page.AddScriptToEvaluateOnNewDocument(buildProtocolHookScript(options)).Do(ctx)
 			return err
 		}),
 		security.SetIgnoreCertificateErrors(true),
@@ -461,10 +443,17 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 	}
 
 	err := chromedp.Run(ctx, actions...)
-	wg.Wait()
+	if !waitForCaptureWorkers(&wg, captureWorkerDrainTimeout) {
+		// A stuck CDP response-body read must not hold the whole task forever.
+		// This cancellation also terminates the per-target Chrome session.
+		cancel()
+		fmt.Printf("[警告] %s 响应体采集超过 %s，已停止剩余 CDP 读取并继续任务\n", url, captureWorkerDrainTimeout)
+	}
+	mu.Lock()
 	backfillProtocolTraceResponsesFromAPIRecords(protocolTraces, apiRecords)
 	linkAPIRecordsToProtocolTraces(apiRecords, protocolTraces)
 	emitCaptureUpdateLocked(options.OnUpdate, networks, apiRecords, protocolTraces, frontendRoutes)
+	mu.Unlock()
 
 	if err != nil {
 		if isExpectedCaptureCancellation(err) {
@@ -476,6 +465,21 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 	}
 	fmt.Printf("[信息] %s 成功捕获 %d 个网络请求，提取 %d 条接口记录、%d 条协议轨迹、%d 条前端路由\n", url, len(networks), len(apiRecords), len(protocolTraces), len(frontendRoutes))
 	return networks, apiRecords, protocolTraces, frontendRoutes
+}
+
+func waitForCaptureWorkers(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func isExpectedCaptureCancellation(err error) bool {

@@ -25,7 +25,6 @@ import {
   decideCollaborativeAction,
   executeCollaborativeAction,
   fetchCollaborativeSession,
-  runtimeDecryptCollaborativeResult,
   stageLabel,
   streamCollaborativeSession,
   validateCollaborativeTarget,
@@ -36,7 +35,6 @@ import type {
   EndpointClue,
   PendingRiskAction,
   RequestBlueprint,
-  RuntimeDecryptResult,
   TestResult,
 } from '@/types/collaborativeTesting';
 
@@ -90,15 +88,10 @@ export default function CollaborativeTestingPage() {
   const [approvalAction, setApprovalAction] = useState<PendingRiskAction>();
   const [executionAction, setExecutionAction] = useState<PendingRiskAction>();
   const [attachments, setAttachments] = useState<UploadFile[]>([]);
-  const [decryption, setDecryption] = useState<{
-    route: string;
-    result: RuntimeDecryptResult;
-  }>();
   const [expandedEvidence, setExpandedEvidence] = useState({
     endpointClues: false,
     testRecords: false,
   });
-  const [decryptingResultId, setDecryptingResultId] = useState('');
   const attachmentRef = useRef<{
     select: (options?: { accept?: string; multiple?: boolean }) => void;
     upload: (file: File) => void;
@@ -192,25 +185,6 @@ export default function CollaborativeTestingPage() {
       );
     } finally {
       setStarting(false);
-    }
-  };
-
-  const decryptResult = async (result: TestResult) => {
-    if (!session) return;
-    setDecryptingResultId(result.id);
-    try {
-      setDecryption({
-        route: result.route,
-        result: await runtimeDecryptCollaborativeResult(session.id, result.id),
-      });
-    } catch (nextError) {
-      message.error(
-        nextError instanceof Error
-          ? nextError.message
-          : '当前响应没有可用的运行时解密材料',
-      );
-    } finally {
-      setDecryptingResultId('');
     }
   };
 
@@ -309,25 +283,12 @@ export default function CollaborativeTestingPage() {
                     {result.statusCode ? (
                       <Tag color="green">HTTP {result.statusCode}</Tag>
                     ) : null}
-                    {result.hasProtocolTrace ? (
-                      <Tag color="purple">可运行时解密</Tag>
-                    ) : null}
                     <Typography.Text strong>{result.route}</Typography.Text>
                   </Space>
                   <div className={styles.resultSummary}>
                     <Typography.Text type="secondary">
                       {result.summary}
                     </Typography.Text>
-                    {result.hasProtocolTrace ? (
-                      <Button
-                        type="link"
-                        size="small"
-                        loading={decryptingResultId === result.id}
-                        onClick={() => void decryptResult(result)}
-                      >
-                        运行时解密
-                      </Button>
-                    ) : null}
                   </div>
                 </div>
               </List.Item>
@@ -870,24 +831,6 @@ export default function CollaborativeTestingPage() {
         </Form>
       </Modal>
 
-      <Modal
-        title={`运行时解密 · ${decryption?.route || ''}`}
-        open={Boolean(decryption)}
-        footer={null}
-        onCancel={() => setDecryption(undefined)}
-      >
-        {decryption ? (
-          <div className={styles.drawerBody}>
-            <Typography.Text type="secondary">
-              {decryption.result.detail ||
-                '已在受控浏览器上下文中执行页面解密逻辑。'}
-            </Typography.Text>
-            <Typography.Paragraph className={styles.mono} copyable>
-              {decryption.result.plaintext}
-            </Typography.Paragraph>
-          </div>
-        ) : null}
-      </Modal>
     </div>
   );
 }
