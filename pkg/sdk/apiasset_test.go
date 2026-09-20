@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/projectdiscovery/katana/pkg/apicontext"
+	"github.com/qiwentaidi/katana/pkg/apicontext"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 )
 

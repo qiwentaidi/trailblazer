@@ -18,11 +18,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/projectdiscovery/katana/pkg/apiaudit"
-	"github.com/projectdiscovery/katana/pkg/apicontext"
-	"github.com/projectdiscovery/katana/pkg/engine/hybrid"
-	"github.com/projectdiscovery/katana/pkg/output"
-	"github.com/projectdiscovery/katana/pkg/types"
+	"github.com/qiwentaidi/katana/pkg/apiaudit"
+	"github.com/qiwentaidi/katana/pkg/apicontext"
+	"github.com/qiwentaidi/katana/pkg/engine/hybrid"
+	"github.com/qiwentaidi/katana/pkg/output"
+	"github.com/qiwentaidi/katana/pkg/types"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 )

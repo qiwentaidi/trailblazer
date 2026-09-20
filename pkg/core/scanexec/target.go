@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/projectdiscovery/katana/pkg/apiaudit"
-	"github.com/projectdiscovery/katana/pkg/apicontext"
+	"github.com/qiwentaidi/katana/pkg/apiaudit"
+	"github.com/qiwentaidi/katana/pkg/apicontext"
 	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
 )

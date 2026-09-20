@@ -19,8 +19,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-replace github.com/projectdiscovery/katana => github.com/qiwentaidi/katana v0.1.0-trailblazer.1
-
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
@@ -174,7 +172,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
-	github.com/projectdiscovery/katana v1.3.2
+	github.com/qiwentaidi/katana v0.1.0-trailblazer.2
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
