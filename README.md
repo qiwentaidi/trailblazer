@@ -154,7 +154,7 @@ mindmap
       $.ajax 和 jQuery.ajax
       uni.request
       postRequest
-      Object(wrapper)({url,type,body})
+      封装调用 Object wrapper（url、type、body）
       通用 get/post/put/delete/patch 封装
     参数来源
       path
