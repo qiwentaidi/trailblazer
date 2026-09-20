@@ -4,7 +4,6 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
-	"github.com/qiwentaidi/trailblazer/pkg/core/protocoltool"
 	"github.com/qiwentaidi/trailblazer/pkg/core/scanexec"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	"os"
@@ -17,6 +16,9 @@ func TestNewScanOptionsEnablesVulnDetectionByDefault(t *testing.T) {
 
 	if !options.VulnDetection.Enabled {
 		t.Fatalf("expected vuln detection to be enabled by default")
+	}
+	if !options.VulnDetection.Authorization.Enabled {
+		t.Fatalf("expected authorization comparison to be enabled by default")
 	}
 }
 
@@ -583,49 +585,6 @@ func TestPreferAbsoluteAPIRootsDropsRelativeDuplicate(t *testing.T) {
 		if root == "/api/" {
 			t.Fatalf("expected relative api root duplicate to be removed, got %#v", roots)
 		}
-	}
-}
-
-func TestDecryptProtocolTraceUsesStoredResponsePlaintext(t *testing.T) {
-	trace := ProtocolTrace{
-		TraceID: "trace-1",
-		SessionMaterials: map[string]string{
-			"sm4_key_hex":                "0123456789abcdeffedcba9876543210",
-			"latest_response_ciphertext": "abcdef",
-			"latest_response_plaintext":  "{\"code\":0,\"message\":\"ok\"}",
-		},
-	}
-
-	result, err := DecryptProtocolTrace(trace, "", "abcdef")
-	if err != nil {
-		t.Fatalf("expected decrypt to succeed, got error: %v", err)
-	}
-	if result.Plaintext != "{\"code\":0,\"message\":\"ok\"}" {
-		t.Fatalf("expected plaintext to come from stored response plaintext, got %q", result.Plaintext)
-	}
-}
-
-func TestDecryptProtocolTraceFallsBackToSM4(t *testing.T) {
-	keyHex := "0123456789abcdeffedcba9876543210"
-	plaintext := "{\"title\":\"song\"}"
-	ciphertext, err := protocoltool.EncryptSM4Hex(plaintext, keyHex)
-	if err != nil {
-		t.Fatalf("expected test ciphertext to be created, got error: %v", err)
-	}
-
-	trace := ProtocolTrace{
-		TraceID: "trace-2",
-		SessionMaterials: map[string]string{
-			"sm4_key_hex": keyHex,
-		},
-	}
-
-	result, err := DecryptProtocolTrace(trace, "", ciphertext)
-	if err != nil {
-		t.Fatalf("expected decrypt to succeed, got error: %v", err)
-	}
-	if result.Plaintext != plaintext {
-		t.Fatalf("expected plaintext %q, got %q", plaintext, result.Plaintext)
 	}
 }
 

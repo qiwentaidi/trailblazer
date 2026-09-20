@@ -9,13 +9,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 )
 
+const (
+	maxRequestBlueprintSourceSize = 128 * 1024
+	maxRequestBlueprintSliceSize  = 48 * 1024
+	maxRequestBlueprintSlices     = 64
+)
+
 type RequestBlueprintSource struct {
-	File    string `json:"file,omitempty"`
-	Snippet string `json:"snippet,omitempty"`
+	File        string `json:"file,omitempty"`
+	Snippet     string `json:"snippet,omitempty"`
+	StartOffset int    `json:"startOffset,omitempty"`
+	EndOffset   int    `json:"endOffset,omitempty"`
 }
 
 type RequestBlueprintParam struct {
@@ -44,24 +53,26 @@ type RequestBlueprintInterceptor struct {
 }
 
 type RequestBlueprint struct {
-	ID                    string                        `json:"id"`
-	Path                  string                        `json:"path"`
-	Method                string                        `json:"method"`
-	Client                string                        `json:"client,omitempty"`
-	BaseURL               string                        `json:"baseUrl,omitempty"`
-	Params                []RequestBlueprintParam       `json:"params,omitempty"`
-	Headers               []RequestBlueprintHeader      `json:"headers,omitempty"`
-	PayloadCarrier        string                        `json:"payloadCarrier,omitempty"`
-	PayloadFormat         string                        `json:"payloadFormat,omitempty"`
-	PayloadPreview        string                        `json:"payloadPreview,omitempty"`
-	Interceptors          []RequestBlueprintInterceptor `json:"interceptors,omitempty"`
-	Context               []string                      `json:"context,omitempty"`
-	UnresolvedSymbols     []string                      `json:"unresolvedSymbols,omitempty"`
-	Source                RequestBlueprintSource        `json:"source,omitempty"`
-	Confidence            string                        `json:"confidence"`
-	ConfidenceReason      string                        `json:"confidenceReason,omitempty"`
-	ExtractionSource      string                        `json:"extractionSource"`
-	CompatibleAPIRequests int                           `json:"compatibleApiRequests,omitempty"`
+	ID                     string                        `json:"id"`
+	Path                   string                        `json:"path"`
+	Method                 string                        `json:"method"`
+	Client                 string                        `json:"client,omitempty"`
+	BaseURL                string                        `json:"baseUrl,omitempty"`
+	Params                 []RequestBlueprintParam       `json:"params,omitempty"`
+	Headers                []RequestBlueprintHeader      `json:"headers,omitempty"`
+	PayloadCarrier         string                        `json:"payloadCarrier,omitempty"`
+	PayloadFormat          string                        `json:"payloadFormat,omitempty"`
+	PayloadPreview         string                        `json:"payloadPreview,omitempty"`
+	Interceptors           []RequestBlueprintInterceptor `json:"interceptors,omitempty"`
+	Context                []string                      `json:"context,omitempty"`
+	UnresolvedSymbols      []string                      `json:"unresolvedSymbols,omitempty"`
+	Source                 RequestBlueprintSource        `json:"source,omitempty"`
+	Confidence             string                        `json:"confidence"`
+	ConfidenceReason       string                        `json:"confidenceReason,omitempty"`
+	ExtractionSource       string                        `json:"extractionSource"`
+	AnalysisStage          string                        `json:"analysisStage,omitempty"`
+	AnalysisBudgetExceeded bool                          `json:"analysisBudgetExceeded,omitempty"`
+	CompatibleAPIRequests  int                           `json:"compatibleApiRequests,omitempty"`
 }
 
 type axiosBlueprintContext struct {
@@ -92,111 +103,111 @@ type jsRequestSymbolIndex struct {
 	callsites   map[string][]callExpression
 }
 
-// BuildJSRequestBlueprints extracts request construction blueprints from saved
-// JavaScript resources. It is intentionally read-only: callers can compare
+// RequestBlueprintAnalysis is the full static analysis result: deeply
+// analyzed request blueprints plus candidate evidence for anchors that fell
+// outside the analysis budget.
+type RequestBlueprintAnalysis struct {
+	Blueprints       []RequestBlueprint       `json:"blueprints"`
+	AnchorCandidates []RequestAnchorCandidate `json:"anchorCandidates,omitempty"`
+}
+
+// AnalyzeJSRequestBlueprints extracts request construction blueprints from
+// saved JavaScript resources and preserves budget-dropped request anchors as
+// candidate evidence. It is intentionally read-only: callers can compare
 // request construction coverage without creating or modifying vulnerability
 // findings.
-func BuildJSRequestBlueprints(jsResources []database.JSResource) []RequestBlueprint {
+func AnalyzeJSRequestBlueprints(jsResources []database.JSResource) RequestBlueprintAnalysis {
 	blueprints := make([]RequestBlueprint, 0, len(jsResources)*4)
-	resolverContent := buildRequestBlueprintResolverContent(jsResources)
+	candidates := make([]RequestAnchorCandidate, 0, 32)
+	moduleResolver := newJSModuleResolver(jsResources)
 	for _, resource := range jsResources {
 		content := strings.TrimSpace(resource.Content)
 		if content == "" {
 			continue
 		}
-		if !shouldAnalyzeJSRequestBlueprintContent(resource.URL, content) {
-			continue
-		}
 
-		axiosContexts := extractAxiosBlueprintContexts(resource.URL, content)
-		endpoints := extractHTTPContextEndpointsWithScope(resource.URL, content, resolverContent)
-		symbolIndex := buildJSRequestSymbolIndex(buildRequestBlueprintSymbolScope(content, resolverContent), endpoints)
-		for _, endpoint := range endpoints {
-			blueprint := requestBlueprintFromStaticEndpoint(endpoint, axiosContexts, symbolIndex)
-			if strings.TrimSpace(blueprint.Path) == "" || strings.TrimSpace(blueprint.Method) == "" {
-				continue
+		inputs, resourceCandidates := buildRequestBlueprintAnalysisInputs(resource.URL, content)
+		candidates = append(candidates, resourceCandidates...)
+		resourceDeadline := time.Now().Add(maxRequestBlueprintResourceAnalysisTime)
+		resourceBlueprints := make([]RequestBlueprint, 0, 16)
+		timeoutDropped := 0
+		for inputIndex, input := range inputs {
+			// Per-resource time budget: if the extractor set overruns, the
+			// remaining blocks become candidate evidence instead of silently
+			// disappearing.
+			if inputIndex > 0 && input.Stage == "anchor-slice" && time.Now().After(resourceDeadline) {
+				remainingAnchors := make([]requestBlueprintAnchor, 0, 32)
+				for _, remaining := range inputs[inputIndex:] {
+					timeoutDropped += len(remaining.Anchors)
+					remainingAnchors = append(remainingAnchors, remaining.Anchors...)
+				}
+				candidates = append(candidates, buildRequestAnchorCandidates(resource.URL, content, remainingAnchors)...)
+				break
 			}
-			blueprints = append(blueprints, blueprint)
+
+			// The extractor scope is the evidence-linked per-file corpus from
+			// the module resolver (webpack require edges, ESM imports, source
+			// maps, shared global scripts) instead of the previous whole-corpus
+			// concatenation. Large-bundle blocks stay local-only.
+			inputResolverContent := ""
+			if input.Stage != "anchor-slice" {
+				inputResolverContent = moduleResolver.scopedResolverContent(resource.URL, maxScopedResolverBytes)
+			}
+			axiosContexts := extractAxiosBlueprintContexts(resource.URL, input.Content)
+			endpoints := extractHTTPContextEndpointsWithScope(resource.URL, input.Content, inputResolverContent)
+			// Symbol resolution is local-first: one lexical index over the
+			// block, then on-demand cross-module queries for symbols that
+			// stay unresolved. The previous whole-corpus resolverContent
+			// concatenation no longer feeds symbol resolution, which removes
+			// cross-file false associations.
+			sourceIndex := buildJSSourceIndex(input.Content)
+			symbolIndex := buildJSRequestSymbolIndex(input.Content, endpoints, sourceIndex)
+			enrichRequestBlueprintSymbolsFromModules(&symbolIndex, moduleResolver, resource.URL, input.StartOffset, collectRequestBlueprintSymbolCandidates(endpoints))
+			for _, endpoint := range endpoints {
+				blueprint := requestBlueprintFromStaticEndpoint(endpoint, axiosContexts, symbolIndex)
+				if strings.TrimSpace(blueprint.Path) == "" || strings.TrimSpace(blueprint.Method) == "" {
+					continue
+				}
+				blueprint = applyRequestBlueprintAnalysisMetadata(blueprint, input)
+				resourceBlueprints = append(resourceBlueprints, blueprint)
+			}
 		}
+		if timeoutDropped > 0 {
+			note := "静态分析预算: 时间预算耗尽, " + strconv.Itoa(timeoutDropped) + " 个请求锚点转为候选证据(未深挖)"
+			for index := range resourceBlueprints {
+				resourceBlueprints[index].AnalysisBudgetExceeded = true
+				resourceBlueprints[index].Context = appendUniqueStrings(resourceBlueprints[index].Context, note)
+			}
+		}
+		blueprints = append(blueprints, resourceBlueprints...)
 	}
-	return dedupeRequestBlueprints(blueprints)
+	if len(candidates) > maxRequestBlueprintAnchorCandidates {
+		candidates = candidates[:maxRequestBlueprintAnchorCandidates]
+	}
+	return RequestBlueprintAnalysis{
+		Blueprints:       dedupeRequestBlueprints(blueprints),
+		AnchorCandidates: candidates,
+	}
 }
 
-func buildRequestBlueprintSymbolScope(content, resolverContent string) string {
-	content = strings.TrimSpace(content)
-	resolverContent = strings.TrimSpace(resolverContent)
-	if resolverContent == "" || resolverContent == content {
-		return content
-	}
-	if content == "" {
-		return resolverContent
-	}
-	return content + "\n" + resolverContent
-}
-
-func buildRequestBlueprintResolverContent(jsResources []database.JSResource) string {
-	if len(jsResources) == 0 {
-		return ""
-	}
-	const maxResolverContentBytes = 900 * 1024
-	var builder strings.Builder
-	for _, resource := range jsResources {
-		content := strings.TrimSpace(resource.Content)
-		if content == "" {
-			continue
-		}
-		if !shouldIncludeJSRequestResolverContent(resource.URL, content) {
-			continue
-		}
-		if builder.Len()+len(content) > maxResolverContentBytes {
-			continue
-		}
-		if builder.Len() > 0 {
-			builder.WriteByte('\n')
-		}
-		builder.WriteString(content)
-	}
-	return builder.String()
+// BuildJSRequestBlueprints returns only the deeply analyzed blueprints.
+// Callers that also need budget-dropped anchor evidence should use
+// AnalyzeJSRequestBlueprints.
+func BuildJSRequestBlueprints(jsResources []database.JSResource) []RequestBlueprint {
+	return AnalyzeJSRequestBlueprints(jsResources).Blueprints
 }
 
 func shouldAnalyzeJSRequestBlueprintContent(resourceURL, content string) bool {
 	if !containsJSRequestConstructionMarker(content) {
 		return false
 	}
-	if len(content) <= 700*1024 {
+	if len(content) <= maxRequestBlueprintSourceSize {
 		return true
 	}
-	if isLikelyLargeSharedJSBundle(resourceURL) {
-		return false
-	}
-	lowerURL := strings.ToLower(strings.TrimSpace(resourceURL))
-	if strings.Contains(lowerURL, "vendor") || strings.Contains(lowerURL, "common") {
-		return containsBusinessRequestPathMarker(content)
-	}
-	return true
-}
-
-func shouldIncludeJSRequestResolverContent(resourceURL, content string) bool {
-	if len(content) <= 700*1024 {
-		return containsJSRequestConstructionMarker(content) || strings.Contains(content, ".d(") || containsBusinessRequestPathMarker(content)
-	}
-	if isLikelyLargeSharedJSBundle(resourceURL) {
-		return false
-	}
-	lowerURL := strings.ToLower(strings.TrimSpace(resourceURL))
-	if strings.Contains(lowerURL, "vendor") || strings.Contains(lowerURL, "common") {
-		return containsBusinessRequestPathMarker(content)
-	}
-	return containsBusinessRequestPathMarker(content)
-}
-
-func isLikelyLargeSharedJSBundle(resourceURL string) bool {
-	name := strings.ToLower(strings.TrimSpace(resourceURL))
-	if slash := strings.LastIndex(name, "/"); slash >= 0 {
-		name = name[slash+1:]
-	}
-	return strings.HasPrefix(name, "vendor.") || strings.HasPrefix(name, "common.") ||
-		strings.Contains(name, "vendor.") || strings.Contains(name, "common.")
+	// AST-like extraction on a large minified application bundle can become
+	// effectively unbounded. Preserve the JS resource as evidence, but skip
+	// deep blueprint extraction; callers still receive runtime API contexts.
+	return false
 }
 
 func containsJSRequestConstructionMarker(content string) bool {
@@ -204,22 +215,6 @@ func containsJSRequestConstructionMarker(content string) bool {
 		"axios", "fetch(", "$.ajax", "jQuery.ajax", "uni.request", "postRequest",
 		"Object(", "url:", "url :", "method:", "type:",
 		".get(", ".post(", ".put(", ".delete(", ".patch(",
-	} {
-		if strings.Contains(content, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsBusinessRequestPathMarker(content string) bool {
-	lowerContent := strings.ToLower(content)
-	if strings.Contains(lowerContent, "://") && strings.Contains(lowerContent, "/api") {
-		return true
-	}
-	for _, marker := range []string{
-		`"/api`, `'/api`, "`/api", `"/admin`, `'/admin`, `"/user`, `'/user`,
-		`"/taxi-saas`, `'/taxi-saas`, `"/ccat`, `'/ccat`, `url:`, "url :",
 	} {
 		if strings.Contains(content, marker) {
 			return true
@@ -291,7 +286,16 @@ func enrichRequestBlueprintFromCallsites(blueprint RequestBlueprint, symbols jsR
 	if strings.TrimSpace(blueprint.PayloadCarrier) == "" {
 		blueprint.PayloadCarrier = "body"
 	}
-	if format := strings.ToLower(strings.TrimSpace(blueprint.PayloadFormat)); format == "" || format == "unknown" {
+	hasFormData := false
+	for _, param := range inferred {
+		if param.Source == "callsite-formdata" {
+			hasFormData = true
+			break
+		}
+	}
+	if hasFormData {
+		blueprint.PayloadFormat = "form-data"
+	} else if format := strings.ToLower(strings.TrimSpace(blueprint.PayloadFormat)); format == "" || format == "unknown" {
 		blueprint.PayloadFormat = "json"
 		for index := range blueprint.Params {
 			if blueprint.Params[index].Location == "body" {
@@ -342,10 +346,8 @@ func inferRequestBlueprintParamsFromFunctionCallsites(content string, matches []
 		if len(args) == 0 {
 			continue
 		}
-		fields := extractTopLevelObjectFields(resolveStaticArgumentExpression(content, args[0]))
-		if len(fields) == 0 {
-			continue
-		}
+		resolved := resolveStaticArgumentExpression(content, args[0])
+		fields := extractTopLevelObjectFields(resolved)
 		for name, expr := range fields {
 			if strings.TrimSpace(name) == "" {
 				continue
@@ -361,6 +363,58 @@ func inferRequestBlueprintParamsFromFunctionCallsites(content string, matches []
 			}
 			param = resolveRequestBlueprintParam(param, nil, jsRequestSymbolIndex{content: content, definitions: map[string]jsRequestSymbolDefinition{}})
 			params = appendRequestBlueprintParam(params, param)
+		}
+		// Parser pass: reliably handles nested objects, template strings,
+		// spread, JSON.stringify, and URLSearchParams forms that the flat
+		// scanner misses. Parser fields fill gaps the legacy pass left.
+		spreadResolve := func(name string) (*jsExpr, bool) {
+			expr, ok := findJSAssignmentExpression(content, name)
+			if !ok {
+				return nil, false
+			}
+			parsed := parseJSExpression(expr)
+			if parsed == nil || parsed.Kind != jsExprObject {
+				return nil, false
+			}
+			return parsed, true
+		}
+		for _, field := range jsFieldsFromExpression(parseJSExpression(resolved), spreadResolve, 0) {
+			exprText := ""
+			if field.Expr != nil && field.Expr.End > field.Expr.Start && field.Expr.End <= len(resolved) {
+				exprText = strings.TrimSpace(resolved[field.Expr.Start:field.Expr.End])
+			}
+			param := RequestBlueprintParam{
+				Name:         field.Name,
+				Location:     requestBlueprintParamLocation("body", carrier, format),
+				Source:       "callsite-body-parsed",
+				Value:        field.Value,
+				ValueExpr:    exprText,
+				Resolved:     field.Value != "",
+				ResolvedFrom: "callsite-parsed-field:" + dataVariable,
+				Confidence:   "high",
+			}
+			if field.Spread {
+				param.ResolvedFrom = "callsite-spread-field:" + dataVariable
+			}
+			params = appendRequestBlueprintParam(params, param)
+		}
+		// FormData statement chains: when the callsite argument is a variable
+		// assigned `new FormData()`, recover its append/set fields from the
+		// local scope.
+		argName := strings.TrimSpace(args[0])
+		if identifierPattern.MatchString(argName) {
+			for _, field := range extractFormDataAppendFields(content, argName) {
+				params = appendRequestBlueprintParam(params, RequestBlueprintParam{
+					Name:         field.Name,
+					Location:     "form",
+					Source:       "callsite-formdata",
+					Value:        field.Value,
+					ValueExpr:    field.RawExpr,
+					Resolved:     field.Value != "",
+					ResolvedFrom: "callsite-formdata:" + argName,
+					Confidence:   "high",
+				})
+			}
 		}
 	}
 	sort.SliceStable(params, func(i, j int) bool {
@@ -516,9 +570,22 @@ func resolveRequestBlueprintParam(param RequestBlueprintParam, functionParams ma
 		return param
 	}
 	if strings.HasPrefix(expr, "`") && strings.HasSuffix(expr, "`") {
-		param.Value = strings.Trim(expr, "`")
-		param.Resolved = true
-		param.ResolvedFrom = "literal"
+		// Template strings are evaluated through the local expression parser:
+		// fully static templates (including `${constant}` interpolation and
+		// concatenation) resolve; dynamic ones stay unresolved templates
+		// instead of leaking `${...}` into the value.
+		resolveSymbol := func(name string) (string, bool) {
+			if definition, ok := symbols.definitions[name]; ok && definition.Value != "" {
+				return definition.Value, true
+			}
+			return "", false
+		}
+		if value, ok := evalJSExprStatic(parseJSExpression(expr), resolveSymbol); ok {
+			param.Value = value
+			param.Resolved = true
+			param.ResolvedFrom = "literal"
+			return param
+		}
 		return param
 	}
 	switch strings.ToLower(expr) {
@@ -726,6 +793,10 @@ func mergeRequestBlueprint(base, extra RequestBlueprint) RequestBlueprint {
 	if base.PayloadFormat == "" {
 		base.PayloadFormat = extra.PayloadFormat
 	}
+	if base.AnalysisStage == "" {
+		base.AnalysisStage = extra.AnalysisStage
+	}
+	base.AnalysisBudgetExceeded = base.AnalysisBudgetExceeded || extra.AnalysisBudgetExceeded
 	base.CompatibleAPIRequests += extra.CompatibleAPIRequests
 	base.UnresolvedSymbols = mergeRequestBlueprintUnresolvedSymbols(base.UnresolvedSymbols, extra.UnresolvedSymbols)
 	base.Confidence, base.ConfidenceReason = assessRequestBlueprintConfidence(base)
@@ -772,14 +843,14 @@ func appendRequestBlueprintParam(params []RequestBlueprintParam, param RequestBl
 	return append(params, param)
 }
 
-func buildJSRequestSymbolIndex(content string, endpoints []StaticProtocolEndpoint) jsRequestSymbolIndex {
+func buildJSRequestSymbolIndex(content string, endpoints []StaticProtocolEndpoint, sourceIndex *jsSourceIndex) jsRequestSymbolIndex {
 	index := jsRequestSymbolIndex{
 		content:     content,
 		definitions: make(map[string]jsRequestSymbolDefinition),
 		callsites:   make(map[string][]callExpression),
 	}
 	for _, name := range collectRequestBlueprintSymbolCandidates(endpoints) {
-		expr, ok := findJSAssignmentExpression(content, name)
+		expr, ok := findJSAssignmentExpressionWithIndex(sourceIndex, content, name)
 		if !ok {
 			continue
 		}
@@ -803,7 +874,7 @@ func buildJSRequestSymbolIndex(content string, endpoints []StaticProtocolEndpoin
 		index.definitions[name] = definition
 	}
 	for _, name := range collectRequestBlueprintCallsiteFunctionCandidates(endpoints) {
-		index.callsites[name] = findCallExpressions(content, name)
+		index.callsites[name] = findCallExpressionsWithIndex(sourceIndex, content, name)
 	}
 	return index
 }

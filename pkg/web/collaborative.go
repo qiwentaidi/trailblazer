@@ -20,7 +20,6 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
-	"github.com/qiwentaidi/trailblazer/pkg/core/protocoltool"
 	"gopkg.in/yaml.v3"
 )
 
@@ -269,44 +268,6 @@ func streamCollaborativeTest(c *gin.Context) {
 			return
 		}
 	}
-}
-
-func runtimeDecryptCollaborativeTestResult(c *gin.Context) {
-	session, err := loadCollaborativeSession(c.Param("sessionId"))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "collaborative session not found"})
-		return
-	}
-	for _, result := range session.TestResults {
-		if result.ID != c.Param("resultId") {
-			continue
-		}
-		if !result.HasProtocolTrace || strings.TrimSpace(result.TraceID) == "" {
-			c.JSON(http.StatusConflict, gin.H{"error": "this result has no browser protocol trace; server replay ciphertext cannot be runtime decrypted"})
-			return
-		}
-		trace, traceErr := database.QueryProtocolTraceByTaskAndTraceID(session.TaskID, result.TraceID)
-		if traceErr != nil || trace == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "protocol trace not found"})
-			return
-		}
-		ciphertext := ""
-		apiRecords, _ := database.QueryAPIResourcesByTaskID(session.TaskID)
-		for _, record := range apiRecords {
-			if record.TraceID == result.TraceID {
-				ciphertext = record.ResponseBody
-				break
-			}
-		}
-		decrypted, decryptErr := protocoltool.RuntimeDecryptWithTrace(trace, ciphertext)
-		if decryptErr != nil {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "runtime decrypt unavailable", "detail": decryptErr.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"data": decrypted})
-		return
-	}
-	c.JSON(http.StatusNotFound, gin.H{"error": "test result not found"})
 }
 
 func decideCollaborativeAction(c *gin.Context) {

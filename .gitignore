@@ -55,6 +55,16 @@ prfm-route-test
 urls.txt
 sourceMap/
 
+# Local validation fixture and output (contains target-specific traffic/data)
+/verify-target/
+/verify-target-openapi.json
+
+# Local planning note; promote a cleaned-up version to docs/ if needed.
+/katana-架构设想.txt
+
+# Independent upstream checkout; commit changes from its own repository.
+/katana/
+
 # Generated reports and example outputs
 example/**/report.html
 example/**/*_scan_result.json

@@ -39,19 +39,28 @@ type LogConfig struct {
 }
 
 type VulnDetection struct {
-	Enabled      bool               `yaml:"enabled" json:"enabled"`
-	SQLInjection SQLInjectionConfig `yaml:"sql-injection" json:"sqlInjection"`
-	LFI          LFIConfig          `yaml:"lfi" json:"lfi"`
-	SSRF         SSRFConfig         `yaml:"ssrf" json:"ssrf"`
-	Redirect     RedirectConfig     `yaml:"redirect" json:"redirect"`
-	XSS          XSSConfig          `yaml:"xss" json:"xss"`
-	Upload       UploadConfig       `yaml:"upload" json:"upload"`
+	Enabled       bool                `yaml:"enabled" json:"enabled"`
+	Authorization AuthorizationConfig `yaml:"authorization" json:"authorization"`
+	SQLInjection  SQLInjectionConfig  `yaml:"sql-injection" json:"sqlInjection"`
+	LFI           LFIConfig           `yaml:"lfi" json:"lfi"`
+	SSRF          SSRFConfig          `yaml:"ssrf" json:"ssrf"`
+	Redirect      RedirectConfig      `yaml:"redirect" json:"redirect"`
+	XSS           XSSConfig           `yaml:"xss" json:"xss"`
+	Upload        UploadConfig        `yaml:"upload" json:"upload"`
+}
+
+// AuthorizationConfig controls the authenticated-baseline versus anonymous
+// request experiment. It intentionally has no low-privilege/IDOR mode: that
+// requires additional accounts and must be modelled explicitly by callers.
+type AuthorizationConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 func (v *VulnDetection) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	type rawVulnDetection VulnDetection
 	aux := rawVulnDetection{
-		Enabled: true,
+		Enabled:       true,
+		Authorization: AuthorizationConfig{Enabled: true},
 	}
 	if err := unmarshal(&aux); err != nil {
 		return err
@@ -61,10 +70,14 @@ func (v *VulnDetection) UnmarshalYAML(unmarshal func(interface{}) error) error {
 }
 
 type SQLInjectionConfig struct {
-	Enabled       bool     `yaml:"enabled" json:"enabled"`
-	Payloads      []string `yaml:"payloads" json:"payloads"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Deprecated: payload 已内置（boolean/time-based 探测对 + error-based
+	// 特征库），该字段仅作为追加项保留，后续版本将移除。
+	Payloads []string `yaml:"payloads" json:"payloads"`
+	// Deprecated: 同上，匹配关键词已内置。
 	MatchKeywords []string `yaml:"match-keywords" json:"matchKeywords"`
 	// Rules: 可选。支持为每个特定 payload 配置期望行为（响应体包含等）
+	// Deprecated: 高级自定义入口，常规使用无需配置。
 	Rules []SQLiPayloadRule `yaml:"rules" json:"rules"`
 }
 
@@ -79,9 +92,11 @@ type SQLiPayloadRule struct {
 }
 
 type LFIConfig struct {
-	Enabled       bool             `yaml:"enabled" json:"enabled"`
-	ParamKeywords []string         `yaml:"param-keywords" json:"paramKeywords"`
-	Payloads      []string         `yaml:"payloads" json:"payloads"`            // 兼容旧配置
+	Enabled       bool     `yaml:"enabled" json:"enabled"`
+	ParamKeywords []string `yaml:"param-keywords" json:"paramKeywords"`
+	// Deprecated: payload 已内置，该字段仅作为追加项保留。
+	Payloads []string `yaml:"payloads" json:"payloads"` // 兼容旧配置
+	// Deprecated: 匹配关键词已内置。
 	MatchKeywords []string         `yaml:"match-keywords" json:"matchKeywords"` // 兼容旧配置
 	Rules         []LFIPayloadRule `yaml:"rules" json:"rules"`                  // 规则配置（优先使用）
 }
@@ -103,6 +118,9 @@ type LFIPayloadRule struct {
 type SSRFConfig struct {
 	Enabled       bool     `yaml:"enabled" json:"enabled"`
 	ParamKeywords []string `yaml:"param-keywords" json:"paramKeywords"`
+	// CallbackURL 可选的回连地址（如自建 OOB 服务或 interactsh 域名）。
+	// 设置后会额外派发带外探测，命中需在回连服务端确认。
+	CallbackURL string `yaml:"callback-url" json:"callbackUrl"`
 }
 
 type RedirectConfig struct {
@@ -111,8 +129,10 @@ type RedirectConfig struct {
 }
 
 type XSSConfig struct {
-	Enabled       bool             `yaml:"enabled" json:"enabled"`
-	Payloads      []string         `yaml:"payloads" json:"payloads"`            // 兼容旧配置
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Deprecated: payload 已内置，该字段仅作为追加项保留。
+	Payloads []string `yaml:"payloads" json:"payloads"` // 兼容旧配置
+	// Deprecated: 匹配关键词已内置。
 	MatchKeywords []string         `yaml:"match-keywords" json:"matchKeywords"` // 兼容旧配置
 	Rules         []XSSPayloadRule `yaml:"rules" json:"rules"`                  // 规则配置（优先使用）
 }
@@ -141,8 +161,10 @@ type XSSPayloadRule struct {
 type UploadConfig struct {
 	Enabled       bool     `yaml:"enabled" json:"enabled"`
 	ParamKeywords []string `yaml:"param-keywords" json:"paramKeywords"` // URL或参数关键词，用于识别上传接口
-	TestContent   string   `yaml:"test-content" json:"testContent"`     // 测试文件内容
-	TestFileName  string   `yaml:"test-file-name" json:"testFileName"`  // 测试文件名
+	// Deprecated: 测试文件内容将下沉为内置测试文件矩阵（类型/大小/双后缀）。
+	TestContent string `yaml:"test-content" json:"testContent"` // 测试文件内容
+	// Deprecated: 同上，文件名将内置。
+	TestFileName string `yaml:"test-file-name" json:"testFileName"` // 测试文件名
 }
 
 type Elasticsearch struct {

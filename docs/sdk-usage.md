@@ -7,8 +7,9 @@
 - 目标站点扫描
 - 资产提取
 - 风险项提取
-- 未授权等漏洞检测
+- 基于认证基线的未授权访问对照检测
 - 浏览器运行时 API 请求/响应抓取
+- OpenAPI 3.1 接口文档导出
 
 本文档对应当前仓库中的 SDK 实现：
 
@@ -33,7 +34,7 @@ SDK 当前主要导出以下能力：
 当前模块 `go.mod` 要求：
 
 ```go
-go 1.24.0
+go 1.26.0
 ```
 
 ### 3.2 运行环境
@@ -157,6 +158,43 @@ type ScanDataStore interface {
 
 - SDK 现在不会因为没有 ES 而丢失分析所需的运行时上下文
 - 如果你想把 JS 和接口记录改存到 MySQL、PostgreSQL、SQLite 或自定义存储，只需要实现这个接口
+
+### 5.1.2 接口资产、OpenAPI 与授权对照
+
+`PerformScan` 的每个 `TargetResult` 现在都会保留 `APIContexts`：它们来自
+同一次浏览器运行时抓取，按 `method + pathTemplate` 去重合并，且已脱敏。原有的
+`RequestBlueprints` 仍保留静态 JS 参数识别和补全证据。
+
+```go
+result, err := sdk.PerformScan([]string{"https://example.com"}, options)
+if err != nil { panic(err) }
+
+store := sdk.NewAPIStore()
+for _, ctx := range result.Targets[0].APIContexts {
+	store.Add(ctx)
+}
+openapiJSON, err := sdk.ExportOpenAPI(store, "Example observed API")
+if err != nil { panic(err) }
+```
+
+将 `openapiJSON` 交给 Swagger UI、Redoc 或任意 OpenAPI 3.1 工具即可生成接口文档。
+文档中的字段、requiredness 和示例是观测推断。
+
+授权检测由 `options.VulnDetection.Authorization.Enabled` 控制，默认开启。它只会对
+爬取期实际观察到认证证据且带认证响应为 2xx 的接口，发起去除认证材料的匿名变体，
+并比较状态码、内容类型和 JSON 业务字段结构。没有低权限账号时不会猜测或尝试 IDOR。
+每次结论（包括 inconclusive）写入 `TargetResult.AuthorizationChecks`，确认命中的项目
+才会写入漏洞结果。
+
+需要同时取得 JS 资源、静态请求蓝图和运行时接口时，使用 `CrawlAPIAssets`；
+`CrawlAPIContexts` 为兼容接口，只返回可导出 OpenAPI 的 `APIStore`。
+
+```go
+assets, err := sdk.CrawlAPIAssets("https://example.com", &sdk.APICrawlOptions{})
+if err != nil { panic(err) }
+fmt.Println(len(assets.JSResources), len(assets.RequestBlueprints), len(assets.RuntimeRecords))
+openapiJSON, err := sdk.ExportOpenAPI(assets.Store, "Observed API")
+```
 
 ## 5. 最小调用示例
 

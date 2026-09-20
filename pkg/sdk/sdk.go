@@ -30,7 +30,7 @@ type (
 	AuxiliaryCount               = lib.AuxiliaryCount
 	FindingDigest                = lib.FindingDigest
 	VulnerabilityOverview        = lib.VulnerabilityOverview
-	DecryptResult                = lib.DecryptResult
+	AuthorizationCheck           = lib.AuthorizationCheck
 	TraceEvidence                = lib.TraceEvidence
 	TraceVariantSuggestion       = lib.TraceVariantSuggestion
 	ConfigYAML                   = lib.ConfigYAML
@@ -43,6 +43,7 @@ type (
 	XSSConfig                    = lib.XSSConfig
 	XSSPayloadRule               = lib.XSSPayloadRule
 	UploadConfig                 = lib.UploadConfig
+	AuthorizationConfig          = lib.AuthorizationConfig
 	ScanDataStore                = lib.ScanDataStore
 	MemoryScanDataStore          = lib.MemoryScanDataStore
 	JSResource                   = lib.JSResource
@@ -86,7 +87,6 @@ var (
 	AnalyzeProtocolTrace              = lib.AnalyzeProtocolTrace
 	AnalyzeStoredJSProtocolsWithStore = lib.AnalyzeStoredJSProtocolsWithStore
 	BuildJSRequestBlueprints          = lib.BuildJSRequestBlueprints
-	DecryptProtocolTrace              = lib.DecryptProtocolTrace
 	NewCLIVulnCollector               = lib.NewCLIVulnCollector
 	NewSDKVulnCollectorAdapter        = lib.NewSDKVulnCollectorAdapter
 	NewMemoryScanDataStore            = lib.NewMemoryScanDataStore

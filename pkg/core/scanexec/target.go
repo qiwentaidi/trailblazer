@@ -10,6 +10,7 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	weaklogin "github.com/qiwentaidi/trailblazer/pkg/core/vuln/weaklogin"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +23,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/projectdiscovery/katana/pkg/apiaudit"
+	"github.com/projectdiscovery/katana/pkg/apicontext"
 	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
 )
@@ -58,17 +61,28 @@ type AssetInfo struct {
 }
 
 type TargetResult struct {
-	Target            string
-	TreeData          []crawl.ElTreeNode
-	NetworkURLs       []string
-	APIRecords        []crawl.NetworkRecord
-	ProtocolTraces    []crawl.ProtocolTraceRecord
-	JSResources       []database.JSResource
-	RequestBlueprints []crawl.RequestBlueprint
-	StaticHintBundle  crawl.StaticEndpointHintBundle
-	Assets            AssetInfo
-	Fingerprints      []structs.FingerprintResult
-	Vulnerabilities   []database.VulnRecord
+	Target                  string
+	TreeData                []crawl.ElTreeNode
+	NetworkURLs             []string
+	APIRecords              []crawl.NetworkRecord
+	APIContexts             []*apicontext.Context
+	AuthorizationChecks     []AuthorizationCheck
+	ProtocolTraces          []crawl.ProtocolTraceRecord
+	JSResources             []database.JSResource
+	RequestBlueprints       []crawl.RequestBlueprint
+	RequestAnchorCandidates []crawl.RequestAnchorCandidate
+	OperationSpecs          []crawl.OperationSpec
+	StaticHintBundle        crawl.StaticEndpointHintBundle
+	Assets                  AssetInfo
+	Fingerprints            []structs.FingerprintResult
+	Vulnerabilities         []database.VulnRecord
+}
+
+type AuthorizationCheck struct {
+	OperationID string
+	URL         string
+	Method      string
+	Verdict     apiaudit.AuthzVerdict
 }
 
 type vulnSliceCollector struct {
@@ -227,6 +241,7 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	result.NetworkURLs = allNetworkURLs
 	result.TreeData = crawl.BuildElTree(allNetworkURLs)
 	result.APIRecords = mergedAPIRecords
+	result.APIContexts = buildAPIContexts(mergedAPIRecords)
 	result.ProtocolTraces = capturedProtocolTraces
 
 	classified := e.ClassifyLinks(allNetworkURLs, options.BlackDomain)
@@ -234,7 +249,10 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	allJS := mergeJSLinks(targetURL, classified, options.BlackDomain)
 	result.JSResources = fetchStaticHintJSResources(options.TaskID, options.Version, targetURL, allJS, options.BlackDomain)
 	result.StaticHintBundle = crawl.BuildStaticEndpointHintBundle(result.JSResources)
-	result.RequestBlueprints = crawl.BuildJSRequestBlueprints(result.JSResources)
+	blueprintAnalysis := crawl.AnalyzeJSRequestBlueprints(result.JSResources)
+	result.RequestBlueprints = blueprintAnalysis.Blueprints
+	result.RequestAnchorCandidates = blueprintAnalysis.AnchorCandidates
+	result.OperationSpecs = crawl.OperationSpecsFromBlueprints(result.RequestBlueprints, targetURL)
 
 	var aiChecker *crawl.SensitiveInfoChecker
 	if options.OpenAI.Enabled && strings.TrimSpace(options.OpenAI.APIKey) != "" {
@@ -267,6 +285,11 @@ func RunTarget(targetURL string, options Options) (*TargetResult, error) {
 	filteredUnauthorizedTemplates := make(map[string]struct{})
 	aiReviewer := asDenyTemplateReviewer(aiChecker)
 	result.Vulnerabilities = annotateUnauthorizedNoise(result.Vulnerabilities, aiReviewer, filteredUnauthorizedTemplates)
+	if options.VulnDetection.Enabled && options.VulnDetection.Authorization.Enabled {
+		checks, findings := runAuthorizationChecks(options, result.APIContexts)
+		result.AuthorizationChecks = checks
+		result.Vulnerabilities = append(result.Vulnerabilities, findings...)
+	}
 	result.Vulnerabilities = append(result.Vulnerabilities, runWeakLoginDetections(targetURL, options, mergedAPIRecords, capturedFrontendRoutes)...)
 	dedupeAssets(&result.Assets)
 	result.Vulnerabilities = append(result.Vulnerabilities, buildAssetVulnerabilities(result.Assets)...)
@@ -300,17 +323,20 @@ func buildJSFindOptions(
 		StaticConstantParams:      hintBundle.ConstantParams,
 		StaticRequestPayloadHints: hintBundle.RequestPayload,
 		SkipVulnScan:              !vulnDetection.Enabled,
-		HighRiskRouter:            options.HighRiskRouter,
-		Authentication:            options.Authentication,
-		Placeholder:               options.Placeholder,
-		LFIConfig:                 vulnDetection.LFI,
-		SSRFConfig:                vulnDetection.SSRF,
-		RedirectConfig:            vulnDetection.Redirect,
-		SQLInjConfig:              vulnDetection.SQLInjection,
-		XSSConfig:                 vulnDetection.XSS,
-		UploadConfig:              vulnDetection.Upload,
-		AIChecker:                 aiCheckerValue,
-		DataStore:                 dataStore,
+		// Authorization findings are produced from captured authenticated
+		// baselines after crawling; never use an anonymous-only heuristic here.
+		SkipUnauthorizedScan: true,
+		HighRiskRouter:       options.HighRiskRouter,
+		Authentication:       options.Authentication,
+		Placeholder:          options.Placeholder,
+		LFIConfig:            vulnDetection.LFI,
+		SSRFConfig:           vulnDetection.SSRF,
+		RedirectConfig:       vulnDetection.Redirect,
+		SQLInjConfig:         vulnDetection.SQLInjection,
+		XSSConfig:            vulnDetection.XSS,
+		UploadConfig:         vulnDetection.Upload,
+		AIChecker:            aiCheckerValue,
+		DataStore:            dataStore,
 	}
 }
 
@@ -561,6 +587,74 @@ func resolveVulnDetection(options config.VulnDetection) config.VulnDetection {
 	options.XSS.Enabled = false
 	options.Upload.Enabled = false
 	return options
+}
+
+func buildAPIContexts(records []crawl.NetworkRecord) []*apicontext.Context {
+	store := apicontext.NewStore()
+	for _, record := range records {
+		if strings.TrimSpace(record.URL) == "" {
+			continue
+		}
+		store.Add(apicontext.Build(apicontext.Observation{
+			Method:       record.Method,
+			URL:          record.URL,
+			PostData:     record.RequestBody,
+			ReqHeaders:   record.RequestHeaders,
+			RespStatus:   record.ResponseCode,
+			RespHeaders:  record.ResponseHeaders,
+			RespBody:     []byte(record.ResponseBody),
+			ResourceType: record.ResourceType,
+			PageURL:      record.PageURL,
+		}))
+	}
+	return store.List()
+}
+
+func runAuthorizationChecks(options Options, contexts []*apicontext.Context) ([]AuthorizationCheck, []database.VulnRecord) {
+	checks := make([]AuthorizationCheck, 0)
+	findings := make([]database.VulnRecord, 0)
+	client := &http.Client{Timeout: 10 * time.Second}
+	send := apiaudit.Sender(func(req *http.Request) (*http.Response, []byte, error) {
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, nil, err
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			resp.Body.Close()
+			return nil, nil, readErr
+		}
+		return resp, body, nil
+	})
+	for _, ctx := range contexts {
+		if ctx == nil || !ctx.Auth.Present {
+			continue
+		}
+		verdict := apiaudit.RunAuthorizationExperiment(ctx, send)
+		checks = append(checks, AuthorizationCheck{OperationID: ctx.OperationID, URL: ctx.ObservedURL, Method: ctx.Method, Verdict: verdict})
+		if !verdict.Vulnerable {
+			continue
+		}
+		level := "medium"
+		if verdict.Confidence == "high" {
+			level = "high"
+		}
+		findings = append(findings, database.VulnRecord{
+			TaskID:           options.TaskID,
+			Version:          options.Version,
+			VulnID:           "authz-" + ctx.OperationID,
+			Title:            "未授权访问（认证对照）",
+			Level:            level,
+			Type:             "authorization",
+			URL:              ctx.ObservedURL,
+			Method:           ctx.Method,
+			Confidence:       verdict.Confidence,
+			ConfidenceReason: strings.Join(verdict.Reasons, "；"),
+			Description:      "带认证基线与匿名请求的响应对照实验确认业务响应结构一致。",
+			CreatedAt:        time.Now(),
+		})
+	}
+	return checks, findings
 }
 
 func buildWorkingDataStore(

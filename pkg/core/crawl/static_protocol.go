@@ -111,6 +111,14 @@ var (
 	configLikeCallPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_$\.])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(\s*\{`)
 )
 
+const (
+	// Minified vendor bundles can contain millions of candidate call sites. The
+	// static analyzer is supplementary evidence, so keep it bounded and never
+	// let it monopolize the web process.
+	maxStaticProtocolJSResources   = 12
+	maxStaticProtocolJSContentSize = 256 * 1024
+)
+
 func AnalyzeStoredJSProtocols(taskID string, versions ...int) (*StaticProtocolAnalysisResult, error) {
 	return AnalyzeStoredJSProtocolsWithStore(taskID, nil, versions...)
 }
@@ -151,6 +159,14 @@ func AnalyzeStoredJSProtocolsWithStore(taskID string, store database.ScanDataSto
 	sort.Slice(jsResources, func(i, j int) bool {
 		return jsResources[i].Size > jsResources[j].Size
 	})
+	if len(jsResources) > maxStaticProtocolJSResources {
+		jsResources = jsResources[:maxStaticProtocolJSResources]
+	}
+	for index := range jsResources {
+		if len(jsResources[index].Content) > maxStaticProtocolJSContentSize {
+			jsResources[index].Content = jsResources[index].Content[:maxStaticProtocolJSContentSize]
+		}
+	}
 
 	result := &StaticProtocolAnalysisResult{
 		TaskID:      taskID,
@@ -757,7 +773,15 @@ func extractBoundRootsFromRequestURL(rawURL, endpointPath string) []string {
 }
 
 func resolveStaticRootExpression(content, expr string) []string {
-	values := resolveStaticStringExpression(content, expr, 0)
+	return resolveStaticRootExpressionDepth(content, expr, 0)
+}
+
+// maxStaticIdentifierChainDepth bounds identifier-to-identifier resolution
+// chains during static root resolution.
+const maxStaticIdentifierChainDepth = 8
+
+func resolveStaticRootExpressionDepth(content, expr string, depth int) []string {
+	values := resolveStaticStringExpression(content, expr, depth)
 	roots := make([]string, 0, len(values))
 	for _, value := range values {
 		if normalized := normalizeStaticBoundRoot(value); normalized != "" {
@@ -767,7 +791,18 @@ func resolveStaticRootExpression(content, expr string) []string {
 	return roots
 }
 
+// resolveStaticIdentifierRoots resolves an identifier to static root values.
+// Identifier chains (a → b → c, or cycles like a = a + "/x") are bounded by
+// maxStaticIdentifierChainDepth: each hop used to reset the recursion depth,
+// which made resolution effectively unbounded on large minified bundles.
 func resolveStaticIdentifierRoots(content, identifier string) []string {
+	return resolveStaticIdentifierRootsDepth(content, identifier, 0)
+}
+
+func resolveStaticIdentifierRootsDepth(content, identifier string, depth int) []string {
+	if depth > maxStaticIdentifierChainDepth {
+		return nil
+	}
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return nil
@@ -789,7 +824,7 @@ func resolveStaticIdentifierRoots(content, identifier string) []string {
 			if len(match) < 2 {
 				continue
 			}
-			for _, resolved := range resolveStaticRootExpression(content, match[1]) {
+			for _, resolved := range resolveStaticRootExpressionDepth(content, match[1], depth+1) {
 				roots = appendUniqueStrings(roots, resolved)
 			}
 		}
@@ -2198,6 +2233,16 @@ func collectRequestParamBindings(configArg string) map[string]string {
 }
 
 func resolveStaticArgumentExpression(content, raw string) string {
+	return resolveStaticArgumentExpressionDepth(content, raw, 0)
+}
+
+// resolveStaticArgumentExpressionDepth bounds recursive static tracing
+// (JSON.stringify unwrapping, identifier re-resolution) to a fixed depth so
+// pathological nesting in minified bundles cannot make tracing unbounded.
+func resolveStaticArgumentExpressionDepth(content, raw string, depth int) string {
+	if depth > maxStaticArgumentResolveDepth {
+		return ""
+	}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return ""
@@ -2209,7 +2254,7 @@ func resolveStaticArgumentExpression(content, raw string) string {
 
 	if strings.HasPrefix(trimmed, "JSON.stringify(") {
 		if inner, _, ok := extractBalancedJS(trimmed, len("JSON.stringify"), '(', ')'); ok {
-			if resolved := resolveStaticArgumentExpression(content, inner); resolved != "" {
+			if resolved := resolveStaticArgumentExpressionDepth(content, inner, depth+1); resolved != "" {
 				return resolved
 			}
 		}
@@ -2857,16 +2902,16 @@ func resolveStaticStringExpression(content interface{}, expr string, depth int) 
 		if len(expr) < 2 {
 			return nil
 		}
-		return resolveStaticIdentifierRoots(source, expr)
+		return resolveStaticIdentifierRootsDepth(source, expr, depth+1)
 	}
 	if strings.Contains(expr, ".") {
 		memberParts := strings.Split(expr, ".")
 		if len(memberParts) >= 2 {
 			member := memberParts[len(memberParts)-1]
-			if roots := resolveStaticIdentifierRoots(source, expr); len(roots) > 0 {
+			if roots := resolveStaticIdentifierRootsDepth(source, expr, depth+1); len(roots) > 0 {
 				return roots
 			}
-			return resolveStaticIdentifierRoots(source, member)
+			return resolveStaticIdentifierRootsDepth(source, member, depth+1)
 		}
 	}
 

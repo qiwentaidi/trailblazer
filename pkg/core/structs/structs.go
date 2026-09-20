@@ -50,18 +50,22 @@ type JSFindOptions struct {
 	StaticConstantParams      map[string]url.Values
 	StaticRequestPayloadHints map[string]StaticRequestPayloadHint
 	SkipVulnScan              bool
-	Authentication            []string
-	HighRiskRouter            []string
-	Placeholder               map[string]string
-	Headers                   map[string]string
-	LFIConfig                 interface{} // LFI检测配置
-	SSRFConfig                interface{} // SSRF检测配置
-	RedirectConfig            interface{} // 重定向检测配置
-	SQLInjConfig              interface{} // SQL注入检测配置
-	XSSConfig                 interface{} // XSS检测配置
-	UploadConfig              interface{} // 文件上传检测配置
-	AIChecker                 interface{} // AI检测器（用于文件上传等漏洞检测），类型为 *crawl.SensitiveInfoChecker
-	DataStore                 database.ScanDataStore
+	// SkipUnauthorizedScan disables the legacy unauthenticated probe. The
+	// comparative authorization experiment runs from captured API contexts
+	// after the crawl and is controlled by the same authorization switch.
+	SkipUnauthorizedScan bool
+	Authentication       []string
+	HighRiskRouter       []string
+	Placeholder          map[string]string
+	Headers              map[string]string
+	LFIConfig            interface{} // LFI检测配置
+	SSRFConfig           interface{} // SSRF检测配置
+	RedirectConfig       interface{} // 重定向检测配置
+	SQLInjConfig         interface{} // SQL注入检测配置
+	XSSConfig            interface{} // XSS检测配置
+	UploadConfig         interface{} // 文件上传检测配置
+	AIChecker            interface{} // AI检测器（用于文件上传等漏洞检测），类型为 *crawl.SensitiveInfoChecker
+	DataStore            database.ScanDataStore
 }
 
 // APIRequest 结构体表示 API 请求信息

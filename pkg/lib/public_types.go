@@ -20,6 +20,7 @@ type (
 	XSSConfig           = config.XSSConfig
 	XSSPayloadRule      = config.XSSPayloadRule
 	UploadConfig        = config.UploadConfig
+	AuthorizationConfig = config.AuthorizationConfig
 	ScanDataStore       = database.ScanDataStore
 	MemoryScanDataStore = database.MemoryScanDataStore
 	JSResource          = database.JSResource

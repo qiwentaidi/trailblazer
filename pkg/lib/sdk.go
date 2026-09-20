@@ -10,7 +10,6 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 	tbdb "github.com/qiwentaidi/trailblazer/pkg/core/database"
-	"github.com/qiwentaidi/trailblazer/pkg/core/protocoltool"
 	"github.com/qiwentaidi/trailblazer/pkg/core/scanexec"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	"github.com/qiwentaidi/trailblazer/pkg/logger"
@@ -23,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/projectdiscovery/katana/pkg/apiaudit"
+	"github.com/projectdiscovery/katana/pkg/apicontext"
 	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
 	"gopkg.in/yaml.v3"
@@ -156,13 +157,14 @@ type OpenAIOptions struct {
 
 // VulnDetectionOptions 漏洞检测配置选项
 type VulnDetectionOptions struct {
-	Enabled      bool                      `json:"enabled"`
-	SQLInjection config.SQLInjectionConfig `json:"sqlInjection"`
-	LFI          config.LFIConfig          `json:"lfi"`
-	SSRF         config.SSRFConfig         `json:"ssrf"`
-	Redirect     config.RedirectConfig     `json:"redirect"`
-	XSS          config.XSSConfig          `json:"xss"`
-	Upload       config.UploadConfig       `json:"upload"`
+	Enabled       bool                       `json:"enabled"`
+	Authorization config.AuthorizationConfig `json:"authorization"`
+	SQLInjection  config.SQLInjectionConfig  `json:"sqlInjection"`
+	LFI           config.LFIConfig           `json:"lfi"`
+	SSRF          config.SSRFConfig          `json:"ssrf"`
+	Redirect      config.RedirectConfig      `json:"redirect"`
+	XSS           config.XSSConfig           `json:"xss"`
+	Upload        config.UploadConfig        `json:"upload"`
 }
 
 // NewScanOptions 创建默认的扫描选项
@@ -177,13 +179,14 @@ func NewScanOptions() *ScanOptions {
 		Placeholder:    make(map[string]string),
 		WeakCreds:      []string{},
 		VulnDetection: VulnDetectionOptions{
-			Enabled:      true,
-			SQLInjection: config.SQLInjectionConfig{Enabled: true},
-			LFI:          config.LFIConfig{Enabled: true},
-			SSRF:         config.SSRFConfig{Enabled: true},
-			Redirect:     config.RedirectConfig{Enabled: true},
-			XSS:          config.XSSConfig{Enabled: true},
-			Upload:       config.UploadConfig{Enabled: true},
+			Enabled:       true,
+			Authorization: config.AuthorizationConfig{Enabled: true},
+			SQLInjection:  config.SQLInjectionConfig{Enabled: true},
+			LFI:           config.LFIConfig{Enabled: true},
+			SSRF:          config.SSRFConfig{Enabled: true},
+			Redirect:      config.RedirectConfig{Enabled: true},
+			XSS:           config.XSSConfig{Enabled: true},
+			Upload:        config.UploadConfig{Enabled: true},
 		},
 	}
 }
@@ -227,13 +230,14 @@ func LoadScanOptionsFromFile(configPath string) (*ScanOptions, error) {
 		WeakCreds:      cfg.WeakCreds,
 		LogOutputPath:  cfg.Log.OutputPath,
 		VulnDetection: VulnDetectionOptions{
-			Enabled:      vulnDetectionEnabled,
-			SQLInjection: cfg.VulnDetection.SQLInjection,
-			LFI:          cfg.VulnDetection.LFI,
-			SSRF:         cfg.VulnDetection.SSRF,
-			Redirect:     cfg.VulnDetection.Redirect,
-			XSS:          cfg.VulnDetection.XSS,
-			Upload:       cfg.VulnDetection.Upload,
+			Enabled:       vulnDetectionEnabled,
+			Authorization: cfg.VulnDetection.Authorization,
+			SQLInjection:  cfg.VulnDetection.SQLInjection,
+			LFI:           cfg.VulnDetection.LFI,
+			SSRF:          cfg.VulnDetection.SSRF,
+			Redirect:      cfg.VulnDetection.Redirect,
+			XSS:           cfg.VulnDetection.XSS,
+			Upload:        cfg.VulnDetection.Upload,
 		},
 	}, nil
 }
@@ -273,17 +277,21 @@ func buildSDKJSFindOptions(
 		StaticConstantParams:      hintBundle.ConstantParams,
 		StaticRequestPayloadHints: hintBundle.RequestPayload,
 		SkipVulnScan:              !vulnDetection.Enabled,
-		HighRiskRouter:            options.HighRiskRouter,
-		Authentication:            options.Authentication,
-		Placeholder:               options.Placeholder,
-		LFIConfig:                 vulnDetection.LFI,
-		SSRFConfig:                vulnDetection.SSRF,
-		RedirectConfig:            vulnDetection.Redirect,
-		SQLInjConfig:              vulnDetection.SQLInjection,
-		XSSConfig:                 vulnDetection.XSS,
-		UploadConfig:              vulnDetection.Upload,
-		AIChecker:                 aiChecker,
-		DataStore:                 options.DataStore,
+		// Authorization findings are generated from captured authenticated
+		// baselines after the scan; never fall back to the old anonymous-only
+		// heuristic here.
+		SkipUnauthorizedScan: true,
+		HighRiskRouter:       options.HighRiskRouter,
+		Authentication:       options.Authentication,
+		Placeholder:          options.Placeholder,
+		LFIConfig:            vulnDetection.LFI,
+		SSRFConfig:           vulnDetection.SSRF,
+		RedirectConfig:       vulnDetection.Redirect,
+		SQLInjConfig:         vulnDetection.SQLInjection,
+		XSSConfig:            vulnDetection.XSS,
+		UploadConfig:         vulnDetection.Upload,
+		AIChecker:            aiChecker,
+		DataStore:            options.DataStore,
 	}
 }
 
@@ -529,12 +537,33 @@ type TargetResult struct {
 	JSResources           []tbdb.JSResource        `json:"jsResources,omitempty"`
 	RequestBlueprintCount int                      `json:"requestBlueprintCount"`
 	RequestBlueprints     []crawl.RequestBlueprint `json:"requestBlueprints,omitempty"`
-	APIRecords            []APIRecord              `json:"apiRecords,omitempty"`
-	ProtocolTraces        []ProtocolTrace          `json:"protocolTraces,omitempty"`
-	Assets                AssetInfo                `json:"assets"`
-	Fingerprints          []FingerprintItem        `json:"fingerprints,omitempty"`
-	SecurityLeads         []SecurityLead           `json:"securityLeads,omitempty"`
-	Vulnerabilities       []VulnerabilityItem      `json:"vulnerabilities"`
+	// AnchorCandidates preserves request-like anchors that fell outside the
+	// static analysis budget so coverage loss is visible instead of silent.
+	AnchorCandidates []crawl.RequestAnchorCandidate `json:"anchorCandidates,omitempty"`
+	// OperationSpecs are persistable interface templates (no credential
+	// values); dynamic parameters must be completed from runtime traffic.
+	OperationSpecs []crawl.OperationSpec `json:"operationSpecs,omitempty"`
+	APIRecords     []APIRecord           `json:"apiRecords,omitempty"`
+	// APIContexts is the deduplicated, sanitized interface asset set built
+	// from the same runtime capture used by parameter inference. It is safe to
+	// export as OpenAPI and never contains credential values.
+	APIContexts         []*apicontext.Context `json:"apiContexts,omitempty"`
+	AuthorizationChecks []AuthorizationCheck  `json:"authorizationChecks,omitempty"`
+	ProtocolTraces      []ProtocolTrace       `json:"protocolTraces,omitempty"`
+	Assets              AssetInfo             `json:"assets"`
+	Fingerprints        []FingerprintItem     `json:"fingerprints,omitempty"`
+	SecurityLeads       []SecurityLead        `json:"securityLeads,omitempty"`
+	Vulnerabilities     []VulnerabilityItem   `json:"vulnerabilities"`
+}
+
+// AuthorizationCheck binds a comparative authorization verdict to the
+// observed operation. It is emitted even when no vulnerability is found so
+// callers can audit coverage and inconclusive cases.
+type AuthorizationCheck struct {
+	OperationID string                `json:"operationId"`
+	URL         string                `json:"url"`
+	Method      string                `json:"method"`
+	Verdict     apiaudit.AuthzVerdict `json:"verdict"`
 }
 
 // SecurityLead is a non-vulnerability review artifact. It preserves high-risk
@@ -678,9 +707,6 @@ type ProtocolTrace struct {
 	Stack                  string               `json:"stack,omitempty"`
 	CreatedAt              time.Time            `json:"createdAt"`
 }
-
-// DecryptResult 解密结果
-type DecryptResult = protocoltool.DecryptResult
 
 // AssetInfo 资产信息
 type AssetInfo struct {
@@ -1805,11 +1831,6 @@ func normalizeProtocolTraceRecordsForStore(records []crawl.ProtocolTraceRecord) 
 	return result
 }
 
-// DecryptProtocolTrace 使用 SDK 暴露的协议轨迹材料解密密文
-func DecryptProtocolTrace(trace ProtocolTrace, keyHex, ciphertext string) (*DecryptResult, error) {
-	return protocoltool.DecryptWithTrace(toDatabaseProtocolTrace(trace), keyHex, ciphertext)
-}
-
 func resolveSDKScanIdentity(options *ScanOptions) (string, int) {
 	const defaultTaskID = "cli-mode"
 
@@ -1911,13 +1932,14 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 				Enabled: options.OpenAI.Enabled,
 			},
 			VulnDetection: config.VulnDetection{
-				Enabled:      options.VulnDetection.Enabled,
-				SQLInjection: options.VulnDetection.SQLInjection,
-				LFI:          options.VulnDetection.LFI,
-				SSRF:         options.VulnDetection.SSRF,
-				Redirect:     options.VulnDetection.Redirect,
-				XSS:          options.VulnDetection.XSS,
-				Upload:       options.VulnDetection.Upload,
+				Enabled:       options.VulnDetection.Enabled,
+				Authorization: options.VulnDetection.Authorization,
+				SQLInjection:  options.VulnDetection.SQLInjection,
+				LFI:           options.VulnDetection.LFI,
+				SSRF:          options.VulnDetection.SSRF,
+				Redirect:      options.VulnDetection.Redirect,
+				XSS:           options.VulnDetection.XSS,
+				Upload:        options.VulnDetection.Upload,
 			},
 			DataStore: options.DataStore,
 		})
@@ -1953,11 +1975,22 @@ func PerformScan(urls []string, options *ScanOptions) (*ScanResult, error) {
 			JSResources:           make([]tbdb.JSResource, 0, len(targetScanResult.JSResources)),
 			RequestBlueprintCount: len(targetScanResult.RequestBlueprints),
 			RequestBlueprints:     append([]crawl.RequestBlueprint(nil), targetScanResult.RequestBlueprints...),
+			AnchorCandidates:      append([]crawl.RequestAnchorCandidate(nil), targetScanResult.RequestAnchorCandidates...),
+			OperationSpecs:        append([]crawl.OperationSpec(nil), targetScanResult.OperationSpecs...),
 			APIRecords:            make([]APIRecord, 0, len(targetScanResult.APIRecords)),
+			APIContexts:           append([]*apicontext.Context(nil), targetScanResult.APIContexts...),
 			ProtocolTraces:        make([]ProtocolTrace, 0, len(targetScanResult.ProtocolTraces)),
 			Assets:                convertSharedAssets(targetScanResult.Assets),
 			Fingerprints:          convertSharedFingerprints(targetScanResult.Fingerprints),
 			Vulnerabilities:       convertSharedVulnerabilities(targetScanResult.Vulnerabilities),
+		}
+		for _, check := range targetScanResult.AuthorizationChecks {
+			targetResult.AuthorizationChecks = append(targetResult.AuthorizationChecks, AuthorizationCheck{
+				OperationID: check.OperationID,
+				URL:         check.URL,
+				Method:      check.Method,
+				Verdict:     check.Verdict,
+			})
 		}
 		for _, resource := range targetScanResult.JSResources {
 			targetResult.JSResources = append(targetResult.JSResources, resource)

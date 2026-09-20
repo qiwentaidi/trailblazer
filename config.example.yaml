@@ -19,12 +19,20 @@ log:
 
 vuln-detection:
   enabled: true
+  # 授权检查只执行“带认证基线 vs 匿名请求”的对照实验；不猜测低权限账号。
+  authorization:
+    enabled: true
+  # 各检测模块的 payload/关键词/规则均已内置，这里只保留开关。
+  # 高级自定义（追加 payload、规则）仍兼容旧字段，见 pkg/config/options.go。
   sql-injection:
     enabled: true
   lfi:
     enabled: true
   ssrf:
     enabled: true
+    # 可选：回连地址（自建 OOB 服务 / interactsh 域名），
+    # 设置后额外派发带外探测，命中在回连服务端确认。
+    callback-url: ""
   redirect:
     enabled: true
   xss:

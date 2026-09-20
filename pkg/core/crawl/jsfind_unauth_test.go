@@ -2,26 +2,13 @@ package crawl
 
 import (
 	"encoding/json"
-	"errors"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
-	"github.com/qiwentaidi/trailblazer/pkg/core/protocoltool"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
-
-type encryptedResponseReviewerStub struct {
-	review EncryptedResponseAIReview
-	err    error
-	calls  int
-}
-
-func (s *encryptedResponseReviewerStub) ReviewUncapturedEncryptedResponse(_ string, _ string, _ string, _ string) (EncryptedResponseAIReview, error) {
-	s.calls++
-	return s.review, s.err
-}
 
 func TestResolveUnauthorizedProtocolContextUsesMatchedTraceAndCiphertext(t *testing.T) {
 	index := buildUnauthorizedAPIResourceIndex([]database.APIResource{
@@ -60,140 +47,6 @@ func TestResolveUnauthorizedProtocolContextUsesMatchedTraceAndCiphertext(t *test
 	}
 }
 
-func TestDecryptUnauthorizedResponseUsesProtocolTraceBeforePayloadFiltering(t *testing.T) {
-	const keyHex = "00112233445566778899aabbccddeeff"
-	plaintext := `{"data":{"order_id":1}}`
-	ciphertext, err := protocoltool.EncryptSM4Hex(plaintext, keyHex)
-	if err != nil {
-		t.Fatalf("failed to create test ciphertext: %v", err)
-	}
-
-	apiReq := structs.APIRequest{Method: "GET", URL: "https://example.com/api/orders"}
-	apiResourceIndex := buildUnauthorizedAPIResourceIndex([]database.APIResource{
-		{Method: "GET", URL: apiReq.URL, TraceID: "trace-decrypt-1", HasProtocolTrace: true},
-	})
-	traceIndex := &unauthorizedProtocolTraceIndex{
-		byTraceID: map[string]database.ProtocolTraceRecord{
-			"trace-decrypt-1": {
-				TraceID:                "trace-decrypt-1",
-				RequestURL:             apiReq.URL,
-				RequestBeforeTransform: `{"id":1}`,
-				SessionMaterials:       map[string]string{"sm4_key_hex": keyHex},
-				Algorithms:             []string{"sm4.decrypt"},
-			},
-		},
-	}
-
-	decoded, context, attempted, err := decryptUnauthorizedResponse(apiReq, ciphertext, apiResourceIndex, traceIndex)
-	if err != nil {
-		t.Fatalf("expected response decryption to succeed, got %v", err)
-	}
-	if !attempted || decoded != plaintext {
-		t.Fatalf("unexpected decoded response: attempted=%v body=%q", attempted, decoded)
-	}
-	if context.ResponseCiphertext != ciphertext || context.ResponsePlaintext != plaintext {
-		t.Fatalf("expected raw ciphertext and plaintext to be preserved, got %#v", context)
-	}
-	if context.DecryptionStatus != "decrypted" {
-		t.Fatalf("expected decrypted status, got %q", context.DecryptionStatus)
-	}
-}
-
-func TestDecryptUnauthorizedResponseTreatsDecryptFailureAsNonVulnerable(t *testing.T) {
-	const keyHex = "00112233445566778899aabbccddeeff"
-	wrongKeyHex := "ffeeddccbbaa99887766554433221100"
-	ciphertext, err := protocoltool.EncryptSM4Hex(`{"data":{"order_id":1}}`, keyHex)
-	if err != nil {
-		t.Fatalf("failed to create test ciphertext: %v", err)
-	}
-
-	apiReq := structs.APIRequest{Method: "GET", URL: "https://example.com/api/orders"}
-	apiResourceIndex := buildUnauthorizedAPIResourceIndex([]database.APIResource{
-		{Method: "GET", URL: apiReq.URL, TraceID: "trace-decrypt-fail", HasProtocolTrace: true},
-	})
-	traceIndex := &unauthorizedProtocolTraceIndex{
-		byTraceID: map[string]database.ProtocolTraceRecord{
-			"trace-decrypt-fail": {
-				TraceID:                "trace-decrypt-fail",
-				RequestURL:             apiReq.URL,
-				RequestBeforeTransform: `{"id":1}`,
-				SessionMaterials:       map[string]string{"sm4_key_hex": wrongKeyHex},
-				Algorithms:             []string{"sm4.decrypt"},
-			},
-		},
-	}
-
-	decoded, context, attempted, err := decryptUnauthorizedResponse(apiReq, ciphertext, apiResourceIndex, traceIndex)
-	if err == nil || !attempted || decoded != "" {
-		t.Fatalf("expected failed decryption, got body=%q attempted=%v err=%v", decoded, attempted, err)
-	}
-	if context.DecryptionStatus != "failed" {
-		t.Fatalf("expected failed decryption status, got %q", context.DecryptionStatus)
-	}
-}
-
-func TestReviewUncapturedEncryptedResponseQueuesStaticAnalysis(t *testing.T) {
-	reviewer := &encryptedResponseReviewerStub{review: EncryptedResponseAIReview{
-		Encrypted:                AITruthTrue,
-		ResponseDecryptionLikely: AITruthTrue,
-		Confidence:               88,
-		Encoding:                 "base64",
-		CandidateAlgorithms:      []string{"AES"},
-		Reason:                   "业务载荷为长 base64 串且 JS 存在 decrypt 调用",
-		RecommendedAction:        "continue_js_analysis",
-	}}
-	context, err := reviewUncapturedEncryptedResponse(
-		structs.APIRequest{Method: "GET", URL: "https://example.com/api/orders"},
-		`{"useGlobalEnc":true,"enc":"aes","data":"b0KV0u3Ixdb-81MXvTHaHQXC"}`,
-		unauthorizedProtocolContext{ResponseEncrypted: true, ResponseCiphertext: "b0KV0u3Ixdb-81MXvTHaHQXC", DecryptionStatus: "not_tried"},
-		&uncapturedEncryptionJSContext{Evidence: "文件: app.js；命中: decrypt；片段: decrypt(data)", StaticSummary: "已从 1 个已保存 JS 资源中提取 1 条加解密/编码相关静态证据"},
-		reviewer,
-	)
-	var queued *uncapturedEncryptedResponseError
-	if !errors.As(err, &queued) {
-		t.Fatalf("expected encrypted response to be queued for static analysis, got %v", err)
-	}
-	if reviewer.calls != 1 || context.DecryptionStatus != "needs_runtime_capture" {
-		t.Fatalf("unexpected review result: calls=%d context=%#v", reviewer.calls, context)
-	}
-	if !strings.Contains(context.DecryptionDetail, "候选算法: AES") || !strings.Contains(context.DecryptionDetail, "静态证据") {
-		t.Fatalf("expected AI and JS evidence in detail, got %q", context.DecryptionDetail)
-	}
-}
-
-func TestReviewUncapturedEncryptedResponseDoesNotAskAIForUnstructuredValue(t *testing.T) {
-	reviewer := &encryptedResponseReviewerStub{review: EncryptedResponseAIReview{
-		Encrypted:                AITruthTrue,
-		ResponseDecryptionLikely: AITruthTrue,
-		Confidence:               99,
-		Encoding:                 "base64",
-		RecommendedAction:        "continue_js_analysis",
-	}}
-	context, err := reviewUncapturedEncryptedResponse(
-		structs.APIRequest{Method: "GET", URL: "https://example.com/api/cards"},
-		`{"data":{"card_id":"b0KV0u3Ixdb-81MXvTHaHQXC"}}`,
-		unauthorizedProtocolContext{ResponseCiphertext: "b0KV0u3Ixdb-81MXvTHaHQXC", DecryptionStatus: "not_tried"},
-		&uncapturedEncryptionJSContext{Evidence: "文件: app.js；命中: decrypt"},
-		reviewer,
-	)
-	if err != nil {
-		t.Fatalf("expected ordinary business value not to enter crypto analysis, got %v", err)
-	}
-	if reviewer.calls != 0 || context.DecryptionStatus != "not_tried" {
-		t.Fatalf("expected no AI promotion for unstructured value, calls=%d context=%#v", reviewer.calls, context)
-	}
-}
-
-func TestBuildUncapturedEncryptionJSContextSelectsCryptoEvidence(t *testing.T) {
-	context := buildUncapturedEncryptionJSContext([]database.JSResource{{
-		URL:     "https://example.com/assets/app.js",
-		Content: `function decryptResponse(value) { return CryptoJS.AES.decrypt(value, key).toString() }`,
-	}})
-	if !strings.Contains(context.Evidence, "decrypt") || !strings.Contains(context.Evidence, "app.js") {
-		t.Fatalf("expected relevant JS evidence, got %q", context.Evidence)
-	}
-}
-
 func TestNormalizeUnauthorizedCiphertextSkipsRandomBusinessField(t *testing.T) {
 	body := `{"msg":"处理成功","data":{"card_id":"b0KV0u3Ixdb-81MXvTHaHQXC0Vd1RyVgznzb0T3eZNWpu3PIQ72ASh3IvGTAW_FHS56SvRvCPuMjLK20Pv762Dtm"}}`
 	if ciphertext := normalizeUnauthorizedCiphertext(body); ciphertext != "" {
@@ -218,30 +71,6 @@ func TestNormalizeUnauthorizedCiphertextRecognizesGlobalEncryptionEnvelope(t *te
 	}
 	if ciphertext := normalizeUnauthorizedCiphertext(body); !strings.HasPrefix(ciphertext, "ET1zUF_0fPUJoGNj") {
 		t.Fatalf("expected encrypted data payload, got %q", ciphertext)
-	}
-}
-
-func TestReviewUncapturedEncryptedEnvelopeNeverFallsThroughToUnauthorizedCheck(t *testing.T) {
-	reviewer := &encryptedResponseReviewerStub{review: EncryptedResponseAIReview{
-		Encrypted:                AITruthFalse,
-		ResponseDecryptionLikely: AITruthUnknown,
-		Confidence:               12,
-		Encoding:                 "base64",
-		RecommendedAction:        "needs_runtime_capture",
-	}}
-	context, err := reviewUncapturedEncryptedResponse(
-		structs.APIRequest{Method: "POST", URL: "https://example.com/api/checkQr"},
-		`{"useGlobalEnc":true,"enc":"rsa","data":"ET1zUF_0fPUJoGNjK-Ba9DLNyf0yppLFKPd8tSrAbKznLH7TdHZ4CVlDCj1OmXwU8FoaE-Wx3HLLqhMFVHd_j1V7BBL2XLEwE7rfTN7UHSPGhq9llewYcF37kNahCzq5eRv57wOj60Y4Gkxi3fa4ep-7e6F-07vz3IMCyNThiPR8BpSCFYmT37n_zCdNL06TUCECLUS0Eee4mn0Cb8_et-DsATaE9ahWyAyiCty3MYRHOV61byzQ1aPh2UJy_MyaJndd1SN0D03NtSWp7Bhur6NI5RcSc8_hZbzNM5XY2ViZPQOrprMIf0tSAxKsQkNODdtIvewMrgWl1d8HXSGJDQ=="}`,
-		unauthorizedProtocolContext{HasProtocolTrace: true, ResponseEncrypted: true, ResponseCiphertext: "ET1zUF_0fPUJoGNjK-Ba9DLNyf0yppLFKPd8tSrAbKznLH7TdHZ4CVlDCj1OmXwU8FoaE-Wx3HLLqhMFVHd_j1V7BBL2XLEwE7rfTN7UHSPGhq9llewYcF37kNahCzq5eRv57wOj60Y4Gkxi3fa4ep-7e6F-07vz3IMCyNThiPR8BpSCFYmT37n_zCdNL06TUCECLUS0Eee4mn0Cb8_et-DsATaE9ahWyAyiCty3MYRHOV61byzQ1aPh2UJy_MyaJndd1SN0D03NtSWp7Bhur6NI5RcSc8_hZbzNM5XY2ViZPQOrprMIf0tSAxKsQkNODdtIvewMrgWl1d8HXSGJDQ=="},
-		&uncapturedEncryptionJSContext{Evidence: "文件: app.js；命中: decrypt；片段: decrypt(data)", StaticSummary: "已从 1 个已保存 JS 资源中提取 1 条加解密/编码相关静态证据"},
-		reviewer,
-	)
-	var queued *uncapturedEncryptedResponseError
-	if !errors.As(err, &queued) {
-		t.Fatalf("expected deterministic encryption envelope to stop unauthorized evaluation, got %v", err)
-	}
-	if context.DecryptionStatus != "needs_runtime_capture" || !context.AIEncryptionReview {
-		t.Fatalf("unexpected envelope context: %#v", context)
 	}
 }
 
@@ -1051,5 +880,17 @@ func TestPrepareUnauthorizedProbeRequestFallsBackToAPIBaseProtocolTrace(t *testi
 	}
 	if !strings.Contains(detail, "同 API Base") {
 		t.Fatalf("expected api-base replay detail, got %q", detail)
+	}
+}
+
+func TestReviewUncapturedEncryptedEnvelopeRequiresRuntimeCapture(t *testing.T) {
+	context, err := reviewUncapturedEncryptedResponse(unauthorizedProtocolContext{
+		HasProtocolTrace: true, ResponseEncrypted: true, ResponseCiphertext: "ciphertext",
+	})
+	if err == nil {
+		t.Fatal("expected encrypted envelope to stop unauthorized evaluation")
+	}
+	if context.DecryptionStatus != "needs_runtime_capture" || strings.Contains(context.DecryptionDetail, "静态") {
+		t.Fatalf("unexpected runtime-capture context: %#v", context)
 	}
 }

@@ -68,6 +68,27 @@ func TestBindStaticContexts(t *testing.T) {
 	}
 }
 
+func TestBuildAPIContextsPreservesObservedParameterContext(t *testing.T) {
+	contexts := buildAPIContexts([]crawl.NetworkRecord{{
+		URL:            "https://example.test/api/users/123?page=2",
+		Method:         "GET",
+		ResourceType:   "Fetch",
+		RequestHeaders: map[string]string{"Authorization": "Bearer secret"},
+		ResponseCode:   200,
+		ResponseHeaders: map[string]string{
+			"Content-Type": "application/json",
+		},
+		ResponseBody: `{"id":123,"name":"alice"}`,
+	}})
+	if len(contexts) != 1 {
+		t.Fatalf("contexts = %#v, want one", contexts)
+	}
+	ctx := contexts[0]
+	if ctx.PathTemplate != "/api/users/{id}" || !ctx.Auth.Present || len(ctx.Parameters) != 2 {
+		t.Fatalf("context did not preserve operation metadata: %#v", ctx)
+	}
+}
+
 func TestExtractWebpackChunkJSLinks(t *testing.T) {
 	content := `u.e=function(e){var n=({}[e]||e)+"."+{0:"87e70602",1:"32c8143c",8:"1f9ff966"}[e]+".js"}`
 

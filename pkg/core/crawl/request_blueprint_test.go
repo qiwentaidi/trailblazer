@@ -1,6 +1,7 @@
 package crawl
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
@@ -454,6 +455,30 @@ func TestBuildJSRequestBlueprintsExtractsGenericHTTPMethodWrappers(t *testing.T)
 	}
 	if list.PayloadCarrier != "params" || list.PayloadFormat != "query" {
 		t.Fatalf("expected GET wrapper params metadata, got carrier=%q format=%q", list.PayloadCarrier, list.PayloadFormat)
+	}
+}
+
+func TestBuildJSRequestBlueprintsAnalyzesLargeBundlesByRequestAnchorSlice(t *testing.T) {
+	content := strings.Repeat("x", 140*1024) + `
+		const payload = { accountId: user.id, includeInactive: false };
+		fetch("/api/large/report", { method: "POST", body: JSON.stringify(payload) });
+	`
+	blueprints := BuildJSRequestBlueprints([]database.JSResource{{
+		URL:     "https://example.com/assets/app.js",
+		Content: content,
+	}})
+	report := findRequestBlueprint(blueprints, "POST", "/api/large/report")
+	if report == nil {
+		t.Fatalf("expected large bundle request blueprint, got %#v", blueprints)
+	}
+	if report.AnalysisStage != "anchor-slice" {
+		t.Fatalf("expected anchor-slice analysis stage, got %q", report.AnalysisStage)
+	}
+	if report.Source.StartOffset < 140*1024 || report.Source.EndOffset <= report.Source.StartOffset {
+		t.Fatalf("expected source offsets inside large bundle, got %#v", report.Source)
+	}
+	if !hasRequestBlueprintParam(report.Params, "accountId", "json") || !hasRequestBlueprintParam(report.Params, "includeInactive", "json") {
+		t.Fatalf("expected body shape from large bundle slice, got %#v", report.Params)
 	}
 }
 

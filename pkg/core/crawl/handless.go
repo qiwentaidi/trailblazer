@@ -354,7 +354,7 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 				_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 					postData, err := network.GetRequestPostData(requestID).Do(ctx)
 					if err == nil {
-						requestBody = postData
+						requestBody = string(postData)
 					}
 					return nil
 				}))

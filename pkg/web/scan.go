@@ -298,6 +298,7 @@ func performAsyncScan(urls []string, taskId string, additionalHighRiskRoutes ...
 		})
 		if err != nil {
 			fmt.Printf("[警告] 目标无法访问，已跳过: %s，原因: %v\n", targetURL, err)
+			updateTaskScanProgress(taskId, version, i+1, len(urls))
 			continue
 		}
 
@@ -490,22 +491,8 @@ func performAsyncScan(urls []string, taskId string, additionalHighRiskRoutes ...
 		// 合并API根路径
 		allAPIRoots = append(allAPIRoots, result.APIRoots...)
 
-		// 更新进度 - 每个URL处理完成后更新
-		if taskId != "" {
-			progress := int(float64(i+1) / float64(len(urls)) * 100)
-			if version > 0 {
-				if err := database.UpdateTaskVersionStatus(taskId, version, "running", progress); err != nil {
-					fmt.Printf("[错误] 更新任务版本进度失败: %v\n", err)
-				}
-			}
-			task := database.Task{ID: taskId}
-			_, err := task.UpdateStatus("running", progress)
-			if err != nil {
-				fmt.Printf("[错误] 更新任务进度失败: %v\n", err)
-			} else {
-				fmt.Printf("[信息] 任务 %s 进度已更新为 %d%%（已完成 %d/%d 个目标）\n", taskId, progress, i+1, len(urls))
-			}
-		}
+		// 更新进度 - 每个目标处理完成后更新
+		updateTaskScanProgress(taskId, version, i+1, len(urls))
 	}
 
 	// 去重处理
@@ -579,6 +566,32 @@ func performAsyncScan(urls []string, taskId string, additionalHighRiskRoutes ...
 			fmt.Printf("[信息] 任务 %s 状态已更新为已完成\n", taskId)
 		}
 	}
+}
+
+func updateTaskScanProgress(taskID string, version, completed, total int) {
+	if taskID == "" || total <= 0 {
+		return
+	}
+
+	progress := int(float64(completed) / float64(total) * 100)
+	if version > 0 {
+		// A stop request may arrive while the current target is still unwinding.
+		// Never let that old worker turn a stopped version back into running.
+		if taskVersion, err := database.GetTaskVersion(taskID, version); err == nil && taskVersion != nil && taskVersion.Status == "stopped" {
+			fmt.Printf("[信息] 任务 %s 的版本 %d 已停止，忽略迟到的进度更新\n", taskID, version)
+			return
+		}
+		if err := database.UpdateTaskVersionStatus(taskID, version, "running", progress); err != nil {
+			fmt.Printf("[错误] 更新任务版本进度失败: %v\n", err)
+		}
+	}
+
+	task := database.Task{ID: taskID}
+	if _, err := task.UpdateStatus("running", progress); err != nil {
+		fmt.Printf("[错误] 更新任务进度失败: %v\n", err)
+		return
+	}
+	fmt.Printf("[信息] 任务 %s 进度已更新为 %d%%（已处理 %d/%d 个目标）\n", taskID, progress, completed, total)
 }
 
 func mergeHighRiskRoutes(configured, required []string) []string {
@@ -769,6 +782,20 @@ func stopScan(c *gin.Context) {
 
 	// 清理任务的测试记录
 	crawl.ClearTestedURLs(body.TaskId)
+
+	// The task list is driven by the latest version status. Updating only the
+	// parent task leaves the UI showing “running” even after a successful stop.
+	if latest, err := database.GetLatestTaskVersion(body.TaskId); err != nil {
+		fmt.Printf("[错误] 获取任务 %s 的最新版本失败: %v\n", body.TaskId, err)
+		c.JSON(500, gin.H{"error": "failed to resolve current task version"})
+		return
+	} else if latest != nil && latest.Status == "running" {
+		if err := database.UpdateTaskVersionStatus(body.TaskId, latest.Version, "stopped", latest.Progress); err != nil {
+			fmt.Printf("[错误] 更新任务版本为已停止失败: %v\n", err)
+			c.JSON(500, gin.H{"error": "failed to stop current task version"})
+			return
+		}
+	}
 
 	// 更新任务状态为stopped
 	task := database.Task{ID: body.TaskId}

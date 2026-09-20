@@ -154,6 +154,19 @@ func getTaskStaticProtocolAnalysis(c *gin.Context) {
 		return
 	}
 
+	// Static protocol extraction is CPU intensive for minified bundles. Do not
+	// compete with an active scan merely because its detail page is polling.
+	if taskVersion, err := database.GetTaskVersion(taskID, resolvedVersion); err == nil && taskVersion != nil && taskVersion.Status == "running" {
+		c.JSON(200, gin.H{"data": gin.H{
+			"task_id":      taskID,
+			"js_count":     0,
+			"profiles":     []interface{}{},
+			"api_contexts": []interface{}{},
+			"generated_at": nil,
+		}, "deferred": true})
+		return
+	}
+
 	if cached, hit, err := queryStoredStaticProtocol(taskID, resolvedVersion); err == nil && hit {
 		c.JSON(200, gin.H{"data": cached, "cached": true})
 		return

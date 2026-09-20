@@ -1,8 +1,6 @@
 package web
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
@@ -143,90 +141,6 @@ func backfillUnauthorizedFindingNames(vulns []database.VulnRecord) {
 		}
 		if err := database.SaveVuln(*vuln); err != nil {
 			fmt.Printf("[警告] 回填未授权漏洞业务命名失败: %v\n", err)
-		}
-	}
-}
-
-// backfillStaticResponseDecryptTraces gives completed tasks created before
-// static RSA trace persistence the same evidence chain as newly scanned tasks.
-// It only acts on records with both a proven recovered key and verified
-// plaintext, and leaves all absent fields absent from the generated trace.
-func backfillStaticResponseDecryptTraces(vulns []database.VulnRecord) {
-	for index := range vulns {
-		vuln := &vulns[index]
-		evidence := vuln.CryptoKeyEvidence
-		if evidence == nil || strings.TrimSpace(vuln.ResponsePlaintext) == "" ||
-			strings.TrimSpace(vuln.DecryptionStatus) != "decrypted_static" ||
-			(vuln.HasProtocolTrace && strings.TrimSpace(vuln.TraceID) != "") {
-			continue
-		}
-
-		ciphertext := strings.TrimSpace(vuln.ResponseCiphertext)
-		if ciphertext == "" {
-			ciphertext = strings.TrimSpace(vuln.Response)
-		}
-		identity := strings.Join([]string{
-			vuln.TaskID,
-			strconv.Itoa(vuln.Version),
-			vuln.Method,
-			vuln.URL,
-			evidence.Fingerprint,
-			ciphertext,
-		}, "\x00")
-		sum := sha256.Sum256([]byte(identity))
-		traceID := "static-rsa-" + hex.EncodeToString(sum[:12])
-		materials := map[string]string{}
-		for key, value := range map[string]string{
-			"static_rsa_private_key":             evidence.KeyMaterial,
-			"static_rsa_private_key_format":      evidence.KeyFormat,
-			"static_rsa_private_key_fingerprint": evidence.Fingerprint,
-			"static_rsa_private_key_source":      evidence.SourceURL,
-			"static_rsa_decoder_path":            evidence.DecoderPath,
-			"response_runtime_function_path":     evidence.DecryptFunction,
-			"latest_response_ciphertext":         ciphertext,
-			"latest_response_plaintext":          vuln.ResponsePlaintext,
-		} {
-			if strings.TrimSpace(value) != "" {
-				materials[key] = value
-			}
-		}
-		decryptFunction := strings.TrimSpace(evidence.DecryptFunction)
-		if decryptFunction == "" {
-			decryptFunction = "decryptByPrivate"
-		}
-
-		trace := database.ProtocolTraceRecord{
-			TaskID:     vuln.TaskID,
-			Version:    vuln.Version,
-			TargetURL:  vuln.URL,
-			TraceID:    traceID,
-			Transport:  "static-js-analysis",
-			PageURL:    evidence.SourceURL,
-			RequestURL: vuln.URL,
-			Method:     normalizeTaskVulnMethod(*vuln),
-			ResponseSteps: []database.ProtocolCryptoStep{{
-				Source:        "static-js." + decryptFunction,
-				Algorithm:     "rsa.pkcs1-v1_5.decrypt",
-				InputPreview:  ciphertext,
-				OutputPreview: vuln.ResponsePlaintext,
-				FunctionPath:  evidence.DecryptFunction,
-			}},
-			SessionMaterials: materials,
-			Algorithms:       []string{"static-js-key-recovery", "rsa.pkcs1-v1_5.decrypt"},
-			CreatedAt:        time.Now(),
-		}
-		if strings.TrimSpace(evidence.DecoderPath) != "" {
-			trace.Stack = "静态恢复链路：" + evidence.DecoderPath
-		}
-		if err := database.SaveProtocolTrace(trace); err != nil {
-			fmt.Printf("[警告] 回填静态 RSA 解密协议轨迹失败: %s: %v\n", vuln.URL, err)
-			continue
-		}
-
-		vuln.TraceID = traceID
-		vuln.HasProtocolTrace = true
-		if err := database.SaveVuln(*vuln); err != nil {
-			fmt.Printf("[警告] 回填静态 RSA 解密漏洞关联失败: %s: %v\n", vuln.URL, err)
 		}
 	}
 }
@@ -381,7 +295,6 @@ func getTaskVulns(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "failed to query vulns", "detail": err.Error()})
 		return
 	}
-	backfillStaticResponseDecryptTraces(vulns)
 	backfillUnauthorizedFindingNames(vulns)
 
 	c.JSON(200, gin.H{"data": buildTaskVulnResponses(vulns)})
@@ -440,11 +353,6 @@ func getTaskProtocolTraces(c *gin.Context) {
 	version, ok := parseTaskVersionQuery(c)
 	if !ok {
 		return
-	}
-
-	vulns, vulnErr := database.QueryVulnsByTaskID(taskID, versionArgs(version)...)
-	if vulnErr == nil {
-		backfillStaticResponseDecryptTraces(vulns)
 	}
 
 	traces, err := database.QueryProtocolTracesByTaskID(taskID, versionArgs(version)...)
