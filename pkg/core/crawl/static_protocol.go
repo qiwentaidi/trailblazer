@@ -3196,7 +3196,7 @@ func findStaticWebpackExportReturnName(moduleBody, exportName string) string {
 
 func resolveStaticTemplateLiteral(content, expr string, depth int) string {
 	expr = strings.TrimSpace(expr)
-	if !strings.HasPrefix(expr, "`") || !strings.HasSuffix(expr, "`") {
+	if len(expr) < 2 || !strings.HasPrefix(expr, "`") || !strings.HasSuffix(expr, "`") {
 		return ""
 	}
 	body := expr[1 : len(expr)-1]

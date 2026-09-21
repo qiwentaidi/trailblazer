@@ -120,18 +120,33 @@ func testUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 			body = decodedBody
 		}
 	}
+	vulnerable, assessment, assessErr := AssessUnauthorizedResponse(homeBody, apiReq.URL, resp.StatusCode(), responseType, body, authentication)
+	if !vulnerable {
+		return false, "", assessment, assessErr
+	}
+	return true, body, assessment, assessErr
+}
+
+// AssessUnauthorizedResponse applies the same evidence rules as
+// TestUnauthorizedAccess to an already captured anonymous response. It lets
+// callers that own a runtime capture validate the observed evidence without
+// replaying a request, which is important for write operations.
+func AssessUnauthorizedResponse(homeBody, rawURL string, statusCode int, responseType, body string, authentication []string) (bool, UnauthorizedAssessment, error) {
+	if shouldSkipUnauthTest(rawURL) {
+		return false, UnauthorizedAssessment{}, errors.New("跳过测试：该接口本身就无需鉴权")
+	}
 	if reject, reason := shouldRejectUnauthorizedPayload(body); reject {
-		return false, "", UnauthorizedAssessment{}, errors.New(reason)
+		return false, UnauthorizedAssessment{}, errors.New(reason)
 	}
 
 	// 1. HTTP状态码异常，直接返回
-	if resp.StatusCode() > 400 && resp.StatusCode() != 500 {
-		return false, "", UnauthorizedAssessment{}, nil
+	if statusCode > 400 && statusCode != 500 {
+		return false, UnauthorizedAssessment{}, nil
 	}
 
 	if isHTMLResponse(body) {
-		if !shouldTreatHTMLAsUnauthorized(body, apiReq.URL) {
-			return false, "", UnauthorizedAssessment{}, errors.New("HTML响应缺少有效业务内容，疑似登录页、错误页或前端壳页")
+		if !shouldTreatHTMLAsUnauthorized(body, rawURL) {
+			return false, UnauthorizedAssessment{}, errors.New("HTML响应缺少有效业务内容，疑似登录页、错误页或前端壳页")
 		}
 
 		hash := calcHash(body)
@@ -141,7 +156,7 @@ func testUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 		_, exists := seenHTMLHashes.items[hash]
 		seenHTMLHashes.RUnlock()
 		if exists {
-			return false, "", UnauthorizedAssessment{}, errors.New("HTML响应与历史页面相同")
+			return false, UnauthorizedAssessment{}, errors.New("HTML响应与历史页面相同")
 		}
 
 		// 记录新的 HTML hash
@@ -153,25 +168,25 @@ func testUnauthorizedAccess(homeBody string, apiReq structs.APIRequest, authenti
 	// 3. 页面相似度检查
 	similarity := jaccardSimilarity(homeBody, body)
 	if similarity >= 0.9 {
-		return false, "", UnauthorizedAssessment{}, errors.New("页面内容相似度超过90%")
+		return false, UnauthorizedAssessment{}, errors.New("页面内容相似度超过90%")
 	}
 
 	// 4. 鉴权拦截识别与自学习
 	effectiveAuthPatterns := mergeAuthPatterns(authentication, currentLearnedAuthPatterns())
-	if reject, reason := shouldRejectAsAuthResponse(resp.StatusCode(), body, apiReq.URL, effectiveAuthPatterns); reject {
-		return false, "", UnauthorizedAssessment{}, errors.New(reason)
+	if reject, reason := shouldRejectAsAuthResponse(statusCode, body, rawURL, effectiveAuthPatterns); reject {
+		return false, UnauthorizedAssessment{}, errors.New(reason)
 	}
 
-	if reject, reason := shouldRejectUnauthorizedResponse(resp.StatusCode(), body, apiReq.URL); reject {
-		return false, "", UnauthorizedAssessment{}, errors.New(reason)
+	if reject, reason := shouldRejectUnauthorizedResponse(statusCode, body, rawURL); reject {
+		return false, UnauthorizedAssessment{}, errors.New(reason)
 	}
 
 	// 5. 评估风险等级
-	riskLevel := assessRiskLevel(body, apiReq.URL)
-	dataExposure, exposureReason := classifyUnauthorizedExposure(body, apiReq.URL)
+	riskLevel := assessRiskLevel(body, rawURL)
+	dataExposure, exposureReason := classifyUnauthorizedExposure(body, rawURL)
 	riskLevel = adjustUnauthorizedRiskLevel(riskLevel, dataExposure)
-	confidence, confidenceReason := evaluateUnauthorizedConfidence(resp.StatusCode(), body, apiReq.URL)
-	return true, body, UnauthorizedAssessment{
+	confidence, confidenceReason := evaluateUnauthorizedConfidence(statusCode, body, rawURL)
+	return true, UnauthorizedAssessment{
 		RiskLevel:        riskLevel,
 		Confidence:       confidence,
 		ConfidenceReason: confidenceReason,

@@ -85,37 +85,13 @@ func main() {
 	}
 
 	// 配置漏洞检测模块（来自 config.yaml vuln-detection）
-	// SQL 注入检测
-	options.VulnDetection.SQLInjection.Enabled = true
-
-	// LFI 本地文件包含检测
-	options.VulnDetection.LFI.Enabled = true
-	options.VulnDetection.LFI.ParamKeywords = []string{
-		"file", "include", "path", "doc", "template",
-		"view", "filepath", "filename", "page", "document",
-	}
-
-	// SSRF 检测
-	options.VulnDetection.SSRF.Enabled = true
-	options.VulnDetection.SSRF.ParamKeywords = []string{
-		"url", "link", "src", "source", "target",
-		"redirect", "callback", "return_url", "next", "jump", "goto",
-	}
-
-	// 重定向检测
-	options.VulnDetection.Redirect.Enabled = true
-	options.VulnDetection.Redirect.ParamKeywords = []string{
-		"url", "link", "src", "source", "target",
-		"redirect", "callback", "return_url", "next", "jump", "goto",
-	}
-
-	// XSS 检测
-	options.VulnDetection.XSS.Enabled = true
-
-	// 上传漏洞检测
-	options.VulnDetection.Upload.Enabled = true
-	options.VulnDetection.Upload.TestContent = "<h1>uploadtest</h1>"
-	options.VulnDetection.Upload.TestFileName = "test.html"
+	// payload、参数关键词与匹配规则已全部内置，这里只需开关。
+	options.VulnDetection.SQLInjection.Enabled = true // SQL 注入检测
+	options.VulnDetection.LFI.Enabled = true          // LFI 本地文件包含检测
+	options.VulnDetection.SSRF.Enabled = true         // SSRF 检测（可选回连：SSRF.CallbackURL）
+	options.VulnDetection.Redirect.Enabled = true     // 重定向检测
+	options.VulnDetection.XSS.Enabled = true          // XSS 检测
+	options.VulnDetection.Upload.Enabled = true       // 上传漏洞检测
 
 	// 使用互斥锁保护共享数据（如果需要）
 	var mu sync.Mutex

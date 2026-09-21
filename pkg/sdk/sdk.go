@@ -35,13 +35,10 @@ type (
 	TraceVariantSuggestion       = lib.TraceVariantSuggestion
 	ConfigYAML                   = lib.ConfigYAML
 	SQLInjectionConfig           = lib.SQLInjectionConfig
-	SQLiPayloadRule              = lib.SQLiPayloadRule
 	LFIConfig                    = lib.LFIConfig
-	LFIPayloadRule               = lib.LFIPayloadRule
 	SSRFConfig                   = lib.SSRFConfig
 	RedirectConfig               = lib.RedirectConfig
 	XSSConfig                    = lib.XSSConfig
-	XSSPayloadRule               = lib.XSSPayloadRule
 	UploadConfig                 = lib.UploadConfig
 	AuthorizationConfig          = lib.AuthorizationConfig
 	ScanDataStore                = lib.ScanDataStore

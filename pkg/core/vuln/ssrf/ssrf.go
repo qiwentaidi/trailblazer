@@ -93,7 +93,7 @@ func TestServerSideRequestForgery(apiReq structs.APIRequest, cfg config.SSRFConf
 
 	// 回连探测：带外确认，带内无法判断，只记录已派发
 	if callback := strings.TrimSpace(cfg.CallbackURL); callback != "" {
-		modifiedReq := injectSSRFPayload(apiReq, callback, cfg.ParamKeywords)
+		modifiedReq := injectSSRFPayload(apiReq, callback, nil)
 		if _, err := vuln.SendAPIRequest(modifiedReq, false); err == nil {
 			result.DispatchedCallback = true
 			result.Reason = "带内探测未命中，已向回连地址派发探测，请在回连服务端确认"

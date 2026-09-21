@@ -212,6 +212,11 @@ func crawlKatanaAPIContexts(target string, opts *APICrawlOptions, store *APIStor
 	return nil
 }
 
+// maxJSResourceFetchBytes bounds how much of one JavaScript resource is
+// fetched for static analysis. Bundles larger than this are truncated; the
+// anchor-slice stage still analyzes the fetched prefix.
+const maxJSResourceFetchBytes = 8 * 1024 * 1024
+
 func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions) []database.JSResource {
 	limit := opts.MaxJSResources
 	if limit <= 0 {
@@ -248,7 +253,10 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 		if err != nil || resp == nil {
 			continue
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+		// Large application bundles commonly exceed 2MiB; the anchor-slice
+		// analysis path bounds extractor work per resource, so fetching up to
+		// 8MiB is safe and avoids silently truncating request modules.
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxJSResourceFetchBytes))
 		resp.Body.Close()
 		if readErr != nil || resp.StatusCode >= 400 {
 			continue

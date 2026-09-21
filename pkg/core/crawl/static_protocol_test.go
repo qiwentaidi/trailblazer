@@ -108,6 +108,12 @@ const submit=()=>request.post("/api/poc/sync-setting",{enable:true,scope:"all"})
 	}
 }
 
+func TestResolveStaticTemplateLiteralRejectsSingleBacktick(t *testing.T) {
+	if got := resolveStaticTemplateLiteral("", "`", 0); got != "" {
+		t.Fatalf("expected a single backtick to be rejected, got %q", got)
+	}
+}
+
 func TestSelectPrimaryTraceEndpointPrefersMostCompleteTrace(t *testing.T) {
 	endpoints := []StaticProtocolEndpoint{
 		{
