@@ -162,7 +162,7 @@ type ScanDataStore interface {
 ### 5.1.2 接口资产、OpenAPI 与授权对照
 
 `PerformScan` 的每个 `TargetResult` 现在都会保留 `APIContexts`：它们来自
-同一次浏览器运行时抓取，按 `method + pathTemplate` 去重合并，且已脱敏。原有的
+同一次浏览器运行时抓取，按 `method + pathTemplate` 去重合并，保留原始参数、请求头和请求体示例。原有的
 `RequestBlueprints` 仍保留静态 JS 参数识别和补全证据。
 
 ```go
@@ -778,3 +778,12 @@ func main() {
 	)
 }
 ```
+
+
+### 原始敏感值输出
+
+`AnalyzeSensitiveAssets` 始终返回原始值：`value` 与兼容字段 `maskedValue` 内容相同，`evidence` 也保留原文。`SensitiveAssetOptions.IncludeRawValue` 保留以兼容旧代码，但不再控制输出；包括显式传入 `false` 的调用都会返回原文。去重使用原始值，避免不同值因脱敏摘要相同被合并。
+
+本项目依赖已发布的 `github.com/qiwentaidi/katana v0.1.0-trailblazer.3`，接口参数、请求头和请求体示例均保留原文。其他项目引用本 SDK 时会获得该版本，无需额外配置本地 `replace`。根目录 `katana/` 继续作为独立的二次开发仓库使用。
+
+已有扫描结果中的星号无法从脱敏值还原，需使用更新后的程序重新扫描。

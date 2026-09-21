@@ -318,6 +318,8 @@ github.com/qiwentaidi/clients v0.0.7 h1:mYawy0QGEikPxyzGiEqCfOkYRlV7Wu1oBn2M+Nvx
 github.com/qiwentaidi/clients v0.0.7/go.mod h1:SW/Qn8/jtuMvifNju8BhRSCHkzqsYmrDNrf2f0VoaXA=
 github.com/qiwentaidi/katana v0.1.0-trailblazer.2 h1:F/ILwTHEJWvhju9fINPKhtGS8rB1tm6vRj91c2qqPU8=
 github.com/qiwentaidi/katana v0.1.0-trailblazer.2/go.mod h1:F1VWloyDf8lw5eaz1LOdDzL1DPT+A4hsTdZW4h4F7WY=
+github.com/qiwentaidi/katana v0.1.0-trailblazer.3 h1:RY8hsPjF0oS6KH2btkaNMDefBR6y1aT+tcdd76dDMpo=
+github.com/qiwentaidi/katana v0.1.0-trailblazer.3/go.mod h1:F1VWloyDf8lw5eaz1LOdDzL1DPT+A4hsTdZW4h4F7WY=
 github.com/qiwentaidi/utils v0.0.5 h1:4UdKxbJm3K0Byk8CLxgURFCSL4bc8Y8H6yljv314ows=
 github.com/qiwentaidi/utils v0.0.5/go.mod h1:f5vUD4upAFeGm/oVqSNhzZOo83ft8YXd5hRjscfKM2o=
 github.com/quic-go/qpack v0.6.0 h1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=

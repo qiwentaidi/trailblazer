@@ -544,7 +544,7 @@ type TargetResult struct {
 	// values); dynamic parameters must be completed from runtime traffic.
 	OperationSpecs []crawl.OperationSpec `json:"operationSpecs,omitempty"`
 	APIRecords     []APIRecord           `json:"apiRecords,omitempty"`
-	// APIContexts is the deduplicated, sanitized interface asset set built
+	// APIContexts is the deduplicated interface asset set built
 	// from the same runtime capture used by parameter inference. It is safe to
 	// export as OpenAPI and never contains credential values.
 	APIContexts         []*apicontext.Context `json:"apiContexts,omitempty"`

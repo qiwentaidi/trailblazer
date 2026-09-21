@@ -4,7 +4,7 @@
 // authorization comparative experiment.
 //
 // These entry points run on the forked katana engine (see the go.mod
-// replace directive) and are the recommended way for other projects to
+// module requirement) and are the recommended way for other projects to
 // consume "crawl -> API asset -> docs / audit" as a library.
 package sdk
 
@@ -29,13 +29,13 @@ import (
 
 type (
 	// APIContext 一次观测到的接口完整上下文（方法、路径模板、参数、
-	// 请求/响应结构、认证证据、来源证据），凭据一律脱敏。
+	// 请求/响应结构、认证证据、来源证据），凭据保留原文。
 	APIContext = apicontext.Context
 	// APIParameter 观测参数（位置 in: path/query，含置信度）。
 	APIParameter = apicontext.Parameter
-	// APIBodySchema 请求体结构（字段类型推断 + 脱敏示例）。
+	// APIBodySchema 请求体结构（字段类型推断 + 原文示例）。
 	APIBodySchema = apicontext.BodySchema
-	// APIAuthContext 认证证据（cookie|bearer|custom|none，不存凭据）。
+	// APIAuthContext 认证证据（cookie|bearer|custom|none，凭据保存在 Headers 中）。
 	APIAuthContext = apicontext.AuthContext
 	// APIEvidence 资产来源证据（runtime / js-blueprint）。
 	APIEvidence = apicontext.Evidence
@@ -137,7 +137,7 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 
 	// Katana observes navigation and network activity, but does not submit
 	// forms. Reuse the existing bounded browser collector for form-driven API
-	// calls, then merge its sanitized observations into the same operation store.
+	// calls, then merge its observations into the same operation store.
 	runtimeTimeout := opts.RuntimeTimeout
 	if runtimeTimeout <= 0 {
 		runtimeTimeout = 35 * time.Second

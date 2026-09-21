@@ -9,10 +9,9 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 )
 
-// SensitiveAssetOptions controls the local, static analysis of collected JS.
-// Raw values are intentionally excluded unless the caller explicitly needs
-// them for an approved review workflow.
+// SensitiveAssetOptions is retained for compatibility with existing callers.
 type SensitiveAssetOptions struct {
+	// Deprecated: raw values are always included, regardless of this option.
 	IncludeRawValue bool
 }
 
@@ -20,7 +19,8 @@ type SensitiveAssetOptions struct {
 // resource. It is evidence, not a verified exposure: minified bundles can
 // contain examples, dead code, or build-time placeholders.
 type SensitiveAsset struct {
-	Type        string   `json:"type"`
+	Type string `json:"type"`
+	// MaskedValue is a legacy alias of Value and contains the original value.
 	MaskedValue string   `json:"maskedValue"`
 	Value       string   `json:"value,omitempty"`
 	Source      string   `json:"source"`
@@ -62,13 +62,9 @@ var sensitiveKeyRules = []struct {
 // already collected by CrawlAPIAssets. It intentionally remains separate from
 // DetectOperationVulns because sensitive-data leads are asset evidence, not
 // vulnerability verdicts.
-func AnalyzeSensitiveAssets(assets *APIAssetResult, opts *SensitiveAssetOptions) (*SensitiveAssetResult, error) {
+func AnalyzeSensitiveAssets(assets *APIAssetResult, _ *SensitiveAssetOptions) (*SensitiveAssetResult, error) {
 	if assets == nil {
 		return nil, errSensitiveAssetsNil
-	}
-	options := SensitiveAssetOptions{}
-	if opts != nil {
-		options = *opts
 	}
 	result := &SensitiveAssetResult{ResourcesAnalyzed: len(assets.JSResources)}
 	for _, resource := range assets.JSResources {
@@ -76,13 +72,13 @@ func AnalyzeSensitiveAssets(assets *APIAssetResult, opts *SensitiveAssetOptions)
 		if content == "" {
 			continue
 		}
-		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.Sensitive.FindAllStringIndex(content, -1), "sensitive_configuration", "legacy-sensitive", options)...)
-		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.Email.FindAllStringIndex(content, -1), "email", "legacy-email", options)...)
-		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.Phone.FindAllStringIndex(content, -1), "phone", "legacy-phone", options)...)
-		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.IDCard.FindAllStringIndex(content, -1), "id_card", "legacy-id-card", options)...)
-		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.IP_PORT.FindAllStringIndex(content, -1), "ip_url", "legacy-ip-port", options)...)
+		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.Sensitive.FindAllStringIndex(content, -1), "sensitive_configuration", "legacy-sensitive")...)
+		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.Email.FindAllStringIndex(content, -1), "email", "legacy-email")...)
+		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.Phone.FindAllStringIndex(content, -1), "phone", "legacy-phone")...)
+		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.IDCard.FindAllStringIndex(content, -1), "id_card", "legacy-id-card")...)
+		result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, crawl.IP_PORT.FindAllStringIndex(content, -1), "ip_url", "legacy-ip-port")...)
 		for _, keyRule := range sensitiveKeyRules {
-			result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, keyRule.pattern.FindAllStringIndex(content, -1), keyRule.kind, keyRule.rule, options)...)
+			result.Items = append(result.Items, findSensitiveAssets(content, resource.URL, keyRule.pattern.FindAllStringIndex(content, -1), keyRule.kind, keyRule.rule)...)
 		}
 	}
 	result.Items = dedupeSensitiveAssets(result.Items)
@@ -95,7 +91,7 @@ type sensitiveAssetsError struct{ message string }
 
 func (e *sensitiveAssetsError) Error() string { return "sensitive-assets: " + e.message }
 
-func findSensitiveAssets(content, source string, matches [][]int, kind, rule string, opts SensitiveAssetOptions) []SensitiveAsset {
+func findSensitiveAssets(content, source string, matches [][]int, kind, rule string) []SensitiveAsset {
 	items := make([]SensitiveAsset, 0, len(matches))
 	for _, match := range matches {
 		if len(match) != 2 || match[0] < 0 || match[1] <= match[0] {
@@ -105,45 +101,26 @@ func findSensitiveAssets(content, source string, matches [][]int, kind, rule str
 		if value == "" {
 			continue
 		}
-		maskedValue := maskSensitiveAssetValue(kind, value)
 		item := SensitiveAsset{
 			Type:        kind,
-			MaskedValue: maskedValue,
+			MaskedValue: value,
+			Value:       value,
 			Source:      source,
 			Sources:     []string{source},
 			Offset:      match[0],
 			Rule:        rule,
-			Evidence:    fmt.Sprintf("Matched by %s at byte offset %d; value redacted as %s.", rule, match[0], maskedValue),
-		}
-		if opts.IncludeRawValue {
-			item.Value = value
+			Evidence:    fmt.Sprintf("Matched by %s at byte offset %d; value %s.", rule, match[0], value),
 		}
 		items = append(items, item)
 	}
 	return items
 }
 
-func maskSensitiveAssetValue(kind, value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	if kind == "email" {
-		if at := strings.IndexByte(value, '@'); at > 0 {
-			return value[:1] + "***" + value[at:]
-		}
-	}
-	if len(value) <= 6 {
-		return "***"
-	}
-	return value[:3] + strings.Repeat("*", len(value)-6) + value[len(value)-3:]
-}
-
 func dedupeSensitiveAssets(items []SensitiveAsset) []SensitiveAsset {
 	byKey := make(map[string]int, len(items))
 	result := make([]SensitiveAsset, 0, len(items))
 	for _, item := range items {
-		key := item.Type + "\x00" + item.MaskedValue
+		key := item.Type + "\x00" + item.Value
 		if index, exists := byKey[key]; exists {
 			result[index].Sources = appendUniqueSensitiveSource(result[index].Sources, item.Source)
 			continue

@@ -74,15 +74,12 @@ func main() {
 	// ============================================================
 	// ② 敏感资产分析：只读取已采集 JS，不发起额外网络请求
 	// ============================================================
-	sensitiveAssets, err := sdk.AnalyzeSensitiveAssets(assets, &sdk.SensitiveAssetOptions{
-		// 默认不返回原始凭据/PII；仅在已获授权的受控复核流程中设为 true。
-		IncludeRawValue: false,
-	})
+	sensitiveAssets, err := sdk.AnalyzeSensitiveAssets(assets, nil)
 	if err != nil {
 		fmt.Println("sensitive asset analysis error:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("== 敏感资产候选: %d（分析 JS %d 个，默认脱敏，需人工验证）\n",
+	fmt.Printf("== 敏感资产候选: %d（分析 JS %d 个，原文输出，需人工验证）\n",
 		len(sensitiveAssets.Items), sensitiveAssets.ResourcesAnalyzed)
 	sensitiveTypeCounts := make(map[string]int)
 	for _, item := range sensitiveAssets.Items {
@@ -97,8 +94,7 @@ func main() {
 		fmt.Printf("   %s: %d\n", kind, sensitiveTypeCounts[kind])
 	}
 	for _, item := range sensitiveAssets.Items {
-		fmt.Printf("     [%s] %s (%s @ %d, rule=%s)\n", item.Type, item.MaskedValue, item.Source, item.Offset, item.Rule)
-		// item.Value 仅在 IncludeRawValue=true 时存在；不要默认写入日志或 OpenAPI 文档。
+		fmt.Printf("     [%s] %s (%s @ %d, rule=%s)\n", item.Type, item.Value, item.Source, item.Offset, item.Rule)
 	}
 
 	// ============================================================
