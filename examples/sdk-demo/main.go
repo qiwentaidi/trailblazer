@@ -3,8 +3,9 @@
 // 链路总览（采集/检测分离架构，选项 B）：
 //
 //	① 采集  sdk.CrawlAPIAssets       运行时流量 + JS 静态分析，只读、不探测
-//	② 文档  sdk.ExportOpenAPIWithSpecs  运行时观测 + 静态模板合并导出
-//	③ 检测  sdk.DetectOperationVulns  认证对照 + 匿名运行时响应判定 + 参数 fuzz，事件实时回调
+//	② 分析  sdk.AnalyzeSensitiveAssets  已采集 JS 的纯静态敏感资产分析
+//	③ 文档  sdk.ExportOpenAPIAssets  运行时观测 + 静态模板 + 推断 API Root 导出
+//	④ 检测  sdk.DetectOperationVulns  认证对照 + 匿名运行时响应判定 + 参数 fuzz，事件实时回调
 //
 // 用法：
 //
@@ -18,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
@@ -64,11 +66,45 @@ func main() {
 		fmt.Printf("     %s %s (params=%d requiresRuntime=%v)\n",
 			spec.Method, spec.PathTemplate, len(spec.Params), spec.RequiresRuntime)
 	}
+	fmt.Printf("   API Root 候选（推断，需验证）: %d\n", len(assets.APIRootCandidates))
+	for _, root := range assets.APIRootCandidates {
+		fmt.Printf("     %s\n", root)
+	}
 
 	// ============================================================
-	// ② OpenAPI 导出：运行时观测优先，静态模板补全未观测接口
+	// ② 敏感资产分析：只读取已采集 JS，不发起额外网络请求
 	// ============================================================
-	openapi, err := sdk.ExportOpenAPIWithSpecs(assets.Store, assets.OperationSpecs, "sdk-demo")
+	sensitiveAssets, err := sdk.AnalyzeSensitiveAssets(assets, &sdk.SensitiveAssetOptions{
+		// 默认不返回原始凭据/PII；仅在已获授权的受控复核流程中设为 true。
+		IncludeRawValue: false,
+	})
+	if err != nil {
+		fmt.Println("sensitive asset analysis error:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("== 敏感资产候选: %d（分析 JS %d 个，默认脱敏，需人工验证）\n",
+		len(sensitiveAssets.Items), sensitiveAssets.ResourcesAnalyzed)
+	sensitiveTypeCounts := make(map[string]int)
+	for _, item := range sensitiveAssets.Items {
+		sensitiveTypeCounts[item.Type]++
+	}
+	types := make([]string, 0, len(sensitiveTypeCounts))
+	for kind := range sensitiveTypeCounts {
+		types = append(types, kind)
+	}
+	sort.Strings(types)
+	for _, kind := range types {
+		fmt.Printf("   %s: %d\n", kind, sensitiveTypeCounts[kind])
+	}
+	for _, item := range sensitiveAssets.Items {
+		fmt.Printf("     [%s] %s (%s @ %d, rule=%s)\n", item.Type, item.MaskedValue, item.Source, item.Offset, item.Rule)
+		// item.Value 仅在 IncludeRawValue=true 时存在；不要默认写入日志或 OpenAPI 文档。
+	}
+
+	// ============================================================
+	// ③ OpenAPI 导出：运行时观测优先，静态模板补全未观测接口
+	// ============================================================
+	openapi, err := sdk.ExportOpenAPIAssets(assets, "sdk-demo")
 	if err != nil {
 		fmt.Println("openapi error:", err)
 		os.Exit(1)
@@ -83,7 +119,7 @@ func main() {
 	}
 
 	// ============================================================
-	// ③ 漏洞检测：认证对照（带认证接口）+ 匿名运行时响应判定 + 参数 fuzz（静态模板）
+	// ④ 漏洞检测：认证对照（带认证接口）+ 匿名运行时响应判定 + 参数 fuzz（静态模板）
 	//    漏洞事件经 OnFinding 实时回调，与 PerformScan 的 OnResult 同构：
 	//    ScanEvent{Type: EventTypeVulnerability, Data: database.VulnRecord}
 	// ============================================================

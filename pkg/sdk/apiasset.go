@@ -95,6 +95,10 @@ type APIAssetResult struct {
 	// traffic. ReplayFixture samples are never stored here.
 	OperationSpecs []crawl.OperationSpec `json:"operationSpecs,omitempty"`
 	RuntimeRecords []crawl.NetworkRecord `json:"runtimeRecords"`
+	// APIRootCandidates are inferred API base-path candidates aggregated from
+	// static and runtime evidence. They are useful asset-recognition leads, not
+	// verified server configuration (for example /api/ or /gateway/api/v1/).
+	APIRootCandidates []string `json:"apiRootCandidates,omitempty"`
 }
 
 // NewAPIStore 创建空的接口资产仓库。
@@ -160,7 +164,78 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 	assets.RequestBlueprints = blueprintAnalysis.Blueprints
 	assets.AnchorCandidates = blueprintAnalysis.AnchorCandidates
 	assets.OperationSpecs = crawl.OperationSpecsFromBlueprints(assets.RequestBlueprints, target)
+	assets.APIRootCandidates = buildAPIAssetRootCandidates(target, assets.OperationSpecs, assets.RuntimeRecords, assets.Store)
 	return assets, nil
+}
+
+// buildAPIAssetRootCandidates restores the legacy API Root signal for the separated
+// SDK pipeline. API routes may originate from static templates, browser
+// runtime capture, or Katana contexts, so all three sources participate in
+// root aggregation.
+func buildAPIAssetRootCandidates(target string, specs []crawl.OperationSpec, records []crawl.NetworkRecord, store *APIStore) []string {
+	routes := make([]string, 0, len(specs)+len(records))
+	for _, spec := range specs {
+		if path := apiAssetPath(spec.PathTemplate); path != "" {
+			routes = append(routes, path)
+		}
+	}
+	for _, record := range records {
+		if path := apiAssetPath(record.URL); path != "" {
+			routes = append(routes, path)
+		}
+	}
+	if store != nil {
+		for _, ctx := range store.List() {
+			if ctx == nil {
+				continue
+			}
+			if path := apiAssetPath(ctx.PathTemplate); path != "" {
+				routes = append(routes, path)
+			}
+		}
+	}
+
+	filter := crawl.Filter{}
+	roots := filter.APIRoots(routes, 1)
+	if parsed, err := url.Parse(strings.TrimSpace(target)); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		roots = append(roots, parsed.Scheme+"://"+parsed.Host)
+	}
+	return dedupeAPIAssetRootCandidates(roots)
+}
+
+func apiAssetPath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err == nil && parsed.Path != "" {
+		return parsed.Path
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		if queryIndex := strings.IndexByte(trimmed, '?'); queryIndex >= 0 {
+			return trimmed[:queryIndex]
+		}
+		return trimmed
+	}
+	return ""
+}
+
+func dedupeAPIAssetRootCandidates(roots []string) []string {
+	seen := make(map[string]struct{}, len(roots))
+	result := make([]string, 0, len(roots))
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		result = append(result, root)
+	}
+	return result
 }
 
 func crawlKatanaAPIContexts(target string, opts *APICrawlOptions, store *APIStore) error {
@@ -288,11 +363,125 @@ func ExportOpenAPI(store *APIStore, title string) ([]byte, error) {
 func ExportOpenAPIWithSpecs(store *APIStore, specs []crawl.OperationSpec, title string) ([]byte, error) {
 	doc := apicontext.ToOpenAPI(store, title)
 	mergeOperationSpecsIntoOpenAPI(doc, specs)
+	return marshalOpenAPIDocument(doc, nil)
+}
+
+// ExportOpenAPIAssets exports a complete crawl result. A shared inferred API
+// Root candidate is reflected in the OpenAPI 3.1 server description and base
+// URL, so consumers know it requires validation before use.
+func ExportOpenAPIAssets(assets *APIAssetResult, title string) ([]byte, error) {
+	if assets == nil {
+		return nil, fmt.Errorf("apiasset: assets cannot be nil")
+	}
+	return ExportOpenAPIWithSpecsAndRoots(assets.Store, assets.OperationSpecs, assets.APIRootCandidates, title)
+}
+
+// ExportOpenAPIWithSpecsAndRoots is the root-aware variant of
+// ExportOpenAPIWithSpecs. It preserves the older function for callers that
+// only have a Store and templates.
+func ExportOpenAPIWithSpecsAndRoots(store *APIStore, specs []crawl.OperationSpec, roots []string, title string) ([]byte, error) {
+	doc := apicontext.ToOpenAPI(store, title)
+	mergeOperationSpecsIntoOpenAPI(doc, specs)
+	return marshalOpenAPIDocument(doc, roots)
+}
+
+func marshalOpenAPIDocument(doc *apicontext.OpenAPIDocument, roots []string) ([]byte, error) {
+	if doc == nil {
+		return nil, fmt.Errorf("apiasset: OpenAPI document cannot be nil")
+	}
+	serverURL, basePath := openAPIServerBase(roots, doc.Paths)
+	if basePath != "" {
+		doc.Paths = rebaseOpenAPIPaths(doc.Paths, basePath)
+	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("apiasset: marshal openapi: %w", err)
 	}
-	return raw, nil
+	if serverURL == "" && len(roots) == 0 {
+		return raw, nil
+	}
+	var rendered map[string]any
+	if err := json.Unmarshal(raw, &rendered); err != nil {
+		return nil, fmt.Errorf("apiasset: decode rendered OpenAPI: %w", err)
+	}
+	if serverURL != "" {
+		rendered["servers"] = []map[string]string{{
+			"url":         serverURL,
+			"description": "Inferred shared API base path; validate before using this server configuration.",
+		}}
+	}
+	return json.MarshalIndent(rendered, "", "  ")
+}
+
+// openAPIServerBase selects the most-specific API Root shared by every path.
+// Only a shared root can be safely represented as a document-level OpenAPI
+// server because server URLs are prepended to every path.
+func openAPIServerBase(roots []string, paths map[string]map[string]any) (string, string) {
+	origin := ""
+	candidates := make([]string, 0, len(roots))
+	for _, root := range roots {
+		trimmed := strings.TrimSpace(root)
+		if trimmed == "" {
+			continue
+		}
+		if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+			if origin == "" {
+				origin = parsed.Scheme + "://" + parsed.Host
+			}
+			if path := normalizeOpenAPIBasePath(parsed.Path); path != "" {
+				candidates = append(candidates, path)
+			}
+			continue
+		}
+		if path := normalizeOpenAPIBasePath(trimmed); path != "" {
+			candidates = append(candidates, path)
+		}
+	}
+	if origin == "" {
+		return "", ""
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return len(candidates[i]) > len(candidates[j]) })
+	for _, candidate := range candidates {
+		if openAPIPathsShareBase(paths, candidate) {
+			return origin + candidate, candidate
+		}
+	}
+	return origin, ""
+}
+
+func normalizeOpenAPIBasePath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "/" || !strings.HasPrefix(value, "/") {
+		return ""
+	}
+	return strings.TrimRight(value, "/")
+}
+
+func openAPIPathsShareBase(paths map[string]map[string]any, base string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for path := range paths {
+		if path != base && !strings.HasPrefix(path, base+"/") {
+			return false
+		}
+	}
+	return true
+}
+
+func rebaseOpenAPIPaths(paths map[string]map[string]any, base string) map[string]map[string]any {
+	rebased := make(map[string]map[string]any, len(paths))
+	for path, item := range paths {
+		key := strings.TrimPrefix(path, base)
+		if key == "" {
+			key = "/"
+		}
+		if !strings.HasPrefix(key, "/") {
+			key = "/" + key
+		}
+		rebased[key] = item
+	}
+	return rebased
 }
 
 const (
