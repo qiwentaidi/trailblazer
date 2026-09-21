@@ -22,9 +22,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/qiwentaidi/clients"
 	"github.com/qiwentaidi/katana/pkg/apiaudit"
 	"github.com/qiwentaidi/katana/pkg/apicontext"
-	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
 	"gopkg.in/yaml.v3"
 )
@@ -47,31 +47,32 @@ var sdkIgnoredProtocolAlgorithms = map[string]struct{}{
 
 // VulnRecord 漏洞记录（SDK独立定义，避免ES依赖）
 type VulnRecord struct {
-	TaskID             string                       `json:"task_id"`
-	VulnID             string                       `json:"vuln_id"`
-	Title              string                       `json:"title"`
-	Level              string                       `json:"level"` // high, medium, low, info
-	Type               string                       `json:"type"`
-	URL                string                       `json:"url"`
-	Method             string                       `json:"method,omitempty"`
-	Request            string                       `json:"request,omitempty"`
-	Response           string                       `json:"response,omitempty"`
-	ResponseType       string                       `json:"response_type,omitempty"`
-	TraceID            string                       `json:"trace_id,omitempty"`
-	HasProtocolTrace   bool                         `json:"has_protocol_trace,omitempty"`
-	ResponsePlaintext  string                       `json:"response_plaintext,omitempty"`
-	ResponseCiphertext string                       `json:"response_ciphertext,omitempty"`
-	DecryptionStatus   string                       `json:"decryption_status,omitempty"`
-	DecryptionDetail   string                       `json:"decryption_detail,omitempty"`
-	ResponseLength     int                          `json:"response_length,omitempty"` // 原始响应长度（字节）
-	Confidence         string                       `json:"confidence,omitempty"`
-	ConfidenceReason   string                       `json:"confidence_reason,omitempty"`
-	DataExposure       string                       `json:"data_exposure,omitempty"`
-	ExposureReason     string                       `json:"exposure_reason,omitempty"`
-	StaticContexts     []database.VulnStaticContext `json:"static_contexts,omitempty"`
-	Description        string                       `json:"description"`
-	AIVerified         bool                         `json:"ai_verified"` // AI辅助验证标记
-	CreatedAt          time.Time                    `json:"created_at"`
+	AuthorizationEvidence *apiaudit.AuthzVerdict       `json:"authorization_evidence,omitempty"`
+	TaskID                string                       `json:"task_id"`
+	VulnID                string                       `json:"vuln_id"`
+	Title                 string                       `json:"title"`
+	Level                 string                       `json:"level"` // high, medium, low, info
+	Type                  string                       `json:"type"`
+	URL                   string                       `json:"url"`
+	Method                string                       `json:"method,omitempty"`
+	Request               string                       `json:"request,omitempty"`
+	Response              string                       `json:"response,omitempty"`
+	ResponseType          string                       `json:"response_type,omitempty"`
+	TraceID               string                       `json:"trace_id,omitempty"`
+	HasProtocolTrace      bool                         `json:"has_protocol_trace,omitempty"`
+	ResponsePlaintext     string                       `json:"response_plaintext,omitempty"`
+	ResponseCiphertext    string                       `json:"response_ciphertext,omitempty"`
+	DecryptionStatus      string                       `json:"decryption_status,omitempty"`
+	DecryptionDetail      string                       `json:"decryption_detail,omitempty"`
+	ResponseLength        int                          `json:"response_length,omitempty"` // 原始响应长度（字节）
+	Confidence            string                       `json:"confidence,omitempty"`
+	ConfidenceReason      string                       `json:"confidence_reason,omitempty"`
+	DataExposure          string                       `json:"data_exposure,omitempty"`
+	ExposureReason        string                       `json:"exposure_reason,omitempty"`
+	StaticContexts        []database.VulnStaticContext `json:"static_contexts,omitempty"`
+	Description           string                       `json:"description"`
+	AIVerified            bool                         `json:"ai_verified"` // AI辅助验证标记
+	CreatedAt             time.Time                    `json:"created_at"`
 }
 
 // ScanEventType 扫描事件类型
@@ -744,34 +745,35 @@ type FingerprintMatchItem struct {
 
 // VulnerabilityItem 漏洞信息（来自AnalyzeAPI检测）
 type VulnerabilityItem struct {
-	ID                 string                       `json:"id"`
-	Title              string                       `json:"title"`
-	Level              string                       `json:"level"`
-	Type               string                       `json:"type"`
-	URL                string                       `json:"url"`
-	Method             string                       `json:"method,omitempty"`
-	Request            string                       `json:"request,omitempty"`
-	Response           string                       `json:"response,omitempty"`
-	ResponseType       string                       `json:"responseType,omitempty"`
-	TraceID            string                       `json:"traceId,omitempty"`
-	HasProtocolTrace   bool                         `json:"hasProtocolTrace,omitempty"`
-	ResponsePlaintext  string                       `json:"responsePlaintext,omitempty"`
-	ResponseCiphertext string                       `json:"responseCiphertext,omitempty"`
-	DecryptionStatus   string                       `json:"decryptionStatus,omitempty"`
-	DecryptionDetail   string                       `json:"decryptionDetail,omitempty"`
-	ResponseLength     int                          `json:"responseLength,omitempty"`
-	Confidence         string                       `json:"confidence,omitempty"`
-	ConfidenceReason   string                       `json:"confidenceReason,omitempty"`
-	DataExposure       string                       `json:"dataExposure,omitempty"`
-	ExposureReason     string                       `json:"exposureReason,omitempty"`
-	AIReviewVerdict    string                       `json:"aiReviewVerdict,omitempty"`
-	AIReviewType       string                       `json:"aiReviewType,omitempty"`
-	AIReviewConfidence int                          `json:"aiReviewConfidence,omitempty"`
-	AIReviewReason     string                       `json:"aiReviewReason,omitempty"`
-	StaticContexts     []database.VulnStaticContext `json:"staticContexts,omitempty"`
-	Description        string                       `json:"description"`
-	AIVerified         bool                         `json:"aiVerified"`
-	CreatedAt          string                       `json:"createdAt"`
+	AuthorizationEvidence *apiaudit.AuthzVerdict       `json:"authorizationEvidence,omitempty"`
+	ID                    string                       `json:"id"`
+	Title                 string                       `json:"title"`
+	Level                 string                       `json:"level"`
+	Type                  string                       `json:"type"`
+	URL                   string                       `json:"url"`
+	Method                string                       `json:"method,omitempty"`
+	Request               string                       `json:"request,omitempty"`
+	Response              string                       `json:"response,omitempty"`
+	ResponseType          string                       `json:"responseType,omitempty"`
+	TraceID               string                       `json:"traceId,omitempty"`
+	HasProtocolTrace      bool                         `json:"hasProtocolTrace,omitempty"`
+	ResponsePlaintext     string                       `json:"responsePlaintext,omitempty"`
+	ResponseCiphertext    string                       `json:"responseCiphertext,omitempty"`
+	DecryptionStatus      string                       `json:"decryptionStatus,omitempty"`
+	DecryptionDetail      string                       `json:"decryptionDetail,omitempty"`
+	ResponseLength        int                          `json:"responseLength,omitempty"`
+	Confidence            string                       `json:"confidence,omitempty"`
+	ConfidenceReason      string                       `json:"confidenceReason,omitempty"`
+	DataExposure          string                       `json:"dataExposure,omitempty"`
+	ExposureReason        string                       `json:"exposureReason,omitempty"`
+	AIReviewVerdict       string                       `json:"aiReviewVerdict,omitempty"`
+	AIReviewType          string                       `json:"aiReviewType,omitempty"`
+	AIReviewConfidence    int                          `json:"aiReviewConfidence,omitempty"`
+	AIReviewReason        string                       `json:"aiReviewReason,omitempty"`
+	StaticContexts        []database.VulnStaticContext `json:"staticContexts,omitempty"`
+	Description           string                       `json:"description"`
+	AIVerified            bool                         `json:"aiVerified"`
+	CreatedAt             string                       `json:"createdAt"`
 }
 
 // Summary 扫描摘要
@@ -2202,34 +2204,35 @@ func convertSharedVulnerabilities(items []database.VulnRecord) []VulnerabilityIt
 	result := make([]VulnerabilityItem, 0, len(items))
 	for _, vuln := range items {
 		result = append(result, VulnerabilityItem{
-			ID:                 vuln.VulnID,
-			Title:              vuln.Title,
-			Level:              vuln.Level,
-			Type:               vuln.Type,
-			URL:                vuln.URL,
-			Method:             normalizeSDKVulnerabilityMethod(vuln),
-			Request:            vuln.Request,
-			Response:           vuln.Response,
-			ResponseType:       vuln.ResponseType,
-			TraceID:            vuln.TraceID,
-			HasProtocolTrace:   vuln.HasProtocolTrace,
-			ResponsePlaintext:  vuln.ResponsePlaintext,
-			ResponseCiphertext: vuln.ResponseCiphertext,
-			DecryptionStatus:   vuln.DecryptionStatus,
-			DecryptionDetail:   vuln.DecryptionDetail,
-			ResponseLength:     vuln.ResponseLength,
-			Confidence:         vuln.Confidence,
-			ConfidenceReason:   vuln.ConfidenceReason,
-			DataExposure:       vuln.DataExposure,
-			ExposureReason:     vuln.ExposureReason,
-			AIReviewVerdict:    vuln.AIReviewVerdict,
-			AIReviewType:       vuln.AIReviewType,
-			AIReviewConfidence: vuln.AIReviewConfidence,
-			AIReviewReason:     vuln.AIReviewReason,
-			StaticContexts:     append([]database.VulnStaticContext(nil), vuln.StaticContexts...),
-			Description:        vuln.Description,
-			AIVerified:         vuln.AIVerified,
-			CreatedAt:          vuln.CreatedAt.Format("2006-01-02 15:04:05"),
+			ID:                    vuln.VulnID,
+			AuthorizationEvidence: vuln.AuthorizationEvidence,
+			Title:                 vuln.Title,
+			Level:                 vuln.Level,
+			Type:                  vuln.Type,
+			URL:                   vuln.URL,
+			Method:                normalizeSDKVulnerabilityMethod(vuln),
+			Request:               vuln.Request,
+			Response:              vuln.Response,
+			ResponseType:          vuln.ResponseType,
+			TraceID:               vuln.TraceID,
+			HasProtocolTrace:      vuln.HasProtocolTrace,
+			ResponsePlaintext:     vuln.ResponsePlaintext,
+			ResponseCiphertext:    vuln.ResponseCiphertext,
+			DecryptionStatus:      vuln.DecryptionStatus,
+			DecryptionDetail:      vuln.DecryptionDetail,
+			ResponseLength:        vuln.ResponseLength,
+			Confidence:            vuln.Confidence,
+			ConfidenceReason:      vuln.ConfidenceReason,
+			DataExposure:          vuln.DataExposure,
+			ExposureReason:        vuln.ExposureReason,
+			AIReviewVerdict:       vuln.AIReviewVerdict,
+			AIReviewType:          vuln.AIReviewType,
+			AIReviewConfidence:    vuln.AIReviewConfidence,
+			AIReviewReason:        vuln.AIReviewReason,
+			StaticContexts:        append([]database.VulnStaticContext(nil), vuln.StaticContexts...),
+			Description:           vuln.Description,
+			AIVerified:            vuln.AIVerified,
+			CreatedAt:             vuln.CreatedAt.Format("2006-01-02 15:04:05"),
 		})
 	}
 	return result

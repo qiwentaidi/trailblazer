@@ -245,22 +245,5 @@ func anonymousUnauthorizedDescription(assessment unauth.UnauthorizedAssessment, 
 // authorizationVulnRecord 把授权对照结论转换为漏洞记录，与 scanexec
 // 管线内 PerformScan 路径产出的记录结构保持一致。
 func authorizationVulnRecord(taskID string, version int, operationID, url, method string, verdict AuthzVerdict) database.VulnRecord {
-	level := "medium"
-	if verdict.Confidence == "high" {
-		level = "high"
-	}
-	return database.VulnRecord{
-		TaskID:           taskID,
-		Version:          version,
-		VulnID:           "authz-" + operationID,
-		Title:            "未授权访问（认证对照）",
-		Level:            level,
-		Type:             "authorization",
-		URL:              url,
-		Method:           method,
-		Confidence:       verdict.Confidence,
-		ConfidenceReason: strings.Join(verdict.Reasons, "；"),
-		Description:      "带认证基线与匿名请求的响应对照实验确认业务响应结构一致。",
-		CreatedAt:        time.Now(),
-	}
+	return database.NewAuthorizationVulnRecord(taskID, version, operationID, url, method, verdict)
 }

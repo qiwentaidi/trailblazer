@@ -1,6 +1,7 @@
 package lib
 
 import (
+	"github.com/qiwentaidi/katana/pkg/apiaudit"
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
@@ -774,5 +775,20 @@ func TestConvertSharedSensitiveItemsToSDKPreservesSources(t *testing.T) {
 	}
 	if len(items[0].Sources) != 2 {
 		t.Fatalf("expected two sources, got %#v", items[0].Sources)
+	}
+}
+
+func TestAuthorizationEvidenceSurvivesSDKConversion(t *testing.T) {
+	verdict := &apiaudit.AuthzVerdict{Baseline: &apiaudit.HTTPExchange{Request: "baseline request", Response: "baseline response"}, Anonymous: &apiaudit.HTTPExchange{Request: "anon request", Response: "anon response", ResponseBodyRecorded: true}}
+	source := database.VulnRecord{VulnID: "authz-op", Type: "authorization", AuthorizationEvidence: verdict}
+	converted := convertSharedVulnerabilities([]database.VulnRecord{source})
+	if len(converted) != 1 || converted[0].AuthorizationEvidence == nil || converted[0].AuthorizationEvidence.Baseline.Response != "baseline response" {
+		t.Fatalf("converted evidence missing: %+v", converted)
+	}
+	collector := NewCLIVulnCollector()
+	NewSDKVulnCollectorAdapter(collector).Collect(source)
+	records := collector.GetVulns()
+	if len(records) != 1 || records[0].AuthorizationEvidence == nil || records[0].AuthorizationEvidence.Anonymous.Response != "anon response" {
+		t.Fatalf("callback adapter lost evidence: %+v", records)
 	}
 }

@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"github.com/qiwentaidi/katana/pkg/apiaudit"
 	"strings"
 	"time"
 )
@@ -966,46 +967,47 @@ func decodeHexASCII(text string) string {
 
 // VulnRecord 漏洞记录
 type VulnRecord struct {
-	TaskID             string              `json:"task_id"`
-	Version            int                 `json:"version"`
-	VulnID             string              `json:"vuln_id"`
-	Title              string              `json:"title"`
-	Level              string              `json:"level"` // high, medium, low, info
-	Status             string              `json:"status,omitempty"`
-	Type               string              `json:"type"`
-	Category           string              `json:"category,omitempty"`
-	Subcategory        string              `json:"subcategory,omitempty"`
-	BusinessObject     string              `json:"business_object,omitempty"`
-	NamingSource       string              `json:"naming_source,omitempty"`
-	URL                string              `json:"url"`
-	Method             string              `json:"method,omitempty"`
-	Request            string              `json:"request,omitempty"`
-	Response           string              `json:"response,omitempty"`
-	ResponseType       string              `json:"response_type,omitempty"`
-	TraceID            string              `json:"trace_id,omitempty"`
-	HasProtocolTrace   bool                `json:"has_protocol_trace,omitempty"`
-	ResponsePlaintext  string              `json:"response_plaintext,omitempty"`
-	ResponseCiphertext string              `json:"response_ciphertext,omitempty"`
-	DecryptionStatus   string              `json:"decryption_status,omitempty"`
-	DecryptionDetail   string              `json:"decryption_detail,omitempty"`
-	ResponseLength     int                 `json:"response_length,omitempty"` // 原始响应长度（字节）
-	Confidence         string              `json:"confidence,omitempty"`
-	ConfidenceReason   string              `json:"confidence_reason,omitempty"`
-	DataExposure       string              `json:"data_exposure,omitempty"`
-	ExposureReason     string              `json:"exposure_reason,omitempty"`
-	DenyTemplateID     string              `json:"deny_template_id,omitempty"`
-	DenyTemplateKind   string              `json:"deny_template_kind,omitempty"`
-	DenyTemplateLabel  string              `json:"deny_template_label,omitempty"`
-	DenyTemplateCount  int                 `json:"deny_template_count,omitempty"`
-	AIReviewVerdict    string              `json:"ai_review_verdict,omitempty"`
-	AIReviewType       string              `json:"ai_review_type,omitempty"`
-	AIReviewConfidence int                 `json:"ai_review_confidence,omitempty"`
-	AIReviewReason     string              `json:"ai_review_reason,omitempty"`
-	StaticContexts     []VulnStaticContext `json:"static_contexts,omitempty"`
-	CryptoKeyEvidence  *CryptoKeyEvidence  `json:"crypto_key_evidence,omitempty"`
-	Description        string              `json:"description"`
-	AIVerified         bool                `json:"ai_verified"` // AI辅助验证标记
-	CreatedAt          time.Time           `json:"created_at"`
+	AuthorizationEvidence *apiaudit.AuthzVerdict `json:"authorization_evidence,omitempty"`
+	TaskID                string                 `json:"task_id"`
+	Version               int                    `json:"version"`
+	VulnID                string                 `json:"vuln_id"`
+	Title                 string                 `json:"title"`
+	Level                 string                 `json:"level"` // high, medium, low, info
+	Status                string                 `json:"status,omitempty"`
+	Type                  string                 `json:"type"`
+	Category              string                 `json:"category,omitempty"`
+	Subcategory           string                 `json:"subcategory,omitempty"`
+	BusinessObject        string                 `json:"business_object,omitempty"`
+	NamingSource          string                 `json:"naming_source,omitempty"`
+	URL                   string                 `json:"url"`
+	Method                string                 `json:"method,omitempty"`
+	Request               string                 `json:"request,omitempty"`
+	Response              string                 `json:"response,omitempty"`
+	ResponseType          string                 `json:"response_type,omitempty"`
+	TraceID               string                 `json:"trace_id,omitempty"`
+	HasProtocolTrace      bool                   `json:"has_protocol_trace,omitempty"`
+	ResponsePlaintext     string                 `json:"response_plaintext,omitempty"`
+	ResponseCiphertext    string                 `json:"response_ciphertext,omitempty"`
+	DecryptionStatus      string                 `json:"decryption_status,omitempty"`
+	DecryptionDetail      string                 `json:"decryption_detail,omitempty"`
+	ResponseLength        int                    `json:"response_length,omitempty"` // 原始响应长度（字节）
+	Confidence            string                 `json:"confidence,omitempty"`
+	ConfidenceReason      string                 `json:"confidence_reason,omitempty"`
+	DataExposure          string                 `json:"data_exposure,omitempty"`
+	ExposureReason        string                 `json:"exposure_reason,omitempty"`
+	DenyTemplateID        string                 `json:"deny_template_id,omitempty"`
+	DenyTemplateKind      string                 `json:"deny_template_kind,omitempty"`
+	DenyTemplateLabel     string                 `json:"deny_template_label,omitempty"`
+	DenyTemplateCount     int                    `json:"deny_template_count,omitempty"`
+	AIReviewVerdict       string                 `json:"ai_review_verdict,omitempty"`
+	AIReviewType          string                 `json:"ai_review_type,omitempty"`
+	AIReviewConfidence    int                    `json:"ai_review_confidence,omitempty"`
+	AIReviewReason        string                 `json:"ai_review_reason,omitempty"`
+	StaticContexts        []VulnStaticContext    `json:"static_contexts,omitempty"`
+	CryptoKeyEvidence     *CryptoKeyEvidence     `json:"crypto_key_evidence,omitempty"`
+	Description           string                 `json:"description"`
+	AIVerified            bool                   `json:"ai_verified"` // AI辅助验证标记
+	CreatedAt             time.Time              `json:"created_at"`
 }
 
 // AssetRecord 资产记录（统一存储所有资产类型）

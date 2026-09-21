@@ -1,8 +1,10 @@
 package sdk
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/qiwentaidi/katana/pkg/apicontext"
@@ -50,6 +52,24 @@ func TestDetectOperationVulnsAuthorizationFinding(t *testing.T) {
 		t.Fatalf("expected 1 vulnerability, got %+v", result.Vulnerabilities)
 	}
 	record := result.Vulnerabilities[0]
+	if record.AuthorizationEvidence == nil || record.AuthorizationEvidence.Baseline == nil || record.AuthorizationEvidence.Anonymous == nil {
+		t.Fatalf("missing comparative evidence: %+v", record)
+	}
+	if !strings.Contains(record.Request, "GET /api/users/123") || !strings.Contains(record.Response, `"name":"alice"`) || record.ResponseLength != len(`{"id":123,"name":"alice"}`) || record.ResponseType != "application/json" {
+		t.Fatalf("missing legacy evidence fields: %+v", record)
+	}
+	encoded, err := json.Marshal(events[0].Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored database.VulnRecord
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.AuthorizationEvidence == nil || restored.AuthorizationEvidence.Baseline == nil || restored.AuthorizationEvidence.Anonymous.Response != record.Response {
+		t.Fatalf("event serialization lost evidence: %s", encoded)
+	}
+
 	if record.Type != "authorization" || record.TaskID != "sdk-detect" || record.Method != "GET" {
 		t.Errorf("unexpected record: %+v", record)
 	}

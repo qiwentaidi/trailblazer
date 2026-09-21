@@ -23,9 +23,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/qiwentaidi/clients"
 	"github.com/qiwentaidi/katana/pkg/apiaudit"
 	"github.com/qiwentaidi/katana/pkg/apicontext"
-	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
 )
 
@@ -635,24 +635,7 @@ func runAuthorizationChecks(options Options, contexts []*apicontext.Context) ([]
 		if !verdict.Vulnerable {
 			continue
 		}
-		level := "medium"
-		if verdict.Confidence == "high" {
-			level = "high"
-		}
-		findings = append(findings, database.VulnRecord{
-			TaskID:           options.TaskID,
-			Version:          options.Version,
-			VulnID:           "authz-" + ctx.OperationID,
-			Title:            "未授权访问（认证对照）",
-			Level:            level,
-			Type:             "authorization",
-			URL:              ctx.ObservedURL,
-			Method:           ctx.Method,
-			Confidence:       verdict.Confidence,
-			ConfidenceReason: strings.Join(verdict.Reasons, "；"),
-			Description:      "带认证基线与匿名请求的响应对照实验确认业务响应结构一致。",
-			CreatedAt:        time.Now(),
-		})
+		findings = append(findings, database.NewAuthorizationVulnRecord(options.TaskID, options.Version, ctx.OperationID, ctx.ObservedURL, ctx.Method, verdict))
 	}
 	return checks, findings
 }

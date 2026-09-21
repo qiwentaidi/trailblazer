@@ -784,6 +784,22 @@ func main() {
 
 `AnalyzeSensitiveAssets` 始终返回原始值：`value` 与兼容字段 `maskedValue` 内容相同，`evidence` 也保留原文。`SensitiveAssetOptions.IncludeRawValue` 保留以兼容旧代码，但不再控制输出；包括显式传入 `false` 的调用都会返回原文。去重使用原始值，避免不同值因脱敏摘要相同被合并。
 
-本项目依赖已发布的 `github.com/qiwentaidi/katana v0.1.0-trailblazer.3`，接口参数、请求头和请求体示例均保留原文。其他项目引用本 SDK 时会获得该版本，无需额外配置本地 `replace`。根目录 `katana/` 继续作为独立的二次开发仓库使用。
+原文输出能力自 `github.com/qiwentaidi/katana v0.1.0-trailblazer.3` 起提供，接口参数、请求头和请求体示例均保留原文。根目录 `katana/` 作为独立的二次开发仓库使用；认证对照证据的版本说明见下节。
 
 已有扫描结果中的星号无法从脱敏值还原，需使用更新后的程序重新扫描。
+
+
+### 认证对照证据接入
+
+认证对照漏洞的 `database.VulnRecord` 和回调载荷新增 `authorization_evidence`。`AnalyzeAPI` 的 `VulnerabilityItem` 使用 camelCase 字段 `authorizationEvidence`。二者内容均为 `AuthzVerdict`：
+
+- `baseline`：爬取时选定的完整带认证观测；不是重新发送一次认证请求。
+- `anonymous`：本次匿名对照请求及响应。请求失败时仍可保留请求内容。
+- 每组包含 `method`、`url`、`request`、`response`、`statusCode`、`contentType`、`responseLength`、`responseBodyRecorded`。
+- `confidence`、`reasons` 为实际判定依据；只有 `fieldComparisonPerformed=true` 时才展示 `fieldSimilarity`，不要将未执行字段比较的默认零值解释为相似度 0%。
+
+兼容字段 `request`、`response`、`response_type`、`response_length` 填入匿名请求证据；风险描述来自实际判定理由，不再固定宣称业务结构一致。HTTP 报文文本根据采集到的方法、URL、头和正文重建，供人工复核，不是保留线上头部顺序、协议版本和传输分帧的逐字节抓包。
+
+Hephaestus 等调用项目需在接收回调、持久化和详情接口中保留新增字段，详情页可按“带认证基线 / 匿名请求”切换查看请求和响应。缺失 `authorization_evidence`、某组证据为 null，或 `responseBodyRecorded=false` 时，应显示“未记录，需重新扫描”，不能把缺失正文解释为实际返回 0 B。已记录的空正文（`responseBodyRecorded=true` 且长度为 0）才显示 0 B。
+
+认证对照证据自 `github.com/qiwentaidi/katana v0.1.0-trailblazer.4` 起提供。本项目已依赖该发布版本，无需配置本地 `replace`；其他项目升级本 SDK 后即可获得对应依赖。`katana/` 继续作为独立的二次开发仓库使用。
