@@ -98,6 +98,9 @@ func main() {
 			sdk.NewLFIFuzzer(sdk.LFIConfig{Enabled: true}),
 			sdk.NewSSRFFuzzer(sdk.SSRFConfig{Enabled: true}),
 			sdk.NewXSSFuzzer(sdk.XSSConfig{Enabled: true}),
+			sdk.NewRedirectFuzzer(sdk.RedirectConfig{Enabled: true}),
+			// 文件上传检测需要传入 FileUploadAIChecker 才会确认并上报漏洞。
+			sdk.NewFileUploadFuzzer(sdk.UploadConfig{Enabled: true}, nil),
 		},
 		OnFinding: func(event sdk.ScanEvent) bool {
 			record, ok := event.Data.(database.VulnRecord)

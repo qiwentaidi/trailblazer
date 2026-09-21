@@ -6,6 +6,7 @@
 package sdk
 
 import (
+	"github.com/qiwentaidi/trailblazer/pkg/core/vuln/upload"
 	"github.com/qiwentaidi/trailblazer/pkg/lib"
 )
 
@@ -60,6 +61,7 @@ type (
 	RequestBlueprintSource       = lib.RequestBlueprintSource
 	VulnCollector                = lib.VulnCollector
 	CLIVulnCollector             = lib.CLIVulnCollector
+	FileUploadAIChecker          = upload.FileUploadAIChecker
 )
 
 const (
