@@ -54,6 +54,7 @@ func main() {
 
 	// 采集产物一览：
 	fmt.Printf("== 采集完成 (%s)\n", time.Since(start).Round(time.Millisecond))
+	fmt.Printf("   网站树根节点: %d\n", len(assets.SiteTree))
 	fmt.Printf("   运行时 API Context: %d（去重合并后的接口上下文）\n", assets.Store.Len())
 	for _, ctx := range assets.Store.List() {
 		fmt.Printf("     %s %s (观测 %d 次)\n", ctx.Method, ctx.PathTemplate, ctx.Observations)

@@ -8,6 +8,46 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 )
 
+func TestBuildAPIAssetSiteTreeIncludesTargetAndDiscoveredURLs(t *testing.T) {
+	tree := buildAPIAssetSiteTree("https://example.test/app/#/home", []string{
+		"https://example.test/static/app.js",
+		"https://example.test/api/users?id=1",
+		"https://example.test/static/app.js",
+		"javascript:alert(1)",
+	})
+	if len(tree) != 1 || tree[0].Label != "https://example.test" {
+		t.Fatalf("site tree root = %#v", tree)
+	}
+	labels := make(map[string]int)
+	var collect func([]crawl.ElTreeNode)
+	collect = func(nodes []crawl.ElTreeNode) {
+		for _, node := range nodes {
+			labels[node.Label]++
+			collect(node.Children)
+		}
+	}
+	collect(tree)
+	for _, label := range []string{"app", "static", "app.js", "api", "users", "?id=1"} {
+		if labels[label] != 1 {
+			t.Errorf("node %q occurs %d times, want 1", label, labels[label])
+		}
+	}
+	if labels["javascript:"] != 0 {
+		t.Fatal("non-HTTP URL must not enter site tree")
+	}
+	encoded, err := json.Marshal(APIAssetResult{SiteTree: tree})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload["siteTree"]) == 0 || string(payload["siteTree"]) == "[]" {
+		t.Fatalf("siteTree missing from APIAssetResult JSON: %s", encoded)
+	}
+}
+
 func TestBuildAPIAssetRootCandidatesRestoresStaticAndRuntimeRoots(t *testing.T) {
 	store := NewAPIStore()
 	roots := buildAPIAssetRootCandidates(

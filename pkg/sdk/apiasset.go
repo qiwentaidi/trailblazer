@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/qiwentaidi/katana/pkg/apiaudit"
@@ -87,6 +88,7 @@ type APICrawlOptions struct {
 // retain the evidence used for static parameter recognition and completion.
 type APIAssetResult struct {
 	Store             *APIStore                      `json:"-"`
+	SiteTree          []crawl.ElTreeNode             `json:"siteTree"`
 	JSResources       []database.JSResource          `json:"jsResources"`
 	RequestBlueprints []crawl.RequestBlueprint       `json:"requestBlueprints"`
 	AnchorCandidates  []crawl.RequestAnchorCandidate `json:"anchorCandidates,omitempty"`
@@ -127,10 +129,14 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 		opts = &APICrawlOptions{}
 	}
 	store := apicontext.NewStore()
-	assets := &APIAssetResult{Store: store, JSResources: []database.JSResource{}, RequestBlueprints: []crawl.RequestBlueprint{}, RuntimeRecords: []crawl.NetworkRecord{}}
+	assets := &APIAssetResult{Store: store, SiteTree: []crawl.ElTreeNode{}, JSResources: []database.JSResource{}, RequestBlueprints: []crawl.RequestBlueprint{}, RuntimeRecords: []crawl.NetworkRecord{}}
 
+	var katanaURLs []string
 	if opts.EnableKatana {
-		if err := crawlKatanaAPIContexts(target, opts, store); err != nil {
+		var err error
+		katanaURLs, err = crawlKatanaAPIContexts(target, opts, store)
+		if err != nil {
+			assets.SiteTree = buildAPIAssetSiteTree(target, katanaURLs)
 			return assets, err
 		}
 	}
@@ -150,6 +156,7 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 		MaxRouteClicks:       8,
 		RouteInteractionWait: 2 * time.Second,
 	})
+	assets.SiteTree = buildAPIAssetSiteTree(target, append(katanaURLs, networkURLs...))
 	assets.RuntimeRecords = records
 	for _, record := range records {
 		ctx := apicontext.Build(apicontext.Observation{Method: record.Method, URL: record.URL, PostData: record.RequestBody, ReqHeaders: record.RequestHeaders, RespStatus: record.ResponseCode, RespHeaders: record.ResponseHeaders, RespBody: []byte(record.ResponseBody), ResourceType: record.ResourceType, PageURL: record.PageURL})
@@ -166,6 +173,25 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 	assets.OperationSpecs = crawl.OperationSpecsFromBlueprints(assets.RequestBlueprints, target)
 	assets.APIRootCandidates = buildAPIAssetRootCandidates(target, assets.OperationSpecs, assets.RuntimeRecords, assets.Store)
 	return assets, nil
+}
+
+func buildAPIAssetSiteTree(target string, discovered []string) []crawl.ElTreeNode {
+	urls := make([]string, 0, len(discovered)+1)
+	seen := make(map[string]struct{}, len(discovered)+1)
+	for _, raw := range append([]string{target}, discovered...) {
+		parsed, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			continue
+		}
+		parsed.Fragment = ""
+		normalized := parsed.String()
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		urls = append(urls, normalized)
+	}
+	return crawl.BuildElTree(urls)
 }
 
 // buildAPIAssetRootCandidates restores the legacy API Root signal for the separated
@@ -238,7 +264,9 @@ func dedupeAPIAssetRootCandidates(roots []string) []string {
 	return result
 }
 
-func crawlKatanaAPIContexts(target string, opts *APICrawlOptions, store *APIStore) error {
+func crawlKatanaAPIContexts(target string, opts *APICrawlOptions, store *APIStore) ([]string, error) {
+	var urls []string
+	var urlsMu sync.Mutex
 	katanaOpts := &types.Options{
 		MaxDepth:      intOrDefault(opts.MaxDepth, 3),
 		Timeout:       intOrDefault(opts.Timeout, 10),
@@ -251,6 +279,11 @@ func crawlKatanaAPIContexts(target string, opts *APICrawlOptions, store *APIStor
 		APICapture:    true,
 		XhrExtraction: true,
 		OnResult: func(result output.Result) {
+			if result.Request != nil && result.Response != nil {
+				urlsMu.Lock()
+				urls = append(urls, result.Request.URL)
+				urlsMu.Unlock()
+			}
 			if result.Response == nil {
 				return
 			}
@@ -271,20 +304,20 @@ func crawlKatanaAPIContexts(target string, opts *APICrawlOptions, store *APIStor
 
 	crawlerOptions, err := types.NewCrawlerOptions(katanaOpts)
 	if err != nil {
-		return fmt.Errorf("apiasset: build crawler options: %w", err)
+		return urls, fmt.Errorf("apiasset: build crawler options: %w", err)
 	}
 	defer crawlerOptions.Close()
 
 	crawler, err := hybrid.New(crawlerOptions)
 	if err != nil {
-		return fmt.Errorf("apiasset: start hybrid crawler: %w", err)
+		return urls, fmt.Errorf("apiasset: start hybrid crawler: %w", err)
 	}
 	defer crawler.Close()
 
 	if err := crawler.Crawl(target); err != nil {
-		return fmt.Errorf("apiasset: katana crawl %s: %w", target, err)
+		return urls, fmt.Errorf("apiasset: katana crawl %s: %w", target, err)
 	}
-	return nil
+	return urls, nil
 }
 
 // maxJSResourceFetchBytes bounds how much of one JavaScript resource is

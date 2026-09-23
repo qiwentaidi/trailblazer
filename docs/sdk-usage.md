@@ -192,9 +192,11 @@ if err != nil { panic(err) }
 ```go
 assets, err := sdk.CrawlAPIAssets("https://example.com", &sdk.APICrawlOptions{})
 if err != nil { panic(err) }
-fmt.Println(len(assets.JSResources), len(assets.RequestBlueprints), len(assets.RuntimeRecords))
+fmt.Println(len(assets.SiteTree), len(assets.JSResources), len(assets.RequestBlueprints), len(assets.RuntimeRecords))
 openapiJSON, err := sdk.ExportOpenAPI(assets.Store, "Observed API")
 ```
+
+`assets.SiteTree` 是以目标 URL、浏览器捕获的 URL 和启用 Katana 时爬取到的 URL 构建的网站树；不需要额外运行一次完整漏洞扫描。
 
 ## 5. 最小调用示例
 
