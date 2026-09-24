@@ -75,7 +75,7 @@ func main() {
 	// ============================================================
 	// ② 敏感资产分析：只读取已采集 JS，不发起额外网络请求
 	// ============================================================
-	sensitiveAssets, err := sdk.AnalyzeSensitiveAssets(assets, nil)
+	sensitiveAssets, err := sdk.AnalyzeSensitiveAssets(assets)
 	if err != nil {
 		fmt.Println("sensitive asset analysis error:", err)
 		os.Exit(1)

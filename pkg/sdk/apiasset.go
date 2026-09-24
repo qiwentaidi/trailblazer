@@ -9,6 +9,7 @@
 package sdk
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
@@ -56,13 +57,15 @@ type (
 // APICrawlOptions 基于 katana hybrid（headless）引擎的接口资产采集选项。
 // 只暴露与采集相关的参数；漏洞检测参数不在这里。
 type APICrawlOptions struct {
-	// MaxDepth 爬取深度，默认 3。
+	// Context cancels browser capture and recursive JavaScript downloads.
+	Context context.Context
+	// MaxDepth is used by supplemental Katana crawling only; default 3.
 	MaxDepth int
-	// Timeout 单请求超时秒数，默认 10。
+	// Timeout is used by supplemental Katana crawling only; default 10 seconds.
 	Timeout int
-	// Concurrency 并发爬取协程数，默认 10。
+	// Concurrency is used by supplemental Katana crawling only; default 10.
 	Concurrency int
-	// RateLimit 每秒最大请求数，默认 150。
+	// RateLimit is used by supplemental Katana crawling only; default 150.
 	RateLimit int
 	// Proxy 代理地址（可选），如 http://127.0.0.1:8080。
 	Proxy string
@@ -71,14 +74,15 @@ type APICrawlOptions struct {
 	// busy without yielding additional API evidence. Runtime + JS collection
 	// remains enabled either way.
 	EnableKatana bool
-	// Headers 需要注入到浏览器请求的自定义头（如登录态 Cookie）。
+	// Headers are applied to browser, document, JS and Katana requests.
 	Headers map[string]string
 	// RuntimeTimeout bounds the Trailblazer browser capture, including form
 	// triggering. Zero defaults to 35 seconds.
 	RuntimeTimeout time.Duration
-	// AutoTriggerForms lets the runtime collector exercise visible submit
-	// controls. It is enabled by default so login-driven XHR is captured.
-	AutoTriggerForms bool
+	// Deprecated: form triggering is enabled by default. Use
+	// DisableAutoTriggerForms to opt out.
+	AutoTriggerForms        bool
+	DisableAutoTriggerForms bool
 	// MaxJSResources limits downloaded JavaScript bundles, including recursively
 	// referenced modules, for static request extraction. Zero defaults to 512.
 	MaxJSResources int
@@ -132,6 +136,15 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 	if opts == nil {
 		opts = &APICrawlOptions{}
 	}
+	if err := apiAssetContext(opts).Err(); err != nil {
+		return nil, err
+	}
+	if proxy := strings.TrimSpace(opts.Proxy); proxy != "" {
+		parsed, err := url.Parse(proxy)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return nil, fmt.Errorf("apiasset: invalid proxy URL %q", proxy)
+		}
+	}
 	store := apicontext.NewStore()
 	assets := &APIAssetResult{Store: store, SiteTree: []crawl.ElTreeNode{}, JSResources: []database.JSResource{}, RequestBlueprints: []crawl.RequestBlueprint{}, RuntimeRecords: []crawl.NetworkRecord{}}
 
@@ -153,13 +166,19 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 		runtimeTimeout = 35 * time.Second
 	}
 	networkURLs, records, _, _ := crawl.CaptureNetworkActivityWithOptions(target, crawl.CaptureOptions{
+		Context:              apiAssetContext(opts),
 		Timeout:              runtimeTimeout,
-		AutoTriggerForms:     true,
+		ProxyServer:          opts.Proxy,
+		Headers:              opts.Headers,
+		AutoTriggerForms:     !opts.DisableAutoTriggerForms,
 		AutoExploreRoutes:    true,
 		MaxExploreRoutes:     8,
 		MaxRouteClicks:       8,
 		RouteInteractionWait: 2 * time.Second,
 	})
+	if err := apiAssetContext(opts).Err(); err != nil {
+		return assets, err
+	}
 	assets.SiteTree = buildAPIAssetSiteTree(target, append(katanaURLs, networkURLs...))
 	assets.RuntimeRecords = records
 	for _, record := range records {
@@ -171,12 +190,22 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 	}
 
 	assets.JSResources = collectAPIAssetJS(target, append(katanaURLs, networkURLs...), opts)
+	if err := apiAssetContext(opts).Err(); err != nil {
+		return assets, err
+	}
 	blueprintAnalysis := crawl.AnalyzeJSRequestBlueprints(assets.JSResources)
 	assets.RequestBlueprints = prefixAPIAssetBlueprintPaths(supplementAPIAssetUploadActions(blueprintAnalysis.Blueprints, assets.JSResources), assets.RuntimeRecords)
 	assets.AnchorCandidates = blueprintAnalysis.AnchorCandidates
 	assets.OperationSpecs = crawl.OperationSpecsFromBlueprints(assets.RequestBlueprints, target)
 	assets.APIRootCandidates = buildAPIAssetRootCandidates(target, assets.OperationSpecs, assets.RuntimeRecords, assets.Store)
 	return assets, nil
+}
+
+func apiAssetContext(opts *APICrawlOptions) context.Context {
+	if opts != nil && opts.Context != nil {
+		return opts.Context
+	}
+	return context.Background()
 }
 
 // Static wrappers often prepend a base path at request time. Infer that path
@@ -439,6 +468,14 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 	}
 	client := clients.NewRestyClient(nil, true).GetClient()
 	client.Timeout = 10 * time.Second
+	if proxy := strings.TrimSpace(opts.Proxy); proxy != "" {
+		proxyURL, _ := url.Parse(proxy)
+		if transport, ok := client.Transport.(*http.Transport); ok {
+			copy := transport.Clone()
+			copy.Proxy = http.ProxyURL(proxyURL)
+			client.Transport = copy
+		}
+	}
 	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
 		if !sameAPIAssetOrigin(base, req.URL) {
 			return http.ErrUseLastResponse
@@ -468,13 +505,16 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 	for _, candidate := range candidates {
 		enqueue(candidate)
 	}
-	for _, candidate := range apiAssetDocumentScripts(client, base, opts.Headers) {
+	for _, candidate := range apiAssetDocumentScripts(apiAssetContext(opts), client, base, opts.Headers) {
 		enqueue(candidate)
 	}
 	totalBytes := 0
 	for head := 0; head < len(queue) && len(resources) < limit && totalBytes < maxJSResourceTotalBytes; head++ {
+		if apiAssetContext(opts).Err() != nil {
+			break
+		}
 		candidate := queue[head]
-		req, err := http.NewRequest(http.MethodGet, candidate, nil)
+		req, err := http.NewRequestWithContext(apiAssetContext(opts), http.MethodGet, candidate, nil)
 		if err != nil {
 			continue
 		}
@@ -510,10 +550,10 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 	return resources
 }
 
-func apiAssetDocumentScripts(client *http.Client, page *url.URL, headers map[string]string) []string {
+func apiAssetDocumentScripts(ctx context.Context, client *http.Client, page *url.URL, headers map[string]string) []string {
 	requestURL := *page
 	requestURL.Fragment = ""
-	req, err := http.NewRequest(http.MethodGet, requestURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
 	if err != nil {
 		return nil
 	}

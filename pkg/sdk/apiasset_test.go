@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -47,6 +48,48 @@ func TestCollectAPIAssetJSWithInvalidCertificate(t *testing.T) {
 	resources := collectAPIAssetJS(server.URL+"/admin/", []string{server.URL + "/assets/app.js"}, &APICrawlOptions{})
 	if len(resources) != 1 || resources[0].Content != "const api = '/api/items';" {
 		t.Fatalf("JS resources = %+v, want downloaded script", resources)
+	}
+}
+
+func TestCollectAPIAssetJSUsesProxyForDocumentAndScripts(t *testing.T) {
+	var documentRequests, scriptRequests atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			documentRequests.Add(1)
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			scriptRequests.Add(1)
+			_, _ = w.Write([]byte(`fetch('/api/items')`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer proxy.Close()
+	resources := collectAPIAssetJS("http://target.invalid/", nil, &APICrawlOptions{Proxy: proxy.URL})
+	if documentRequests.Load() != 1 || scriptRequests.Load() != 1 || len(resources) != 1 {
+		t.Fatalf("proxy requests: document=%d script=%d resources=%d", documentRequests.Load(), scriptRequests.Load(), len(resources))
+	}
+}
+
+func TestCollectAPIAssetJSHonorsCanceledContext(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resources := collectAPIAssetJS(server.URL, nil, &APICrawlOptions{Context: ctx})
+	if len(resources) != 0 || requests.Load() != 0 {
+		t.Fatalf("canceled crawl made %d requests and returned %d resources", requests.Load(), len(resources))
+	}
+}
+
+func TestCrawlAPIAssetsRejectsInvalidProxy(t *testing.T) {
+	if _, err := CrawlAPIAssets("https://example.test", &APICrawlOptions{Proxy: "localhost:8080"}); err == nil {
+		t.Fatal("expected invalid proxy URL error")
 	}
 }
 

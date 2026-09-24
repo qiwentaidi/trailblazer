@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,15 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 )
+
+func TestDetectOperationVulnsHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DetectOperationVulns(&APIAssetResult{Store: NewAPIStore()}, &DetectOptions{Context: ctx})
+	if err != context.Canceled {
+		t.Fatalf("canceled detection error = %v, want context.Canceled", err)
+	}
+}
 
 func detectTestAssets(t *testing.T, srv *httptest.Server) *APIAssetResult {
 	t.Helper()

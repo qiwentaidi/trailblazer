@@ -194,12 +194,14 @@ type CaptureSnapshot struct {
 
 // CaptureOptions 控制动态采集期间的页面交互行为。
 type CaptureOptions struct {
+	Context                   context.Context
 	Timeout                   time.Duration
 	InitialWait               time.Duration
 	PostInteractionWait       time.Duration
 	BrowserVisible            bool
 	ProxyServer               string
 	ProxyBypassList           string
+	Headers                   map[string]string
 	BypassFrontendRouteGuards bool
 	AutoTriggerForms          bool
 	AutoTriggerAttempts       int
@@ -253,7 +255,11 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 	var protocolTraces []ProtocolTraceRecord
 	var frontendRoutes []FrontendRouteRecord
 	allocOpts := buildExecAllocatorOptions(options)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+	parent := options.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, allocOpts...)
 	defer allocCancel()
 
 	ctx, cancel := chromedp.NewContext(allocCtx)
@@ -423,6 +429,13 @@ func CaptureNetworkActivityWithOptions(url string, options CaptureOptions) ([]st
 		}),
 		chromedp.Navigate(url),
 		chromedp.Sleep(options.InitialWait),
+	}
+	if len(options.Headers) > 0 {
+		headers := make(network.Headers, len(options.Headers))
+		for name, value := range options.Headers {
+			headers[name] = value
+		}
+		actions = append(actions[:3], append([]chromedp.Action{network.SetExtraHTTPHeaders(headers)}, actions[3:]...)...)
 	}
 	if options.NativeFormTrigger {
 		actions = append(actions, nativeFormTriggerAction(options))

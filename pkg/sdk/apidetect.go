@@ -14,8 +14,10 @@
 package sdk
 
 import (
+	"context"
 	"crypto/sha1"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -37,6 +39,8 @@ type OperationFuzzer interface {
 
 // DetectOptions 独立漏洞检测的配置。
 type DetectOptions struct {
+	// Context stops scheduling new authorization checks and operation fuzzers.
+	Context context.Context
 	// TaskID / Version 与扫描任务关联，写入漏洞记录；TaskID 为空时用 sdk-detect。
 	TaskID  string
 	Version int
@@ -72,6 +76,13 @@ func DetectOperationVulns(assets *APIAssetResult, opts *DetectOptions) (*DetectR
 	if opts == nil {
 		opts = &DetectOptions{}
 	}
+	runCtx := opts.Context
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	if err := runCtx.Err(); err != nil {
+		return nil, err
+	}
 	taskID := strings.TrimSpace(opts.TaskID)
 	if taskID == "" {
 		taskID = "sdk-detect"
@@ -96,7 +107,14 @@ func DetectOperationVulns(assets *APIAssetResult, opts *DetectOptions) (*DetectR
 		if sender == nil {
 			sender = defaultAuthzSender()
 		}
+		baseSender := sender
+		sender = func(req *http.Request) (*http.Response, []byte, error) {
+			return baseSender(req.WithContext(runCtx))
+		}
 		for _, ctx := range assets.Store.List() {
+			if err := runCtx.Err(); err != nil {
+				return result, err
+			}
 			if ctx == nil || !ctx.Auth.Present {
 				continue
 			}
@@ -124,10 +142,16 @@ func DetectOperationVulns(assets *APIAssetResult, opts *DetectOptions) (*DetectR
 	}
 
 	for _, fuzzer := range opts.Fuzzers {
+		if err := runCtx.Err(); err != nil {
+			return result, err
+		}
 		if fuzzer == nil {
 			continue
 		}
 		for _, spec := range assets.OperationSpecs {
+			if err := runCtx.Err(); err != nil {
+				return result, err
+			}
 			for _, record := range fuzzer.Fuzz(spec) {
 				if record.TaskID == "" {
 					record.TaskID = taskID

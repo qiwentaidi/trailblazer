@@ -9,25 +9,17 @@ import (
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 )
 
-// SensitiveAssetOptions is retained for compatibility with existing callers.
-type SensitiveAssetOptions struct {
-	// Deprecated: raw values are always included, regardless of this option.
-	IncludeRawValue bool
-}
-
 // SensitiveAsset is one rule-based sensitive-data lead from a collected JS
 // resource. It is evidence, not a verified exposure: minified bundles can
 // contain examples, dead code, or build-time placeholders.
 type SensitiveAsset struct {
-	Type string `json:"type"`
-	// MaskedValue is a legacy alias of Value and contains the original value.
-	MaskedValue string   `json:"maskedValue"`
-	Value       string   `json:"value,omitempty"`
-	Source      string   `json:"source"`
-	Sources     []string `json:"sources,omitempty"`
-	Offset      int      `json:"offset"`
-	Rule        string   `json:"rule"`
-	Evidence    string   `json:"evidence,omitempty"`
+	Type     string   `json:"type"`
+	Value    string   `json:"value"`
+	Source   string   `json:"source"`
+	Sources  []string `json:"sources,omitempty"`
+	Offset   int      `json:"offset"`
+	Rule     string   `json:"rule"`
+	Evidence string   `json:"evidence,omitempty"`
 }
 
 // SensitiveAssetResult is the output of AnalyzeSensitiveAssets. Analysis only
@@ -62,7 +54,7 @@ var sensitiveKeyRules = []struct {
 // already collected by CrawlAPIAssets. It intentionally remains separate from
 // DetectOperationVulns because sensitive-data leads are asset evidence, not
 // vulnerability verdicts.
-func AnalyzeSensitiveAssets(assets *APIAssetResult, _ *SensitiveAssetOptions) (*SensitiveAssetResult, error) {
+func AnalyzeSensitiveAssets(assets *APIAssetResult) (*SensitiveAssetResult, error) {
 	if assets == nil {
 		return nil, errSensitiveAssetsNil
 	}
@@ -102,14 +94,13 @@ func findSensitiveAssets(content, source string, matches [][]int, kind, rule str
 			continue
 		}
 		item := SensitiveAsset{
-			Type:        kind,
-			MaskedValue: value,
-			Value:       value,
-			Source:      source,
-			Sources:     []string{source},
-			Offset:      match[0],
-			Rule:        rule,
-			Evidence:    fmt.Sprintf("Matched by %s at byte offset %d; value %s.", rule, match[0], value),
+			Type:     kind,
+			Value:    value,
+			Source:   source,
+			Sources:  []string{source},
+			Offset:   match[0],
+			Rule:     rule,
+			Evidence: fmt.Sprintf("Matched by %s at byte offset %d; value %s.", rule, match[0], value),
 		}
 		items = append(items, item)
 	}
