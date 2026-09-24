@@ -458,6 +458,27 @@ func TestBuildJSRequestBlueprintsExtractsGenericHTTPMethodWrappers(t *testing.T)
 	}
 }
 
+func TestBuildJSRequestBlueprintsKeepsMethodForObjectWrappers(t *testing.T) {
+	resources := []database.JSResource{{
+		URL: "https://example.test/assets/index.js",
+		Content: `const storageKey="/setting"; const storage={get:key=>localStorage.getItem(key)};
+			storage.get(storageKey);
+			const api={get:config=>request(config),post:config=>request(config)};
+			api.get({url:"/config/getConfig"});
+			api.post({url:"/login/account",params:{account:"test"}});`,
+	}}
+	blueprints := BuildJSRequestBlueprints(resources)
+	if findRequestBlueprint(blueprints, "GET", "/config/getConfig") == nil ||
+		findRequestBlueprint(blueprints, "POST", "/login/account") == nil {
+		t.Fatalf("wrapper methods were not preserved: %+v", blueprints)
+	}
+	for _, blueprint := range blueprints {
+		if blueprint.Path == "/setting" {
+			t.Fatalf("storage lookup was reported as HTTP API: %+v", blueprint)
+		}
+	}
+}
+
 func TestBuildJSRequestBlueprintsAnalyzesLargeBundlesByRequestAnchorSlice(t *testing.T) {
 	content := strings.Repeat("x", 140*1024) + `
 		const payload = { accountId: user.id, includeInactive: false };

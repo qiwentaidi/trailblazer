@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
+	"github.com/qiwentaidi/trailblazer/pkg/core/database"
 )
 
 func TestSameAPIAssetOriginNormalizesDefaultPort(t *testing.T) {
@@ -64,6 +65,76 @@ func TestCollectAPIAssetJSDoesNotFollowOffOriginRedirect(t *testing.T) {
 	resources := collectAPIAssetJS(source.URL, []string{source.URL + "/app.js"}, &APICrawlOptions{})
 	if len(resources) != 0 || redirected.Load() {
 		t.Fatalf("off-origin redirect was followed: resources=%d redirected=%t", len(resources), redirected.Load())
+	}
+}
+
+func TestCollectAPIAssetJSFollowsDocumentAndRecursiveModules(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch r.URL.Path {
+		case "/admin/":
+			_, _ = w.Write([]byte(`<script type="module" src="/admin/assets/main.js"></script><link rel="modulepreload" href="/admin/assets/preload.js">`))
+		case "/admin/assets/main.js":
+			_, _ = w.Write([]byte(`import "./preload.js"; import "./missing.js"; const page = () => import("./lazy.js");`))
+		case "/admin/assets/preload.js":
+			_, _ = w.Write([]byte(`export const preload = true;`))
+		case "/admin/assets/lazy.js":
+			_, _ = w.Write([]byte(`import { shared } from "./shared.js"; export { shared };`))
+		case "/admin/assets/shared.js":
+			_, _ = w.Write([]byte(`import "./main.js"; export const shared = true;`))
+		default:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>SPA fallback</html>"))
+		}
+	}))
+	defer server.Close()
+
+	resources := collectAPIAssetJS(server.URL+"/admin/", nil, &APICrawlOptions{})
+	if len(resources) != 4 {
+		t.Fatalf("JS resources = %d, want four distinct modules: %+v", len(resources), resources)
+	}
+	if requests.Load() != 6 {
+		t.Fatalf("requests = %d, want document, four modules, and one HTML fallback", requests.Load())
+	}
+	limited := collectAPIAssetJS(server.URL+"/admin/", nil, &APICrawlOptions{MaxJSResources: 2})
+	if len(limited) != 2 {
+		t.Fatalf("limited JS resources = %d, want 2", len(limited))
+	}
+}
+
+func TestPrefixAPIAssetBlueprintPathsFromRuntime(t *testing.T) {
+	blueprints := []crawl.RequestBlueprint{
+		{Method: "GET", Path: "/config/getConfig"},
+		{Method: "POST", Path: "/login/account"},
+	}
+	records := []crawl.NetworkRecord{{URL: "https://example.test/adminapi/config/getConfig"}}
+	got := prefixAPIAssetBlueprintPaths(blueprints, records)
+	if got[0].Path != "/adminapi/config/getConfig" || got[1].Path != "/adminapi/login/account" {
+		t.Fatalf("prefixed blueprints = %+v", got)
+	}
+	if blueprints[0].Path != "/config/getConfig" {
+		t.Fatal("source blueprints were modified")
+	}
+	if ambiguous := prefixAPIAssetBlueprintPaths(blueprints, []crawl.NetworkRecord{
+		{URL: "https://example.test/adminapi/config/getConfig"},
+		{URL: "https://example.test/config/getConfig"},
+	}); ambiguous[0].Path != "/config/getConfig" {
+		t.Fatalf("ambiguous prefix changed paths: %+v", ambiguous)
+	}
+}
+
+func TestSupplementAPIAssetUploadActions(t *testing.T) {
+	resources := []database.JSResource{{
+		URL:     "https://example.test/assets/upload.js",
+		Content: "const action=`${config.baseURL}${config.prefix}/upload/${props.type}`; return {action:action};",
+	}}
+	got := supplementAPIAssetUploadActions(nil, resources)
+	if len(got) != 1 || got[0].Method != "POST" || got[0].Path != "/upload/{type}" || got[0].ID == "" {
+		t.Fatalf("upload action blueprint = %+v", got)
+	}
+	if len(supplementAPIAssetUploadActions(got, resources)) != 1 {
+		t.Fatal("upload action was duplicated")
 	}
 }
 

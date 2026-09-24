@@ -9,11 +9,13 @@
 package sdk
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +29,7 @@ import (
 	"github.com/qiwentaidi/katana/pkg/types"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
+	"golang.org/x/net/html"
 )
 
 type (
@@ -76,8 +79,8 @@ type APICrawlOptions struct {
 	// AutoTriggerForms lets the runtime collector exercise visible submit
 	// controls. It is enabled by default so login-driven XHR is captured.
 	AutoTriggerForms bool
-	// MaxJSResources limits downloaded JavaScript bundles for static request
-	// extraction. Zero defaults to 32.
+	// MaxJSResources limits downloaded JavaScript bundles, including recursively
+	// referenced modules, for static request extraction. Zero defaults to 512.
 	MaxJSResources int
 	// OnAPIContext 每观测到一个接口上下文回调一次；返回 false 不中断爬取，
 	// 仅跳过该条资产的入库。
@@ -167,13 +170,62 @@ func CrawlAPIAssets(target string, opts *APICrawlOptions) (*APIAssetResult, erro
 		store.Add(ctx)
 	}
 
-	assets.JSResources = collectAPIAssetJS(target, networkURLs, opts)
+	assets.JSResources = collectAPIAssetJS(target, append(katanaURLs, networkURLs...), opts)
 	blueprintAnalysis := crawl.AnalyzeJSRequestBlueprints(assets.JSResources)
-	assets.RequestBlueprints = blueprintAnalysis.Blueprints
+	assets.RequestBlueprints = prefixAPIAssetBlueprintPaths(supplementAPIAssetUploadActions(blueprintAnalysis.Blueprints, assets.JSResources), assets.RuntimeRecords)
 	assets.AnchorCandidates = blueprintAnalysis.AnchorCandidates
 	assets.OperationSpecs = crawl.OperationSpecsFromBlueprints(assets.RequestBlueprints, target)
 	assets.APIRootCandidates = buildAPIAssetRootCandidates(target, assets.OperationSpecs, assets.RuntimeRecords, assets.Store)
 	return assets, nil
+}
+
+// Static wrappers often prepend a base path at request time. Infer that path
+// only when an observed request ends in the same static operation path.
+func prefixAPIAssetBlueprintPaths(blueprints []crawl.RequestBlueprint, records []crawl.NetworkRecord) []crawl.RequestBlueprint {
+	counts := make(map[string]int)
+	exactMatch := false
+	for _, record := range records {
+		runtimePath := apiAssetPath(record.URL)
+		for _, blueprint := range blueprints {
+			staticPath := strings.TrimSpace(blueprint.Path)
+			if staticPath == "" || !strings.HasPrefix(staticPath, "/") {
+				continue
+			}
+			if runtimePath == staticPath {
+				exactMatch = true
+				continue
+			}
+			if strings.HasSuffix(runtimePath, staticPath) {
+				prefix := strings.TrimSuffix(runtimePath, staticPath)
+				if strings.HasPrefix(prefix, "/") && prefix != "/" {
+					counts[strings.TrimRight(prefix, "/")]++
+				}
+			}
+		}
+	}
+	if exactMatch || len(counts) == 0 {
+		return blueprints
+	}
+	prefix := ""
+	best := 0
+	for candidate, count := range counts {
+		if count > best {
+			prefix, best = candidate, count
+		} else if count == best {
+			prefix = ""
+		}
+	}
+	if prefix == "" {
+		return blueprints
+	}
+	result := append([]crawl.RequestBlueprint(nil), blueprints...)
+	for index := range result {
+		path := strings.TrimSpace(result[index].Path)
+		if strings.HasPrefix(path, "/") && path != prefix && !strings.HasPrefix(path, prefix+"/") {
+			result[index].Path = prefix + path
+		}
+	}
+	return result
 }
 
 func buildAPIAssetSiteTree(target string, discovered []string) []crawl.ElTreeNode {
@@ -324,12 +376,62 @@ func crawlKatanaAPIContexts(target string, opts *APICrawlOptions, store *APIStor
 // maxJSResourceFetchBytes bounds how much of one JavaScript resource is
 // fetched for static analysis. Bundles larger than this are truncated; the
 // anchor-slice stage still analyzes the fetched prefix.
-const maxJSResourceFetchBytes = 8 * 1024 * 1024
+const (
+	maxJSResourceFetchBytes = 8 * 1024 * 1024
+	maxJSResourceTotalBytes = 64 * 1024 * 1024
+	defaultMaxJSResources   = 512
+)
+
+var relativeJSReferencePattern = regexp.MustCompile("[\"'](\\.{1,2}/[^\"'\\s]+?\\.js(?:\\?[^\"'\\s]*)?)[\"']")
+var uploadActionTemplatePattern = regexp.MustCompile("`[^`]{0,256}(/upload/\\$\\{([A-Za-z_$][\\w$.]*)\\})[^`]*`")
+
+// UI upload components submit their action URL through the component rather
+// than a fetch/axios call. Preserve a dynamic path as a template when the
+// action binding appears alongside the template construction.
+func supplementAPIAssetUploadActions(blueprints []crawl.RequestBlueprint, resources []database.JSResource) []crawl.RequestBlueprint {
+	result := append([]crawl.RequestBlueprint(nil), blueprints...)
+	seen := make(map[string]struct{}, len(result))
+	for _, blueprint := range result {
+		seen[strings.ToUpper(blueprint.Method)+" "+blueprint.Path] = struct{}{}
+	}
+	for _, resource := range resources {
+		for _, match := range uploadActionTemplatePattern.FindAllStringSubmatchIndex(resource.Content, -1) {
+			end := min(len(resource.Content), match[1]+1200)
+			if !strings.Contains(resource.Content[match[1]:end], "action:") {
+				continue
+			}
+			expression := resource.Content[match[4]:match[5]]
+			param := expression
+			if dot := strings.LastIndexByte(param, '.'); dot >= 0 {
+				param = param[dot+1:]
+			}
+			path := "/upload/{" + param + "}"
+			key := "POST " + path
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			snippet := resource.Content[match[0]:match[1]]
+			hash := sha1.Sum([]byte(key + "\x00" + resource.URL + "\x00" + snippet))
+			result = append(result, crawl.RequestBlueprint{
+				ID:               fmt.Sprintf("jrb_%x", hash[:8]),
+				Path:             path,
+				Method:           "POST",
+				Client:           "upload-action",
+				Source:           crawl.RequestBlueprintSource{File: resource.URL, Snippet: snippet, StartOffset: match[0], EndOffset: match[1]},
+				Confidence:       "medium",
+				ConfidenceReason: "upload action path template; method inferred from upload component default",
+				ExtractionSource: "js-upload-action",
+			})
+		}
+	}
+	return result
+}
 
 func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions) []database.JSResource {
 	limit := opts.MaxJSResources
 	if limit <= 0 {
-		limit = 32
+		limit = defaultMaxJSResources
 	}
 	base, err := url.Parse(target)
 	if err != nil || base.Host == "" {
@@ -345,19 +447,33 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 	}
 	seen := make(map[string]struct{})
 	resources := make([]database.JSResource, 0)
-	for _, candidate := range candidates {
-		if len(resources) >= limit {
-			break
+	queue := make([]string, 0, len(candidates)+16)
+	enqueue := func(raw string) {
+		parsed, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || !sameAPIAssetOrigin(base, parsed) || !strings.EqualFold(parsed.Scheme, base.Scheme) || !strings.HasSuffix(strings.ToLower(parsed.Path), ".js") {
+			return
 		}
-		candidate := strings.TrimSpace(candidate)
-		parsed, err := url.Parse(candidate)
-		if err != nil || !sameAPIAssetOrigin(base, parsed) || !strings.HasSuffix(strings.ToLower(parsed.Path), ".js") {
-			continue
+		parsed.Fragment = ""
+		if (strings.EqualFold(parsed.Scheme, "https") && parsed.Port() == "443") ||
+			(strings.EqualFold(parsed.Scheme, "http") && parsed.Port() == "80") {
+			parsed.Host = parsed.Hostname()
 		}
+		candidate := parsed.String()
 		if _, exists := seen[candidate]; exists {
-			continue
+			return
 		}
 		seen[candidate] = struct{}{}
+		queue = append(queue, candidate)
+	}
+	for _, candidate := range candidates {
+		enqueue(candidate)
+	}
+	for _, candidate := range apiAssetDocumentScripts(client, base, opts.Headers) {
+		enqueue(candidate)
+	}
+	totalBytes := 0
+	for head := 0; head < len(queue) && len(resources) < limit && totalBytes < maxJSResourceTotalBytes; head++ {
+		candidate := queue[head]
 		req, err := http.NewRequest(http.MethodGet, candidate, nil)
 		if err != nil {
 			continue
@@ -374,12 +490,72 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 		// 8MiB is safe and avoids silently truncating request modules.
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxJSResourceFetchBytes))
 		resp.Body.Close()
-		if readErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if readErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 ||
+			strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
 			continue
 		}
+		if totalBytes+len(body) > maxJSResourceTotalBytes {
+			break
+		}
+		totalBytes += len(body)
 		resources = append(resources, database.JSResource{URL: candidate, Content: string(body), ResponseCode: resp.StatusCode, Size: len(body), FetchedAt: time.Now()})
+		parent, _ := url.Parse(candidate)
+		for _, match := range relativeJSReferencePattern.FindAllStringSubmatch(string(body), -1) {
+			ref, err := url.Parse(match[1])
+			if err == nil {
+				enqueue(parent.ResolveReference(ref).String())
+			}
+		}
 	}
 	return resources
+}
+
+func apiAssetDocumentScripts(client *http.Client, page *url.URL, headers map[string]string) []string {
+	requestURL := *page
+	requestURL.Fragment = ""
+	req, err := http.NewRequest(http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return nil
+	}
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+	resp, err := client.Do(req)
+	if err != nil || resp == nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	root, err := html.Parse(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil
+	}
+	result := make([]string, 0, 16)
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		if node.Type == html.ElementNode && (node.Data == "script" || node.Data == "link") {
+			attr := "src"
+			if node.Data == "link" {
+				attr = "href"
+			}
+			for _, item := range node.Attr {
+				if item.Key != attr {
+					continue
+				}
+				ref, err := url.Parse(strings.TrimSpace(item.Val))
+				if err == nil {
+					result = append(result, page.ResolveReference(ref).String())
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	visit(root)
+	return result
 }
 
 func sameAPIAssetOrigin(base, candidate *url.URL) bool {

@@ -43,7 +43,7 @@ func main() {
 		Timeout:        10,
 		Concurrency:    4,
 		RateLimit:      50,
-		MaxJSResources: 48,
+		MaxJSResources: 0, // 默认递归采集上限 512 个 JS
 		// Headers: 登录态注入，例如 map[string]string{"Cookie": "session=..."}
 		// OnAPIContext: 每观测到一个接口上下文回调一次（返回 false 仅跳过入库）
 	})

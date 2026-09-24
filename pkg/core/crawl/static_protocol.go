@@ -1421,6 +1421,12 @@ func extractGenericHTTPMethodWrapperEndpoints(fileURL, content string) []StaticP
 		default:
 			continue
 		}
+		// An arbitrary object's get(key) can be a storage lookup. A resolved
+		// identifier is not enough evidence that the value is a request URL.
+		args := splitTopLevelCSV(match.Args)
+		if len(args) == 0 || identifierPattern.MatchString(strings.TrimSpace(args[0])) {
+			continue
+		}
 		results = append(results, staticEndpointFromCallArgs(fileURL, content, match, "wrapper-method:"+match.Callee, defaultMethod)...)
 	}
 	return results
@@ -1695,6 +1701,9 @@ func extractAxiosConfigEndpoints(fileURL, content string) []StaticProtocolEndpoi
 		}
 		method := strings.ToUpper(parseStringLiteral(config["method"]))
 		if method == "" {
+			method = httpMethodFromCallee(match.Callee)
+		}
+		if method == "" {
 			method = "GET"
 		}
 		params := collectPathAndQueryParams(path)
@@ -1725,6 +1734,23 @@ func extractAxiosConfigEndpoints(fileURL, content string) []StaticProtocolEndpoi
 		})
 	}
 	return results
+}
+
+func httpMethodFromCallee(callee string) string {
+	name := strings.ToLower(strings.TrimSpace(callee))
+	if dot := strings.LastIndexByte(name, '.'); dot >= 0 {
+		name = name[dot+1:]
+	}
+	switch name {
+	case "get", "post", "put", "delete", "patch":
+		return strings.ToUpper(name)
+	case "upload":
+		return "POST"
+	case "download":
+		return "GET"
+	default:
+		return ""
+	}
 }
 
 func extractFetchEndpoints(fileURL, content string) []StaticProtocolEndpoint {
@@ -1911,6 +1937,9 @@ func extractConfigLikeCallEndpoints(fileURL, content string) []StaticProtocolEnd
 			method = strings.ToUpper(parseStringLiteral(config["type"]))
 		}
 		if method == "" {
+			method = httpMethodFromCallee(match.Callee)
+		}
+		if method == "" {
 			method = "GET"
 		}
 
@@ -2003,6 +2032,9 @@ func extractGenericObjectRequestWrapperEndpoints(fileURL, content, resolverConte
 		method := strings.ToUpper(parseStringLiteral(config["method"]))
 		if method == "" {
 			method = strings.ToUpper(parseStringLiteral(config["type"]))
+		}
+		if method == "" {
+			method = httpMethodFromCallee(match.Callee)
 		}
 		if method == "" {
 			method = "GET"
