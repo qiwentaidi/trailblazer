@@ -14,6 +14,7 @@ import (
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+	"github.com/qiwentaidi/clients"
 )
 
 // WeakFormLoginResult 表示弱口令表单登录测试结果
@@ -799,7 +800,8 @@ func attemptLoginByCommonEndpoints(targetURL, username, password string) (*WeakF
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := clients.NewRestyClient(nil, true).GetClient()
+	client.Timeout = 10 * time.Second
 	for _, endpoint := range candidates {
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
 		if err != nil {

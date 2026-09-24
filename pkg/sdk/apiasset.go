@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/qiwentaidi/clients"
 	"github.com/qiwentaidi/katana/pkg/apiaudit"
 	"github.com/qiwentaidi/katana/pkg/apicontext"
 	"github.com/qiwentaidi/katana/pkg/engine/hybrid"
@@ -334,7 +335,14 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 	if err != nil || base.Host == "" {
 		return nil
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := clients.NewRestyClient(nil, true).GetClient()
+	client.Timeout = 10 * time.Second
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		if !sameAPIAssetOrigin(base, req.URL) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
 	seen := make(map[string]struct{})
 	resources := make([]database.JSResource, 0)
 	for _, candidate := range candidates {
@@ -343,7 +351,7 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 		}
 		candidate := strings.TrimSpace(candidate)
 		parsed, err := url.Parse(candidate)
-		if err != nil || parsed.Host != base.Host || !strings.HasSuffix(strings.ToLower(parsed.Path), ".js") {
+		if err != nil || !sameAPIAssetOrigin(base, parsed) || !strings.HasSuffix(strings.ToLower(parsed.Path), ".js") {
 			continue
 		}
 		if _, exists := seen[candidate]; exists {
@@ -366,12 +374,35 @@ func collectAPIAssetJS(target string, candidates []string, opts *APICrawlOptions
 		// 8MiB is safe and avoids silently truncating request modules.
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxJSResourceFetchBytes))
 		resp.Body.Close()
-		if readErr != nil || resp.StatusCode >= 400 {
+		if readErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			continue
 		}
 		resources = append(resources, database.JSResource{URL: candidate, Content: string(body), ResponseCode: resp.StatusCode, Size: len(body), FetchedAt: time.Now()})
 	}
 	return resources
+}
+
+func sameAPIAssetOrigin(base, candidate *url.URL) bool {
+	if base == nil || candidate == nil ||
+		!strings.EqualFold(base.Scheme, candidate.Scheme) ||
+		!strings.EqualFold(base.Hostname(), candidate.Hostname()) ||
+		base.Hostname() == "" {
+		return false
+	}
+	return apiAssetOriginPort(base) == apiAssetOriginPort(candidate)
+}
+
+func apiAssetOriginPort(parsed *url.URL) string {
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(parsed.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 
 // ExportOpenAPI 把接口资产仓库导出为 OpenAPI 3.1 JSON 文档。
@@ -736,7 +767,8 @@ func RunAuthorizationCheck(ctx *APIContext, sender AuthzSender) AuthzVerdict {
 
 // defaultAuthzSender 使用标准库 http.Client 执行对照实验请求。
 func defaultAuthzSender() AuthzSender {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := clients.NewRestyClient(nil, true).GetClient()
+	client.Timeout = 10 * time.Second
 	return func(req *http.Request) (*http.Response, []byte, error) {
 		resp, err := client.Do(req)
 		if err != nil {

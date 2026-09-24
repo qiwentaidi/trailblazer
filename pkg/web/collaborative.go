@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/qiwentaidi/clients"
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 	"github.com/qiwentaidi/trailblazer/pkg/core/database"
@@ -389,7 +390,9 @@ func executeCollaborativeAction(c *gin.Context) {
 		if body.Body != "" && req.Header.Get("Content-Type") == "" {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		client := &http.Client{Timeout: 12 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+		client := clients.NewRestyClient(nil, false).GetClient()
+		client.Timeout = 12 * time.Second
+		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 		response, err := client.Do(req)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "authorized replay failed", "detail": err.Error()})

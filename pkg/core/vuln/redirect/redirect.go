@@ -3,6 +3,7 @@ package redirect
 import (
 	"bytes"
 	"fmt"
+	"github.com/qiwentaidi/clients"
 	"github.com/qiwentaidi/trailblazer/pkg/config"
 	"github.com/qiwentaidi/trailblazer/pkg/core/structs"
 	"github.com/qiwentaidi/trailblazer/pkg/core/vuln"
@@ -130,11 +131,10 @@ func followRedirectChain(apiReq structs.APIRequest, payload string) (*redirectTr
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{
-		Jar: jar,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := clients.NewRestyClient(nil, false).GetClient()
+	client.Jar = jar
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(apiReq.Method))

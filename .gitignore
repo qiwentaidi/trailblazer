@@ -81,3 +81,5 @@ example/**/callback_result.json
 .vscode/
 release/
 dist/
+
+reports

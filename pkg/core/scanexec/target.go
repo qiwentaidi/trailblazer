@@ -613,7 +613,8 @@ func buildAPIContexts(records []crawl.NetworkRecord) []*apicontext.Context {
 func runAuthorizationChecks(options Options, contexts []*apicontext.Context) ([]AuthorizationCheck, []database.VulnRecord) {
 	checks := make([]AuthorizationCheck, 0)
 	findings := make([]database.VulnRecord, 0)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := clients.NewRestyClient(nil, true).GetClient()
+	client.Timeout = 10 * time.Second
 	send := apiaudit.Sender(func(req *http.Request) (*http.Response, []byte, error) {
 		resp, err := client.Do(req)
 		if err != nil {

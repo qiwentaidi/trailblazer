@@ -198,6 +198,8 @@ openapiJSON, err := sdk.ExportOpenAPI(assets.Store, "Observed API")
 
 `assets.SiteTree` 是以目标 URL、浏览器捕获的 URL 和启用 Katana 时爬取到的 URL 构建的网站树；不需要额外运行一次完整漏洞扫描。
 
+目标站点的 JS 下载、授权对照和相关主动测试复用 `github.com/qiwentaidi/clients` 的请求配置，允许采集自签名或主机名不匹配的 HTTPS 目标；SDK 不会修改目标服务器的证书。JS 下载仍限制为同源地址，并将显式 `:443` / `:80` 与省略默认端口视为同源。第三方服务请求（例如 OpenAI）不采用这项目标扫描策略。
+
 ## 5. 最小调用示例
 
 ```go

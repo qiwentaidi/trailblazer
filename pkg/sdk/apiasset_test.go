@@ -2,11 +2,70 @@ package sdk
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/qiwentaidi/trailblazer/pkg/core/crawl"
 )
+
+func TestSameAPIAssetOriginNormalizesDefaultPort(t *testing.T) {
+	base, _ := url.Parse("https://1.94.192.27:443/admin/")
+	tests := []struct {
+		candidate string
+		want      bool
+	}{
+		{"https://1.94.192.27/assets/app.js", true},
+		{"https://1.94.192.27:443/assets/app.js", true},
+		{"https://1.94.192.27:8443/assets/app.js", false},
+		{"http://1.94.192.27/assets/app.js", false},
+		{"https://other.example/assets/app.js", false},
+	}
+	for _, tc := range tests {
+		candidate, _ := url.Parse(tc.candidate)
+		if got := sameAPIAssetOrigin(base, candidate); got != tc.want {
+			t.Errorf("sameAPIAssetOrigin(%q) = %t, want %t", tc.candidate, got, tc.want)
+		}
+	}
+}
+
+func TestCollectAPIAssetJSWithInvalidCertificate(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/assets/app.js" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript")
+		_, _ = w.Write([]byte("const api = '/api/items';"))
+	}))
+	defer server.Close()
+
+	resources := collectAPIAssetJS(server.URL+"/admin/", []string{server.URL + "/assets/app.js"}, &APICrawlOptions{})
+	if len(resources) != 1 || resources[0].Content != "const api = '/api/items';" {
+		t.Fatalf("JS resources = %+v, want downloaded script", resources)
+	}
+}
+
+func TestCollectAPIAssetJSDoesNotFollowOffOriginRedirect(t *testing.T) {
+	var redirected atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected.Store(true)
+		_, _ = w.Write([]byte("external script"))
+	}))
+	defer destination.Close()
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL+"/app.js", http.StatusFound)
+	}))
+	defer source.Close()
+
+	resources := collectAPIAssetJS(source.URL, []string{source.URL + "/app.js"}, &APICrawlOptions{})
+	if len(resources) != 0 || redirected.Load() {
+		t.Fatalf("off-origin redirect was followed: resources=%d redirected=%t", len(resources), redirected.Load())
+	}
+}
 
 func TestBuildAPIAssetSiteTreeIncludesTargetAndDiscoveredURLs(t *testing.T) {
 	tree := buildAPIAssetSiteTree("https://example.test/app/#/home", []string{
